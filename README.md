@@ -1,6 +1,8 @@
 # Blackcat Darkmesh Web (Admin Console & Site Builder)
 [![Project: Blackcat Mesh Nexus](https://img.shields.io/badge/Project-Blackcat%20Mesh%20Nexus-000?logo=github)](https://github.com/users/Vito416/projects/2) [![CI](https://github.com/Vito416/blackcat-darkmesh-web/actions/workflows/ci.yml/badge.svg)](https://github.com/Vito416/blackcat-darkmesh-web/actions/workflows/ci.yml)
 
+![Web Banner](.github/blackcat-darkmesh-web-banner.jpg)
+
 Purpose
 - Admin-facing console to build and operate a site/eshop.
 - Maintains an offline-first sensitive database (PII) synced on demand from the Worker inbox (Cloudflare).
