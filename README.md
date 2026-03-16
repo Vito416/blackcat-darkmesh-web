@@ -1,4 +1,5 @@
 # Blackcat Darkmesh Web (Admin Console & Site Builder)
+[![Project: Blackcat Mesh Nexus](https://img.shields.io/badge/Project-Blackcat%20Mesh%20Nexus-000?logo=github)](https://github.com/users/Vito416/projects/2)
 
 Purpose
 - Admin-facing console to build and operate a site/eshop.
