@@ -1,0 +1,14 @@
+{
+  "name": "blackcat-darkmesh-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "cli": "tsx cli/index.ts"
+  },
+  "devDependencies": {
+    "commander": "^11.1.0",
+    "node-fetch": "^3.3.2",
+    "tsx": "^4.7.0"
+  }
+}

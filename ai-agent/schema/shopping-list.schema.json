@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DarkmeshShoppingList",
+  "type": "object",
+  "required": ["modules"],
+  "properties": {
+    "modules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "reason", "action"],
+        "properties": {
+          "name": { "type": "string", "maxLength": 64 },
+          "reason": { "type": "string", "maxLength": 240 },
+          "action": { "type": "string", "maxLength": 240 }
+        },
+        "additionalProperties": false
+      },
+      "minItems": 1
+    },
+    "notes": {
+      "type": "array",
+      "items": { "type": "string", "maxLength": 120 },
+      "maxItems": 10
+    }
+  },
+  "additionalProperties": false
+}

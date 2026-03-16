@@ -1,0 +1,18 @@
+# PHP/composer/node
+vendor/
+node_modules/
+dist/
+coverage/
+
+# Env/secrets
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cache
+.phpunit.result.cache
+.cache/
