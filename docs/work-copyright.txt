@@ -1,27 +1,15 @@
-      ####                                
-     ######                              ██╗    ██╗███████╗██╗      ██████╗ ██████╗ ███╗   ███╗███████╗     
-    #########                            ██║    ██║██╔════╝██║     ██╔════╝██╔═══██╗████╗ ████║██╔════╝ 
-   ##########         ##                 ██║ █╗ ██║█████╗  ██║     ██║     ██║   ██║██╔████╔██║█████╗   
-   ###########      ####                 ██║███╗██║██╔══╝  ██║     ██║     ██║   ██║██║╚██╔╝██║██╔══╝   
-###############   ######                 ╚███╔███╔╝███████╗███████╗╚██████╗╚██████╔╝██║ ╚═╝ ██║███████╗
-###########  ##  #######                  ╚══╝╚══╝ ╚══════╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝     ╚═╝╚══════╝ 
-#########    ### #######                  
-#########     ###  ####                   ██╗  ██╗███████╗██████╗  ██████╗ ██╗ ██████╗███████╗ 
-###########    ##    ##                   ██║  ██║██╔════╝██╔══██╗██╔═══██╗██║██╔════╝██╔════╝ 
-##########                #               ███████║█████╗  ██████╔╝██║   ██║██║██║     ███████╗ 
-#######                     ##            ██╔══██║██╔══╝  ██╔══██╗██║   ██║██║██║     ╚════██║ 
-##                            ##          ██║  ██║███████╗██║  ██║╚██████╔╝██║╚██████╗███████║ 
-######              #######    ##         ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝ ╚═════╝╚══════╝ 
-#####            #######  ##   ##       ┌────────────────────────────────────────────────────────────────────────────┐  
-#####               ####  ##    #         BLACK CAT DATABASE • Arcane Custody Notice                                 │
-########             #######    ##        © 2025 Black Cat Academy s. r. o. • All paws reserved.                     │
-####                        #     ##      Licensed strictly under the BlackCat Database Proprietary License v1.0.    │
-##########                          ##    Evaluation only; commercial rites demand written consent.                  │
-####           ######  #        ######    Unauthorized forks or tampering awaken enforcement claws.                  │
-#####               ##  ##          ##    Reverse engineering, sublicensing, or origin stripping is forbidden.       │
-##########   ###  #### ####        #      Liability for lost data, profits, or familiars remains with the summoner.  │
-##                 ##  ##       ####      Infringements trigger termination; contact blackcatacademy@protonmail.com. │
-###########      ##   # #   ######        Leave this sigil intact—smudging whiskers invites spectral audits.         │
-#########       #   ##          ##        Governed under the laws of the Slovak Republic.                            │
-##############                ###         Motto: “Purr, Persist, Prevail.”                                           │
-#############    ###############       └─────────────────────────────────────────────────────────────────────────────┘
+BLACKCAT DARKMESH WEB WORK NOTICE
+
+Copyright (c) 2025 Black Cat Academy s. r. o.
+
+This repository is part of the Blackcat Covered System and is licensed under Blackcat Founder Network License 1.0 (BFNL-1.0).
+
+Authoritative licensing materials:
+- LICENSE (repository root)
+- BFNL 1.0: https://github.com/Vito416/blackcat-darkmesh-ao/blob/main/docs/BFNL-1.0.md
+- Founder Fee Policy: https://github.com/Vito416/blackcat-darkmesh-ao/blob/main/docs/FEE_POLICY.md
+- Covered-System Notice: https://github.com/Vito416/blackcat-darkmesh-ao/blob/main/docs/LICENSING_SYSTEM_NOTICE.md
+
+Repository separation inside BLACKCAT_MESH_NEXUS exists for maintenance, auditability, safety, and delivery. It does not by itself create a separate unavoidable founder-fee or steward/development-fee event for the same ordinary covered deployment.
+
+If you redistribute this repository or substantial parts of it, preserve this notice together with the repository LICENSE file.
