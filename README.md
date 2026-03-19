@@ -67,3 +67,7 @@ Next-gen features (ideas)
 - **Template safety**: static analysis on templates (CSP hints, dependency SBOM) before publish; warn on unsafe APIs.
 - **Security keys UX**: guided key rotation, hybrid PQC option (Ed25519+Dilithium / X25519+Kyber) when browser libs allow.
 - **Minimal observability UI**: built-in dashboards for cache hit ratio, PSP retries, ingest apply errors, ForgetSubject events; exportable NDJSON for deeper analysis.
+
+## Umbrella licensing note
+
+This repository is intended to be one official component of the Blackcat `Covered System`, not a separately monetized silo. Under the planned BFNL bundle, official Blackcat repositories and future mandatory internal components are treated as one integrated licensing surface for ordinary deployment classes. Repository separation exists for maintenance, safety, and delivery, not to trigger a separate founder fee or future steward/development fee for each repository. The current draft licensing bundle lives in the `blackcat-darkmesh-ao` repository under `docs/`.
