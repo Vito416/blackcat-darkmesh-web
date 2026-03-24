@@ -1,0 +1,32 @@
+{
+  "name": "blackcat-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop shell for blackcat write (Electron + Vite + React)",
+  "main": "dist/main.cjs",
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:main\"",
+    "dev:renderer": "vite",
+    "dev:main": "cross-env NODE_ENV=development electronmon .",
+    "build": "vite build && npm run build:main",
+    "build:main": "tsc -p tsconfig.json --outDir dist && cp src/preload.js dist/preload.js || true",
+    "lint": "echo \"(lint placeholder)\""
+  },
+  "dependencies": {
+    "@permaweb/aoconnect": "^0.0.94",
+    "electron": "^28.3.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "@types/react": "^18.2.21",
+    "@types/react-dom": "^18.2.7",
+    "@vitejs/plugin-react": "^5.0.3",
+    "concurrently": "^8.2.2",
+    "cross-env": "^7.0.3",
+    "electronmon": "^2.0.3",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.8"
+  }
+}
