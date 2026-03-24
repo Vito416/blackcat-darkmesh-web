@@ -61,6 +61,13 @@ Flows (admin console)
 3) **Key publish**: Generate/rotate keypair → upload public key to Arweave + notify Gateway (for browser clients); private key stays local/offline backup.
 4) **Monitoring view**: Pull metrics JSON/OpenMetrics from Gateway (cache hit/miss, PSP breaker, webhook backlog, ingest errors) → render charts; optional thresholds with local alerts.
 
+Publish pipeline (draft)
+- Build immutable assets (layout/theme/components/entry) → upload to Arweave, capture txid + sha256.
+- Compose `PageManifest` + `AllowlistSnapshot` (see `src/manifest/models.ts`), sign, and include allowlist hash in manifest.
+- Write manifest to Arweave; optionally emit AO/gateway pointer carrying manifest txid + checksum for cache warming.
+- Refresh template catalog index through the GraphQL stub (`src/manifest/catalog.ts`) so the console can auto-load trusted templates.
+- Verify by fetching manifest + entry bundle via gateway mirrors and comparing recorded checksums.
+
 Next-gen features (ideas)
 - **Offline-first ops**: queue admin actions while offline; sync via Gateway when back online.
 - **Deterministic site builds**: reproducible bundle hash, signed manifest so Gateway can trust-deploy.

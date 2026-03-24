@@ -14,6 +14,15 @@ npm run build    # production build (renderer bundle + copy main/preload)
 npm run lint     # eslint (placeholder)
 ```
 
+### PIP worker env (renderer + main)
+
+Set these in your shell or `.env` to let the desktop hit your worker:
+
+- `WORKER_PIP_BASE` / `WORKER_BASE_URL` – base URL of the worker (e.g. `https://worker.example.com`)
+- `WORKER_PIP_TOKEN` – bearer token if required
+- `WORKER_PIP_LATEST_PATH` – override latest endpoint (defaults to `/pip/latest`)
+- Optional renderer-time aliases (`VITE_PIP_*`) match the same keys for live reload.
+
 ## TODO
 - Wire Y.js/Automerge for offline collaboration.
 - Add SQLite layer (better-sqlite3 or sql.js depending on sandbox needs).
