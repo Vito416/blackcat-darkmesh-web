@@ -1,0 +1,38 @@
+appId: com.blackcat.desktop
+productName: Blackcat Desktop
+asar: true
+compression: maximum
+
+directories:
+  output: release
+
+files:
+  - dist/**/*
+  - package.json
+  - node_modules/**/*
+
+extraMetadata:
+  main: dist/main.js
+
+mac:
+  target:
+    - dmg
+    - zip
+  category: public.app-category.productivity
+  identity: null
+  artifactName: "${productName}-${version}-mac-${arch}.${ext}"
+
+win:
+  target:
+    - nsis
+    - portable
+  artifactName: "${productName}-${version}-win-${arch}.${ext}"
+
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Utility
+  artifactName: "${productName}-${version}-linux-${arch}.${ext}"
+
+publish: never

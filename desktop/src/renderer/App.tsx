@@ -1,8 +1,10 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 
 import "./styles.css";
 import * as pipClient from "../../../src/manifest/pipClient";
 import { fetchCatalog, catalogItems as seedCatalog } from "./services/catalog";
+import { deployModule, spawnProcess } from "./services/aoDeploy";
+import { runHealthChecks, type HealthStatus } from "./services/health";
 import { fetchManifestDocument } from "./services/manifestFetch";
 import {
   CatalogItem,
@@ -11,7 +13,15 @@ import {
   ManifestNode,
   ManifestShape,
 } from "./types/manifest";
-import { deleteDraft, getDraft, listDrafts, saveDraft } from "./storage/drafts";
+import ManifestRenderer from "./components/ManifestRenderer";
+import {
+  deleteDraft,
+  exportDraftsToJson,
+  getDraft,
+  importDraftsFromJson,
+  listDrafts,
+  saveDraft,
+} from "./storage/drafts";
 
 const randomId = () => crypto.randomUUID?.() ?? Math.random().toString(36).slice(2, 10);
 
@@ -42,10 +52,47 @@ const fromCatalog = (item: CatalogItem): ManifestNode => ({
 });
 
 const formatDate = (iso?: string) => (iso ? new Date(iso).toLocaleString() : "—");
+const formatTime = (iso?: string) =>
+  iso
+    ? new Date(iso).toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
+    : "—";
+
+const formatHost = (value?: string) => {
+  if (!value) return "";
+  try {
+    return new URL(value).host;
+  } catch {
+    return value.replace(/^https?:\/\//, "");
+  }
+};
 
 interface PipPayload {
   manifestTx: string;
   [key: string]: unknown;
+}
+
+type WalletBridgeResult = {
+  path?: string;
+  jwk?: Record<string, unknown>;
+  error?: string;
+  canceled?: boolean;
+};
+
+type FileBridgeResult = {
+  path?: string;
+  content?: string;
+  error?: string;
+  canceled?: boolean;
+};
+
+declare global {
+  interface Window {
+    desktop?: {
+      selectWallet: () => Promise<WalletBridgeResult>;
+      pickModuleFile: () => Promise<FileBridgeResult>;
+      readTextFile: (path: string) => Promise<FileBridgeResult>;
+    };
+  }
 }
 
 const normalizeManifest = (doc: ManifestDocument): ManifestDocument => {
@@ -66,6 +113,46 @@ const normalizeManifest = (doc: ManifestDocument): ManifestDocument => {
   };
 };
 
+const findNodeById = (nodes: ManifestNode[], id: string | null): ManifestNode | null => {
+  if (!id) return null;
+  for (const node of nodes) {
+    if (node.id === id) return node;
+    const match = node.children ? findNodeById(node.children, id) : null;
+    if (match) return match;
+  }
+  return null;
+};
+
+const updateNodeInTree = (
+  nodes: ManifestNode[],
+  targetId: string,
+  mutate: (node: ManifestNode) => ManifestNode,
+): ManifestNode[] => {
+  let changed = false;
+
+  const updated = nodes.map((node) => {
+    const nextChildren = node.children ? updateNodeInTree(node.children, targetId, mutate) : node.children;
+    const childrenChanged = node.children ? nextChildren !== node.children : false;
+
+    if (node.id === targetId) {
+      changed = true;
+      return mutate({ ...node, children: nextChildren });
+    }
+
+    if (childrenChanged) {
+      changed = true;
+      return { ...node, children: nextChildren };
+    }
+
+    return node;
+  });
+
+  return changed ? updated : nodes;
+};
+
+const countNodes = (nodes: ManifestNode[]): number =>
+  nodes.reduce((total, node) => total + 1 + (node.children ? countNodes(node.children) : 0), 0);
+
 function App() {
   const [catalog, setCatalog] = useState<CatalogItem[]>(seedCatalog);
   const [search, setSearch] = useState("");
@@ -80,16 +167,45 @@ function App() {
   const [pip, setPip] = useState<PipPayload | null>(null);
   const [remoteError, setRemoteError] = useState<string | null>(null);
   const [loadingManifest, setLoadingManifest] = useState(false);
+  const [health, setHealth] = useState<HealthStatus[]>([]);
+  const [healthLoading, setHealthLoading] = useState(false);
+  const [walletPath, setWalletPath] = useState<string | null>(null);
+  const [walletJwk, setWalletJwk] = useState<Record<string, unknown> | null>(null);
+  const [walletNote, setWalletNote] = useState<string | null>(null);
+  const [modulePath, setModulePath] = useState("");
+  const [moduleSource, setModuleSource] = useState("");
+  const [manifestTxInput, setManifestTxInput] = useState("");
+  const [scheduler, setScheduler] = useState("");
+  const [deploying, setDeploying] = useState(false);
+  const [spawning, setSpawning] = useState(false);
+  const [deployOutcome, setDeployOutcome] = useState<string | null>(null);
+  const [spawnOutcome, setSpawnOutcome] = useState<string | null>(null);
+  const [deployedModuleTx, setDeployedModuleTx] = useState<string | null>(null);
 
   const selectedNode = useMemo(
-    () => manifest.nodes.find((node) => node.id === selectedNodeId) ?? null,
+    () => (selectedNodeId ? findNodeById(manifest.nodes, selectedNodeId) : null),
     [manifest.nodes, selectedNodeId],
   );
+  const totalNodes = useMemo(() => countNodes(manifest.nodes), [manifest.nodes]);
+
+  const refreshHealth = useCallback(async () => {
+    setHealthLoading(true);
+    try {
+      const results = await runHealthChecks();
+      setHealth(results);
+    } finally {
+      setHealthLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     fetchCatalog().then(setCatalog);
     refreshDrafts(true);
   }, []);
+
+  useEffect(() => {
+    refreshHealth();
+  }, [refreshHealth]);
 
   useEffect(() => {
     if (selectedNode) {
@@ -102,9 +218,9 @@ function App() {
 
   useEffect(() => {
     if (!selectedNodeId && manifest.nodes.length > 0) {
-      setSelectedNodeId(manifest.nodes[0].id);
+      setSelectedNodeId(manifest.entry ?? manifest.nodes[0].id);
     }
-  }, [manifest.nodes, selectedNodeId]);
+  }, [manifest.entry, manifest.nodes, selectedNodeId]);
 
   useEffect(() => {
     const tx = pip?.manifestTx?.trim();
@@ -138,6 +254,12 @@ function App() {
       cancelled = true;
     };
   }, [pip]);
+
+  useEffect(() => {
+    if (pip?.manifestTx) {
+      setManifestTxInput(pip.manifestTx);
+    }
+  }, [pip?.manifestTx]);
 
   const refreshDrafts = async (loadLatest?: boolean) => {
     const all = await listDrafts();
@@ -209,6 +331,171 @@ function App() {
     }
   };
 
+  const handlePickWallet = async () => {
+    if (!window.desktop?.selectWallet) {
+      setWalletNote("IPC wallet picker unavailable. Set AO_WALLET_JSON or AO_WALLET_PATH instead.");
+      flashStatus("IPC wallet picker unavailable");
+      return;
+    }
+
+    try {
+      const result = await window.desktop.selectWallet();
+
+      if (result?.canceled) {
+        flashStatus("Wallet selection cancelled");
+        return;
+      }
+
+      if (result?.error) {
+        setWalletNote(result.error);
+        flashStatus(result.error);
+        return;
+      }
+
+      if (result?.jwk) {
+        setWalletJwk(result.jwk);
+        setWalletPath(result.path ?? null);
+        setWalletNote(result.path ? `Loaded wallet from ${result.path}` : "Wallet JSON received from IPC");
+        flashStatus("Wallet loaded");
+        return;
+      }
+
+      if (result?.path) {
+        setWalletPath(result.path);
+        setWalletJwk(null);
+        setWalletNote("Wallet path captured; preload must provide JSON contents");
+        flashStatus("Wallet path captured");
+        return;
+      }
+
+      flashStatus("No wallet selected");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Wallet picker failed";
+      setWalletNote(message);
+      flashStatus(message);
+    }
+  };
+
+  const handleLoadModuleFromDialog = async () => {
+    if (!window.desktop?.pickModuleFile) {
+      flashStatus("IPC file picker unavailable");
+      return;
+    }
+
+    const result = await window.desktop.pickModuleFile();
+    if (result?.canceled) {
+      flashStatus("Module selection cancelled");
+      return;
+    }
+
+    if (result?.error) {
+      setDeployOutcome(result.error);
+      flashStatus(result.error);
+      return;
+    }
+
+    if (result?.path) setModulePath(result.path);
+    if (typeof result?.content === "string") setModuleSource(result.content);
+    flashStatus(result?.path ? `Loaded module from ${result.path}` : "Module loaded");
+  };
+
+  const handleLoadModuleFromPath = async () => {
+    if (!modulePath.trim()) {
+      flashStatus("Enter a module file path");
+      return;
+    }
+
+    if (!window.desktop?.readTextFile) {
+      flashStatus("IPC file reader unavailable");
+      return;
+    }
+
+    const result = await window.desktop.readTextFile(modulePath.trim());
+
+    if (result?.error) {
+      setDeployOutcome(result.error);
+      flashStatus(result.error);
+      return;
+    }
+
+    if (result?.path) setModulePath(result.path);
+    if (typeof result?.content === "string") setModuleSource(result.content);
+    flashStatus(`Loaded module from ${result?.path ?? modulePath}`);
+  };
+
+  const handleDeployModuleClick = async () => {
+    if (!moduleSource.trim()) {
+      flashStatus("Add module source before deploying");
+      return;
+    }
+
+    setDeployOutcome(null);
+    setDeploying(true);
+
+    try {
+      const response = await deployModule(walletJwk ?? walletPath ?? undefined, moduleSource);
+
+      if (response.txId) {
+        setDeployedModuleTx(response.txId);
+      }
+
+      setDeployOutcome(
+        response.note ??
+          (response.txId ? `Module deployed: ${response.txId}` : "Module deploy request sent"),
+      );
+
+      if (response.placeholder) {
+        flashStatus(response.note ?? "Deploy requires wallet access");
+      } else {
+        flashStatus(response.txId ? `Module deployed (${response.txId})` : "Module deploy complete");
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Module deploy failed";
+      setDeployOutcome(message);
+      flashStatus(message);
+    } finally {
+      setDeploying(false);
+    }
+  };
+
+  const handleSpawnProcessClick = async () => {
+    const manifestTx = manifestTxInput.trim() || pip?.manifestTx || "";
+    if (!manifestTx) {
+      flashStatus("Provide a manifestTx before spawning");
+      return;
+    }
+
+    setSpawnOutcome(null);
+    setSpawning(true);
+
+    try {
+      const response = await spawnProcess(
+        scheduler.trim() || undefined,
+        manifestTx,
+        deployedModuleTx ?? undefined,
+      );
+
+      setSpawnOutcome(
+        response.note ??
+          (response.processId ? `Spawned process: ${response.processId}` : "Spawn request sent"),
+      );
+
+      if (response.placeholder) {
+        flashStatus(response.note ?? "Spawn placeholder");
+      } else {
+        flashStatus(
+          response.processId ? `Spawned process ${response.processId}` : "Spawn request dispatched",
+        );
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Spawn failed";
+      setSpawnOutcome(message);
+      flashStatus(message);
+    } finally {
+      setSpawning(false);
+    }
+  };
+
   const handleSearchChange = async (value: string) => {
     setSearch(value);
     const result = await fetchCatalog(value);
@@ -233,7 +520,7 @@ function App() {
     setManifest((prev) =>
       touch({
         ...prev,
-        nodes: prev.nodes.map((node) => (node.id === selectedNodeId ? { ...node, title } : node)),
+        nodes: updateNodeInTree(prev.nodes, selectedNodeId, (node) => ({ ...node, title })),
       }),
     );
   };
@@ -248,7 +535,7 @@ function App() {
       setManifest((prev) =>
         touch({
           ...prev,
-          nodes: prev.nodes.map((node) => (node.id === selectedNodeId ? { ...node, props: parsed } : node)),
+          nodes: updateNodeInTree(prev.nodes, selectedNodeId, (node) => ({ ...node, props: parsed })),
         }),
       );
       setPropsError(null);
@@ -306,7 +593,7 @@ function App() {
     flashStatus("Draft removed");
   };
 
-  const handleExport = () => {
+  const handleExportManifest = () => {
     const data = JSON.stringify(manifest, null, 2);
     const blob = new Blob([data], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -316,6 +603,47 @@ function App() {
     link.click();
     URL.revokeObjectURL(url);
     flashStatus("Manifest exported");
+  };
+
+  const handleExportDrafts = async () => {
+    try {
+      const data = await exportDraftsToJson();
+      const blob = new Blob([data], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `darkmesh-drafts-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+      flashStatus(`Exported ${drafts.length} draft${drafts.length === 1 ? "" : "s"}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Draft export failed";
+      flashStatus(message);
+    }
+  };
+
+  const handleImportDrafts = () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "application/json";
+    input.onchange = async (event) => {
+      const file = (event.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+
+      try {
+        const text = await file.text();
+        const imported = await importDraftsFromJson(text);
+        await refreshDrafts();
+        flashStatus(`Imported ${imported} draft${imported === 1 ? "" : "s"}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Draft import failed";
+        flashStatus(message);
+      }
+
+      input.value = "";
+    };
+
+    input.click();
   };
 
   const flashStatus = (message: string) => {
@@ -339,46 +667,91 @@ function App() {
           </div>
         </div>
         <div className="top-actions">
-          <select
-            className="draft-select"
-            value={activeDraftId ?? ""}
-            onChange={(e) => handleLoadDraft(e.target.value)}
-            aria-label="Saved drafts"
-          >
-            <option value="">Scratch draft</option>
-            {drafts.map((draft) => (
-              <option key={draft.id} value={draft.id ?? ""}>
-                {draft.name} • {formatDate(draft.updatedAt)}
-              </option>
-            ))}
-          </select>
-          {activeDraftId && (
-            <button className="ghost" onClick={() => handleDeleteDraft(activeDraftId)} title="Delete draft">
-              Remove
+          <div className="health-card">
+            <div className="health-header">
+              <div>
+                <p className="eyebrow">Health</p>
+                <h4>Diagnostics</h4>
+              </div>
+              <button className="ghost small" onClick={refreshHealth} disabled={healthLoading}>
+                {healthLoading ? "Checking…" : "Refresh"}
+              </button>
+            </div>
+            <div className="health-list">
+              {health.length === 0 ? (
+                <p className="health-empty">No checks yet</p>
+              ) : (
+                health.map((item) => (
+                  <div key={item.id} className="health-row">
+                    <span className={`status-dot ${item.status}`} aria-hidden />
+                    <div className="health-row-content">
+                      <div className="health-row-top">
+                        <span className="health-label">{item.label}</span>
+                        <span className="health-metric">
+                          {typeof item.latencyMs === "number" ? `${item.latencyMs} ms` : "—"}
+                        </span>
+                      </div>
+                      <div className="health-detail">
+                        {item.detail ?? (item.status === "missing" ? "Not configured" : "No detail")}
+                      </div>
+                      <div className="health-meta">
+                        {item.status === "missing" ? "Set env to enable" : `Checked ${formatTime(item.checkedAt)}`}
+                        {item.url && <span className="health-url"> · {formatHost(item.url)}</span>}
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+          <div className="top-buttons">
+            <select
+              className="draft-select"
+              value={activeDraftId ?? ""}
+              onChange={(e) => handleLoadDraft(e.target.value)}
+              aria-label="Saved drafts"
+            >
+              <option value="">Scratch draft</option>
+              {drafts.map((draft) => (
+                <option key={draft.id} value={draft.id ?? ""}>
+                  {draft.name} • {formatDate(draft.updatedAt)}
+                </option>
+              ))}
+            </select>
+            {activeDraftId && (
+              <button className="ghost" onClick={() => handleDeleteDraft(activeDraftId)} title="Delete draft">
+                Remove
+              </button>
+            )}
+            <button className="ghost" onClick={handleLoadPip} disabled={loadingManifest}>
+              {loadingManifest ? "Loading manifest…" : "Load PIP"}
             </button>
-          )}
-          <button className="ghost" onClick={handleLoadPip} disabled={loadingManifest}>
-            {loadingManifest ? "Loading manifest…" : "Load PIP"}
-          </button>
-          <button className="ghost" onClick={handleFetchPipFromWorker} disabled={loadingManifest}>
-            {loadingManifest ? "…" : "Fetch PIP (worker)"}
-          </button>
-          <button
-            className="ghost"
-            onClick={() => {
-              setManifest(newManifest());
-              setActiveDraftId(null);
-              setSelectedNodeId(null);
-            }}
-          >
-            New draft
-          </button>
-          <button className="ghost" onClick={handleExport}>
-            Export JSON
-          </button>
-          <button className="primary" onClick={handleSaveDraft} disabled={saving}>
-            {saving ? "Saving…" : "Save draft"}
-          </button>
+            <button className="ghost" onClick={handleFetchPipFromWorker} disabled={loadingManifest}>
+              {loadingManifest ? "…" : "Fetch PIP (worker)"}
+            </button>
+            <button
+              className="ghost"
+              onClick={() => {
+                setManifest(newManifest());
+                setActiveDraftId(null);
+                setSelectedNodeId(null);
+              }}
+            >
+              New draft
+            </button>
+            <button className="ghost" onClick={handleImportDrafts}>
+              Import drafts
+            </button>
+            <button className="ghost" onClick={handleExportDrafts}>
+              Export drafts
+            </button>
+            <button className="ghost" onClick={handleExportManifest}>
+              Export manifest
+            </button>
+            <button className="primary" onClick={handleSaveDraft} disabled={saving}>
+              {saving ? "Saving…" : "Save draft"}
+            </button>
+          </div>
         </div>
       </header>
 
@@ -427,33 +800,16 @@ function App() {
               <p className="eyebrow">Preview</p>
               <h3>Composition</h3>
             </div>
-            <div className="pill ghost">{manifest.nodes.length} nodes</div>
+            <div className="pill ghost">
+              {totalNodes} node{totalNodes === 1 ? "" : "s"}
+            </div>
           </div>
           <div className="preview-surface">
-            {manifest.nodes.length === 0 ? (
-              <div className="empty">
-                <p>No nodes yet</p>
-                <span>Pick a block from the catalog to begin.</span>
-              </div>
-            ) : (
-              manifest.nodes.map((node) => {
-                const isSelected = node.id === selectedNodeId;
-                return (
-                  <article
-                    key={node.id}
-                    className={`preview-card ${isSelected ? "selected" : ""}`}
-                    onClick={() => setSelectedNodeId(node.id)}
-                  >
-                    <div className="card-top">
-                      <span className="pill ghost">{node.type}</span>
-                      {manifest.entry === node.id && <span className="pill accent">entry</span>}
-                    </div>
-                    <h4>{node.title}</h4>
-                    <p className="item-summary">{Object.keys(node.props ?? {}).length} prop fields</p>
-                  </article>
-                );
-              })
-            )}
+            <ManifestRenderer
+              manifest={manifest}
+              selectedId={selectedNodeId}
+              onSelect={(id) => setSelectedNodeId(id)}
+            />
           </div>
         </main>
 
@@ -497,6 +853,109 @@ function App() {
             </div>
           </div>
         </aside>
+      </div>
+
+      <div className="panel deploy">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">AO deploy</p>
+            <h3>Wallet · Module · Process</h3>
+          </div>
+          <div className="pill ghost">
+            {deployedModuleTx ? `Module tx • ${deployedModuleTx.slice(0, 10)}…` : "Awaiting module"}
+          </div>
+        </div>
+        <div className="deploy-grid">
+          <div className="stack">
+            <p className="eyebrow">Wallet</p>
+            <div className="pill ghost mono">
+              {walletPath || walletJwk ? walletPath ?? "JWK from IPC" : "No wallet selected"}
+            </div>
+            <div className="inline-actions">
+              <button className="ghost small" onClick={handlePickWallet}>
+                Pick wallet
+              </button>
+              {(walletPath || walletJwk) && (
+                <button
+                  className="ghost small"
+                  onClick={() => {
+                    setWalletPath(null);
+                    setWalletJwk(null);
+                    setWalletNote(null);
+                  }}
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <p className="subtle">
+              {walletNote ?? "IPC reads the JWK file and shares JSON with the renderer."}
+            </p>
+          </div>
+
+          <div className="stack">
+            <label className="field">
+              <span>Module path (optional)</span>
+              <input
+                placeholder="/path/to/module.js"
+                value={modulePath}
+                onChange={(e) => setModulePath(e.target.value)}
+              />
+              <div className="inline-actions">
+                <button className="ghost small" onClick={handleLoadModuleFromPath}>
+                  Load path
+                </button>
+                <button className="ghost small" onClick={handleLoadModuleFromDialog}>
+                  Browse…
+                </button>
+              </div>
+            </label>
+            <label className="field">
+              <span>Module source</span>
+              <textarea
+                rows={8}
+                value={moduleSource}
+                onChange={(e) => setModuleSource(e.target.value)}
+                placeholder="Paste AO module JavaScript"
+              />
+            </label>
+            <div className="inline-actions">
+              <button className="primary" onClick={handleDeployModuleClick} disabled={deploying}>
+                {deploying ? "Deploying…" : "Deploy module"}
+              </button>
+              {deployOutcome && <span className="pill ghost">{deployOutcome}</span>}
+            </div>
+            {deployedModuleTx && <p className="subtle mono">Latest module tx: {deployedModuleTx}</p>}
+          </div>
+
+          <div className="stack">
+            <label className="field">
+              <span>manifestTx</span>
+              <input
+                placeholder="Manifest transaction id"
+                value={manifestTxInput}
+                onChange={(e) => setManifestTxInput(e.target.value)}
+              />
+            </label>
+            <label className="field">
+              <span>Scheduler (optional)</span>
+              <input
+                placeholder="Scheduler process id"
+                value={scheduler}
+                onChange={(e) => setScheduler(e.target.value)}
+              />
+            </label>
+            <div className="inline-actions">
+              <button className="primary" onClick={handleSpawnProcessClick} disabled={spawning}>
+                {spawning ? "Spawning…" : "Spawn process"}
+              </button>
+              {spawnOutcome && <span className="pill ghost">{spawnOutcome}</span>}
+            </div>
+            {!spawnOutcome && deployedModuleTx && (
+              <p className="subtle mono">Spawn will use module tx: {deployedModuleTx}</p>
+            )}
+          </div>
+        </div>
       </div>
 
       {status && <div className="status-bar">{status}</div>}

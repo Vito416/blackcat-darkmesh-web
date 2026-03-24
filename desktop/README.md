@@ -9,10 +9,23 @@ Cross‑platform desktop shell for blackcat write:
 ## Commands (after `npm install`)
 
 ```bash
-npm run dev      # start Vite (renderer) + Electron (main) with live reload
-npm run build    # production build (renderer bundle + copy main/preload)
-npm run lint     # eslint (placeholder)
+npm run clean         # remove dist/ + release/ artifacts
+npm run dev           # start Vite (renderer) + Electron (main) with live reload
+npm run build         # production build (renderer bundle + compiled main/preload)
+npm run package       # build installer(s) for the current OS into release/
+npm run package:mac   # macOS dmg + zip (run on macOS)
+npm run package:win   # Windows nsis + portable exe (run on Windows)
+npm run package:linux # Linux AppImage + deb (run on Linux)
+npm run lint          # eslint (placeholder)
 ```
+
+### Packaging (electron-builder)
+
+- Config lives in `electron-builder.yml`; outputs land in `release/`.
+- Targets: macOS dmg + zip (unsigned by default), Windows nsis + portable, Linux AppImage + deb.
+- Builds rely on `dist/main.js` + `dist/renderer` from `npm run build`; the `clean` script wipes both build + release artifacts.
+- Run platform-specific scripts on their host OS (electron-builder requires macOS to produce dmg/zip and Windows for signed exe/msi-equivalents).
+- Unsigned builds: keep `CSC_IDENTITY_AUTO_DISCOVERY=false` to avoid code-sign prompts. If you do want signing later, export the usual `CSC_LINK` / `CSC_KEY_PASSWORD` (or Apple ID creds for notarization) before rerunning the package command.
 
 ### PIP worker env (renderer + main)
 

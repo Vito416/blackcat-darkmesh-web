@@ -1,6 +1,7 @@
 import { connect, createDataItemSigner, type Tag } from "@permaweb/aoconnect";
 
 import type { ManifestDocument } from "../types/manifest";
+import { fetchWalletFromPath } from "./wallet";
 
 type WalletSource = Record<string, unknown> | string | undefined;
 
@@ -75,9 +76,13 @@ export async function deployModule(walletOrPath: WalletSource, moduleSrc: string
   return { txId, tags: mergedTags, placeholder: false, raw };
 }
 
-export async function spawnProcess(scheduler?: string, manifestTx?: string): Promise<SpawnResponse> {
+export async function spawnProcess(
+  scheduler?: string,
+  manifestTx?: string,
+  moduleOverride?: string,
+): Promise<SpawnResponse> {
   const wallet = await resolveWallet();
-  const moduleTx = getEnv("AO_MODULE_TX") ?? getEnv("VITE_AO_MODULE_TX");
+  const moduleTx = moduleOverride?.trim() || getEnv("AO_MODULE_TX") ?? getEnv("VITE_AO_MODULE_TX");
   const mergedTags = mergeTags(
     [
       { name: "Type", value: "Process" },
@@ -156,11 +161,17 @@ async function resolveWallet(walletOrPath?: WalletSource): Promise<WalletResolut
   const path = typeof walletOrPath === "string" ? walletOrPath : getEnv("AO_WALLET_PATH");
 
   if (path) {
+    const result = await fetchWalletFromPath(path);
+
+    if (result.ok) {
+      return { ready: true, wallet: result.wallet, path: result.path, note: `Loaded wallet from ${result.path}` };
+    }
+
     return {
       ready: false,
       wallet: null,
-      path,
-      note: `Renderer cannot read ${path} yet; wire preload/IPC to supply the JWK`,
+      path: result.path ?? path,
+      note: result.error,
     };
   }
 

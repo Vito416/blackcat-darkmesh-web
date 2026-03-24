@@ -3,13 +3,21 @@
   "version": "0.1.0",
   "private": true,
   "description": "Desktop shell for blackcat write (Electron + Vite + React)",
-  "main": "dist/main.cjs",
+  "main": "dist/main.js",
   "scripts": {
+    "clean": "rimraf dist release",
+    "predev": "npm run build:main",
     "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:main\"",
     "dev:renderer": "vite",
-    "dev:main": "cross-env NODE_ENV=development electronmon .",
-    "build": "vite build && npm run build:main",
-    "build:main": "tsc -p tsconfig.json --outDir dist && cp src/preload.js dist/preload.js || true",
+    "dev:main": "concurrently -k \"npm:watch:main\" \"cross-env NODE_ENV=development electronmon .\"",
+    "watch:main": "tsc -p tsconfig.json --outDir dist --watch",
+    "build": "npm run clean && npm run build:renderer && npm run build:main",
+    "build:renderer": "vite build",
+    "build:main": "tsc -p tsconfig.json --outDir dist",
+    "package": "npm run build && electron-builder --config electron-builder.yml",
+    "package:mac": "npm run build && electron-builder --config electron-builder.yml --mac",
+    "package:win": "npm run build && electron-builder --config electron-builder.yml --win",
+    "package:linux": "npm run build && electron-builder --config electron-builder.yml --linux",
     "lint": "echo \"(lint placeholder)\""
   },
   "dependencies": {
@@ -27,6 +35,8 @@
     "concurrently": "^8.2.2",
     "cross-env": "^7.0.3",
     "electronmon": "^2.0.3",
+    "electron-builder": "^24.13.3",
+    "rimraf": "^5.0.5",
     "typescript": "^5.4.5",
     "vite": "^5.2.8"
   }
