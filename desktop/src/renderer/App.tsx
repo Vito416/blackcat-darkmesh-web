@@ -1,682 +1,513 @@
 import React, { useEffect, useMemo, useState } from "react";
+
+import "./styles.css";
 import * as pipClient from "../../../src/manifest/pipClient";
-import { catalogItems, fetchCatalog } from "./services/catalog";
+import { fetchCatalog, catalogItems as seedCatalog } from "./services/catalog";
+import { fetchManifestDocument } from "./services/manifestFetch";
 import {
-  DraftRecord,
-  deleteDraft,
-  listDrafts,
-  loadDraft,
-  saveDraft,
-} from "./storage/drafts";
-import { CatalogItem, ManifestDocument, ManifestNode } from "./types/manifest";
+  CatalogItem,
+  ManifestDocument,
+  ManifestDraft,
+  ManifestNode,
+  ManifestShape,
+} from "./types/manifest";
+import { deleteDraft, getDraft, listDrafts, saveDraft } from "./storage/drafts";
 
-const createId = () =>
-  typeof crypto !== "undefined" && crypto.randomUUID
-    ? crypto.randomUUID()
-    : Math.random().toString(36).slice(2);
+const randomId = () => crypto.randomUUID?.() ?? Math.random().toString(36).slice(2, 10);
 
-const createManifest = (): ManifestDocument => {
-  const now = new Date().toISOString();
+const touch = (doc: ManifestDocument): ManifestDocument => ({
+  ...doc,
+  metadata: { ...doc.metadata, updatedAt: new Date().toISOString() },
+});
+
+const newManifest = (): ManifestDocument => ({
+  id: `manifest-${randomId()}`,
+  name: "Untitled manifest",
+  version: "0.1.0",
+  metadata: {
+    author: "local",
+    description: "Draft manifest for Darkmesh space",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+  nodes: [],
+});
+
+const fromCatalog = (item: CatalogItem): ManifestNode => ({
+  id: `${item.id}-${randomId()}`,
+  type: item.type,
+  title: item.name,
+  props: item.defaultProps ? { ...item.defaultProps } : {},
+  children: [],
+});
+
+const formatDate = (iso?: string) => (iso ? new Date(iso).toLocaleString() : "—");
+
+interface PipPayload {
+  manifestTx: string;
+  [key: string]: unknown;
+}
+
+const normalizeManifest = (doc: ManifestDocument): ManifestDocument => {
+  const fallbackDate = new Date().toISOString();
+
   return {
-    id: createId(),
-    name: "Untitled manifest",
-    version: "0.1.0",
+    ...doc,
+    id: doc.id || `manifest-${randomId()}`,
+    name: doc.name?.trim() || "Untitled manifest",
+    version: doc.version || "0.1.0",
     metadata: {
-      createdAt: now,
-      updatedAt: now,
+      author: doc.metadata?.author,
+      description: doc.metadata?.description,
+      createdAt: doc.metadata?.createdAt ?? fallbackDate,
+      updatedAt: doc.metadata?.updatedAt ?? doc.metadata?.createdAt ?? fallbackDate,
     },
-    nodes: [],
+    nodes: Array.isArray(doc.nodes) ? doc.nodes : [],
   };
 };
 
-const styles: Record<string, React.CSSProperties> = {
-  app: {
-    height: "100vh",
-    display: "grid",
-    gridTemplateColumns: "280px 1fr 320px",
-    background: "radial-gradient(circle at 20% 20%, #1b2333, #0c0f16 65%)",
-    color: "#e7e9ef",
-    fontFamily: "Inter, 'Soehne', system-ui, -apple-system, sans-serif",
-  },
-  sidebar: {
-    borderRight: "1px solid #1f232d",
-    padding: "16px 14px",
-    display: "flex",
-    flexDirection: "column",
-    gap: 12,
-    background: "rgba(18, 22, 33, 0.85)",
-    backdropFilter: "blur(6px)",
-  },
-  middle: {
-    padding: "18px 18px 20px",
-    display: "flex",
-    flexDirection: "column",
-    gap: 14,
-  },
-  right: {
-    borderLeft: "1px solid #1f232d",
-    padding: "16px",
-    background: "#0f141f",
-    display: "flex",
-    flexDirection: "column",
-    gap: 12,
-  },
-  panelTitle: {
-    fontSize: 12,
-    letterSpacing: "0.08em",
-    textTransform: "uppercase",
-    color: "#8a94a7",
-    marginBottom: 4,
-  },
-  input: {
-    width: "100%",
-    padding: "8px 10px",
-    borderRadius: 8,
-    border: "1px solid #252c3b",
-    background: "#0c111a",
-    color: "#e7e9ef",
-    fontSize: 14,
-  },
-  smallButton: {
-    padding: "6px 10px",
-    borderRadius: 8,
-    border: "1px solid #2d3344",
-    background: "linear-gradient(135deg, #1f2735, #1a202e)",
-    color: "#e7e9ef",
-    cursor: "pointer",
-    fontWeight: 600,
-    fontSize: 13,
-  },
-  ghostButton: {
-    padding: "6px 10px",
-    borderRadius: 8,
-    border: "1px solid #293040",
-    background: "transparent",
-    color: "#9ca5b5",
-    cursor: "pointer",
-    fontSize: 13,
-  },
-  catalogCard: {
-    border: "1px solid #1f2637",
-    borderRadius: 10,
-    padding: "10px 12px",
-    background: "#0e121c",
-    boxShadow: "0 6px 18px rgba(0,0,0,0.25)",
-  },
-  tag: {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 4,
-    padding: "3px 8px",
-    borderRadius: 999,
-    background: "#1e2635",
-    color: "#aeb7c7",
-    fontSize: 11,
-  },
-  placeholder: {
-    border: "1px dashed #2d3650",
-    borderRadius: 12,
-    padding: "18px",
-    background: "rgba(18, 22, 33, 0.55)",
-    color: "#94a1b9",
-    minHeight: 180,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-};
-
-const withUpdatedAt = (manifest: ManifestDocument): ManifestDocument => ({
-  ...manifest,
-  metadata: { ...manifest.metadata, updatedAt: new Date().toISOString() },
-});
-
-const updateNode = (
-  nodes: ManifestNode[],
-  id: string,
-  updater: (node: ManifestNode) => ManifestNode,
-): ManifestNode[] =>
-  nodes.map((node) =>
-    node.id === id
-      ? updater(node)
-      : {
-          ...node,
-          children: node.children ? updateNode(node.children, id, updater) : undefined,
-        },
-  );
-
-const formatStamp = (stamp?: number | string) => {
-  if (!stamp) return "—";
-  const date = typeof stamp === "number" ? new Date(stamp) : new Date(stamp);
-  return date.toLocaleString();
-};
-
-export default function App() {
-  const [catalog, setCatalog] = useState<CatalogItem[]>(catalogItems);
-  const [catalogSearch, setCatalogSearch] = useState("");
-  const [catalogLoading, setCatalogLoading] = useState(false);
-  const [manifest, setManifest] = useState<ManifestDocument>(() => createManifest());
+function App() {
+  const [catalog, setCatalog] = useState<CatalogItem[]>(seedCatalog);
+  const [search, setSearch] = useState("");
+  const [manifest, setManifest] = useState<ManifestDocument>(() => newManifest());
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [propsEditor, setPropsEditor] = useState<string>("{}");
-  const [draftName, setDraftName] = useState("Untitled draft");
-  const [drafts, setDrafts] = useState<DraftRecord[]>([]);
+  const [propsDraft, setPropsDraft] = useState("");
+  const [propsError, setPropsError] = useState<string | null>(null);
+  const [drafts, setDrafts] = useState<ManifestDraft[]>([]);
+  const [activeDraftId, setActiveDraftId] = useState<number | null>(null);
   const [status, setStatus] = useState<string | null>(null);
-  const env = typeof import.meta !== "undefined" ? (import.meta as any).env ?? {} : {};
-  const [pipTenant, setPipTenant] = useState<string>(env.VITE_PIP_TENANT ?? "");
-  const [pipSite, setPipSite] = useState<string>(env.VITE_PIP_SITE ?? "");
-  const [pipSubject, setPipSubject] = useState<string>(env.VITE_PIP_SUBJECT ?? "");
-  const [pipNonce, setPipNonce] = useState<string>(env.VITE_PIP_NONCE ?? "");
-  const [pipBaseUrl, setPipBaseUrl] = useState<string>(
-    env.VITE_PIP_BASE ?? env.VITE_WORKER_PIP_BASE ?? env.VITE_WORKER_BASE_URL ?? "",
+  const [saving, setSaving] = useState(false);
+  const [pip, setPip] = useState<PipPayload | null>(null);
+  const [remoteError, setRemoteError] = useState<string | null>(null);
+  const [loadingManifest, setLoadingManifest] = useState(false);
+
+  const selectedNode = useMemo(
+    () => manifest.nodes.find((node) => node.id === selectedNodeId) ?? null,
+    [manifest.nodes, selectedNodeId],
   );
-  const [pipToken, setPipToken] = useState<string>(env.VITE_PIP_TOKEN ?? "");
-  const [pipLatestPath, setPipLatestPath] = useState<string>(env.VITE_PIP_LATEST_PATH ?? "");
-  const [pipLoading, setPipLoading] = useState(false);
-
-  const selectedNode = useMemo(() => {
-    const match = manifest.nodes.find((node) => node.id === selectedNodeId);
-    return match ?? manifest.nodes[0] ?? null;
-  }, [manifest.nodes, selectedNodeId]);
 
   useEffect(() => {
-    const handle = setTimeout(() => {
-      refreshCatalog(catalogSearch);
-    }, 160);
-    return () => clearTimeout(handle);
-  }, [catalogSearch]);
-
-  useEffect(() => {
-    refreshDrafts();
+    fetchCatalog().then(setCatalog);
+    refreshDrafts(true);
   }, []);
 
   useEffect(() => {
     if (selectedNode) {
-      setPropsEditor(JSON.stringify(selectedNode.props, null, 2));
+      setPropsDraft(JSON.stringify(selectedNode.props ?? {}, null, 2));
+      setPropsError(null);
     } else {
-      setPropsEditor("{}");
+      setPropsDraft("");
     }
   }, [selectedNode]);
 
-  const refreshCatalog = async (query?: string) => {
-    setCatalogLoading(true);
-    const items = await fetchCatalog(query);
-    setCatalog(items);
-    setCatalogLoading(false);
-  };
+  useEffect(() => {
+    if (!selectedNodeId && manifest.nodes.length > 0) {
+      setSelectedNodeId(manifest.nodes[0].id);
+    }
+  }, [manifest.nodes, selectedNodeId]);
 
-  const refreshDrafts = async () => {
-    const items = await listDrafts();
-    setDrafts(items);
-  };
+  useEffect(() => {
+    const tx = pip?.manifestTx?.trim();
+    if (!tx) return;
 
-  const handleAddBlock = (item: CatalogItem) => {
-    const node: ManifestNode = {
-      id: createId(),
-      type: item.type,
-      title: item.name,
-      props: item.defaultProps ?? {},
+    let cancelled = false;
+    setLoadingManifest(true);
+    setRemoteError(null);
+    flashStatus("Fetching manifest…");
+
+    fetchManifestDocument(tx)
+      .then((doc) => {
+        if (cancelled) return;
+        const normalized = normalizeManifest(doc);
+        setManifest(normalized);
+        setActiveDraftId(null);
+        setSelectedNodeId(normalized.entry ?? normalized.nodes[0]?.id ?? null);
+        flashStatus("Manifest loaded from gateway");
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        const message = err instanceof Error ? err.message : "Unable to fetch manifest";
+        setRemoteError(message);
+        flashStatus(`Manifest fetch failed: ${message}`);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingManifest(false);
+      });
+
+    return () => {
+      cancelled = true;
     };
+  }, [pip]);
 
-    setManifest((prev) => withUpdatedAt({ ...prev, nodes: [...prev.nodes, node] }));
-    setSelectedNodeId(node.id);
-    setStatus(`Added "${item.name}" to canvas`);
-  };
+  const refreshDrafts = async (loadLatest?: boolean) => {
+    const all = await listDrafts();
+    setDrafts(all);
 
-  const handlePropsApply = () => {
-    if (!selectedNode) return;
-    try {
-      const parsed = JSON.parse(propsEditor);
-      setManifest((prev) =>
-        withUpdatedAt({
-          ...prev,
-          nodes: updateNode(prev.nodes, selectedNode.id, (node) => ({
-            ...node,
-            props: parsed,
-          })),
-        }),
-      );
-      setStatus("Props updated");
-    } catch (err) {
-      setStatus("Props JSON is invalid");
+    if (loadLatest && all.length) {
+      const latest = all[0];
+      setManifest(latest.document);
+      setActiveDraftId(latest.id ?? null);
+      setSelectedNodeId(latest.document.entry ?? latest.document.nodes[0]?.id ?? null);
+      flashStatus("Loaded latest draft");
     }
   };
 
-  const handleExport = () => {
-    const slug = (manifest.name || "manifest").toLowerCase().replace(/\s+/g, "-");
-    const blob = new Blob([JSON.stringify(manifest, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `${slug || "manifest"}.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-    setStatus("Manifest exported as JSON");
+  const handleLoadPip = () => {
+    const raw = window.prompt("Paste PIP JSON (must include manifestTx) or a manifest txid");
+    if (!raw) return;
+
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+
+    try {
+      const parsed = trimmed.startsWith("{")
+        ? (JSON.parse(trimmed) as PipPayload)
+        : ({ manifestTx: trimmed } as PipPayload);
+
+      if (!parsed.manifestTx || typeof parsed.manifestTx !== "string") {
+        throw new Error("PIP missing manifestTx");
+      }
+
+      setPip(parsed);
+      setRemoteError(null);
+      flashStatus("PIP loaded");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unable to parse PIP";
+      setRemoteError(message);
+      flashStatus(`PIP load failed: ${message}`);
+    }
+  };
+
+  const handleFetchPipFromWorker = async () => {
+    try {
+      const tenant = window.prompt("Tenant for latest PIP:")?.trim() || "";
+      const site = window.prompt("Site for latest PIP:")?.trim() || "";
+      const subject = window.prompt("Subject (optional, for inbox fetch):")?.trim() || "";
+      const nonce = subject ? window.prompt("Nonce (required if subject set):")?.trim() || "" : "";
+
+      if (!tenant && !(subject && nonce)) {
+        flashStatus("Provide tenant/site or subject+nonce");
+        return;
+      }
+
+      setLoadingManifest(true);
+      setRemoteError(null);
+      flashStatus("Fetching PIP from worker…");
+
+      const pip = subject && nonce
+        ? await pipClient.fetchPip(subject, nonce)
+        : await pipClient.getLatestPip(tenant, site);
+
+      setPip(pip as PipPayload);
+      flashStatus(`PIP loaded (${pip.manifestTx})`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to fetch PIP";
+      setRemoteError(message);
+      flashStatus(message);
+    } finally {
+      setLoadingManifest(false);
+    }
+  };
+
+  const handleSearchChange = async (value: string) => {
+    setSearch(value);
+    const result = await fetchCatalog(value);
+    setCatalog(result);
+  };
+
+  const addFromCatalog = (item: CatalogItem) => {
+    const node = fromCatalog(item);
+    setManifest((prev) =>
+      touch({
+        ...prev,
+        entry: prev.entry ?? node.id,
+        nodes: [...prev.nodes, node],
+      }),
+    );
+    setSelectedNodeId(node.id);
+    flashStatus(`${item.name} added to manifest`);
+  };
+
+  const updateNodeTitle = (title: string) => {
+    if (!selectedNodeId) return;
+    setManifest((prev) =>
+      touch({
+        ...prev,
+        nodes: prev.nodes.map((node) => (node.id === selectedNodeId ? { ...node, title } : node)),
+      }),
+    );
+  };
+
+  const applyProps = () => {
+    if (!selectedNodeId) return;
+    try {
+      const parsed = propsDraft.trim() ? (JSON.parse(propsDraft) as ManifestShape) : {};
+      if (typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("Props must be an object");
+      }
+      setManifest((prev) =>
+        touch({
+          ...prev,
+          nodes: prev.nodes.map((node) => (node.id === selectedNodeId ? { ...node, props: parsed } : node)),
+        }),
+      );
+      setPropsError(null);
+      flashStatus("Props updated");
+    } catch (err) {
+      setPropsError(err instanceof Error ? err.message : "Unable to parse props JSON");
+    }
+  };
+
+  const handleManifestName = (value: string) => {
+    setManifest((prev) => touch({ ...prev, name: value || "Untitled manifest" }));
   };
 
   const handleSaveDraft = async () => {
-    const saved = await saveDraft({
-      id: manifest.id,
-      name: draftName || manifest.name,
-      updatedAt: Date.now(),
-      manifest,
+    setSaving(true);
+    const doc = touch(manifest);
+    setManifest(doc);
+    const id = await saveDraft({
+      id: activeDraftId ?? undefined,
+      name: doc.name,
+      document: doc,
+      createdAt: manifest.metadata.createdAt,
     });
-    setStatus(`Draft saved @ ${formatStamp(saved.updatedAt)}`);
-    refreshDrafts();
+    setActiveDraftId(id);
+    await refreshDrafts();
+    flashStatus("Draft saved to IndexedDB");
+    setSaving(false);
   };
 
-  const handleLoadDraft = async (id: string) => {
-    const record = await loadDraft(id);
-    if (!record) {
-      setStatus("Draft not found");
+  const handleLoadDraft = async (value: string) => {
+    if (!value) {
+      setActiveDraftId(null);
+      setManifest(newManifest());
+      setSelectedNodeId(null);
       return;
     }
-    setManifest(record.manifest);
-    setDraftName(record.name);
-    setSelectedNodeId(record.manifest.nodes[0]?.id ?? null);
-    setStatus(`Loaded draft "${record.name}"`);
+    const id = Number(value);
+    const draft = await getDraft(id);
+    if (draft) {
+      setManifest(draft.document);
+      setActiveDraftId(id);
+      setSelectedNodeId(draft.document.entry ?? draft.document.nodes[0]?.id ?? null);
+      flashStatus("Draft loaded");
+    }
   };
 
-  const handleDeleteDraft = async (id: string) => {
+  const handleDeleteDraft = async (id: number) => {
     await deleteDraft(id);
-    if (manifest.id === id) {
-      const fresh = createManifest();
-      setManifest(fresh);
+    if (id === activeDraftId) {
+      setActiveDraftId(null);
+      setManifest(newManifest());
       setSelectedNodeId(null);
-      setDraftName("Untitled draft");
     }
     refreshDrafts();
-    setStatus("Draft removed");
+    flashStatus("Draft removed");
   };
 
-  const handleNewManifest = () => {
-    const fresh = createManifest();
-    setManifest(fresh);
-    setSelectedNodeId(null);
-    setDraftName("Untitled draft");
-    setStatus("New manifest created");
+  const handleExport = () => {
+    const data = JSON.stringify(manifest, null, 2);
+    const blob = new Blob([data], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${manifest.name || "manifest"}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    flashStatus("Manifest exported");
   };
 
-  const handleLoadFromPip = async () => {
-    setPipLoading(true);
-    setStatus("Fetching PIP document...");
-
-    try {
-      const options: Record<string, unknown> = {};
-      if (pipBaseUrl) options.baseUrl = pipBaseUrl;
-      if (pipToken) options.token = pipToken;
-      if (pipLatestPath) options.latestPath = pipLatestPath;
-      let pip;
-      const hasInboxParams = pipSubject.trim() && pipNonce.trim();
-
-      if (hasInboxParams) {
-        pip = await pipClient.fetchPip(pipSubject.trim(), pipNonce.trim(), options as any);
-      } else {
-        if (!pipTenant.trim() || !pipSite.trim()) {
-          throw new Error("Provide tenant and site before loading latest PIP");
-        }
-        pip = await pipClient.getLatestPip(pipTenant.trim(), pipSite.trim(), options as any);
-      }
-
-      setManifest((prev) =>
-        withUpdatedAt({
-          ...prev,
-          name:
-            prev.name === "Untitled manifest"
-              ? `PIP ${pip.manifestTx ?? "manifest"}`
-              : prev.name,
-          metadata: {
-            ...prev.metadata,
-            description: `PIP for ${pip.tenant ?? pipTenant}/${pip.site ?? pipSite}`,
-          },
-        }),
-      );
-
-      setStatus(
-        `PIP loaded for ${pip.tenant ?? pipTenant}/${pip.site ?? pipSite} · manifestTx ${pip.manifestTx}`,
-      );
-    } catch (err: any) {
-      setStatus(err?.message ?? "Failed to load PIP");
-    } finally {
-      setPipLoading(false);
-    }
+  const flashStatus = (message: string) => {
+    setStatus(message);
+    window.setTimeout(() => setStatus(null), 1800);
   };
 
   return (
-    <div style={styles.app}>
-      <aside style={styles.sidebar}>
-        <div>
-          <div style={styles.panelTitle}>Catalog</div>
-          <input
-            style={styles.input}
-            placeholder="Search blocks or tags"
-            value={catalogSearch}
-            onChange={(e) => setCatalogSearch(e.target.value)}
-          />
+    <div className="app-shell">
+      <header className="top-bar">
+        <div className="brand">
+          <div className="brand-dot" />
+          <div>
+            <p className="eyebrow">Darkmesh editor</p>
+            <input
+              className="title-input"
+              value={manifest.name}
+              onChange={(e) => handleManifestName(e.target.value)}
+              aria-label="Manifest name"
+            />
+          </div>
         </div>
-
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <button style={styles.smallButton} onClick={() => refreshCatalog(catalogSearch)}>
-            {catalogLoading ? "Refreshing..." : "Refresh"}
+        <div className="top-actions">
+          <select
+            className="draft-select"
+            value={activeDraftId ?? ""}
+            onChange={(e) => handleLoadDraft(e.target.value)}
+            aria-label="Saved drafts"
+          >
+            <option value="">Scratch draft</option>
+            {drafts.map((draft) => (
+              <option key={draft.id} value={draft.id ?? ""}>
+                {draft.name} • {formatDate(draft.updatedAt)}
+              </option>
+            ))}
+          </select>
+          {activeDraftId && (
+            <button className="ghost" onClick={() => handleDeleteDraft(activeDraftId)} title="Delete draft">
+              Remove
+            </button>
+          )}
+          <button className="ghost" onClick={handleLoadPip} disabled={loadingManifest}>
+            {loadingManifest ? "Loading manifest…" : "Load PIP"}
           </button>
-          <span style={{ color: "#7c8699", fontSize: 12 }}>
-            Fake service ({catalog.length} blocks)
-          </span>
+          <button className="ghost" onClick={handleFetchPipFromWorker} disabled={loadingManifest}>
+            {loadingManifest ? "…" : "Fetch PIP (worker)"}
+          </button>
+          <button
+            className="ghost"
+            onClick={() => {
+              setManifest(newManifest());
+              setActiveDraftId(null);
+              setSelectedNodeId(null);
+            }}
+          >
+            New draft
+          </button>
+          <button className="ghost" onClick={handleExport}>
+            Export JSON
+          </button>
+          <button className="primary" onClick={handleSaveDraft} disabled={saving}>
+            {saving ? "Saving…" : "Save draft"}
+          </button>
         </div>
+      </header>
 
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 8,
-            overflowY: "auto",
-          }}
-        >
-          {catalog.map((item) => (
-            <div key={item.id} style={styles.catalogCard}>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+      <div className="panels">
+        <aside className="panel catalog">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">Catalog</p>
+              <h3>Blocks</h3>
+            </div>
+            <span className="pill">{catalog.length}</span>
+          </div>
+          <div className="input-wrap">
+            <input
+              placeholder="Search blocks"
+              value={search}
+              onChange={(e) => handleSearchChange(e.target.value)}
+            />
+          </div>
+          <div className="catalog-list">
+            {catalog.map((item) => (
+              <div key={item.id} className="catalog-item">
                 <div>
-                  <div style={{ fontWeight: 700 }}>{item.name}</div>
-                  <div style={{ color: "#94a1b9", fontSize: 13 }}>{item.summary}</div>
+                  <div className="item-title">{item.name}</div>
+                  <p className="item-summary">{item.summary}</p>
+                  <div className="tags">
+                    <span className="pill ghost">{item.type}</span>
+                    {item.tags?.map((tag) => (
+                      <span key={tag} className="pill ghost">
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
                 </div>
-                <button style={styles.smallButton} onClick={() => handleAddBlock(item)}>
+                <button className="primary small" onClick={() => addFromCatalog(item)}>
                   Add
                 </button>
               </div>
-              <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
-                {item.tags?.map((tag) => (
-                  <span key={tag} style={styles.tag}>
-                    #{tag}
-                  </span>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <div style={{ marginTop: "auto", paddingTop: 6, borderTop: "1px solid #1f2637" }}>
-          <div style={styles.panelTitle}>Drafts (IndexedDB)</div>
-          <input
-            style={styles.input}
-            value={draftName}
-            onChange={(e) => setDraftName(e.target.value)}
-            placeholder="Draft name"
-          />
-          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-            <button style={styles.smallButton} onClick={handleSaveDraft}>
-              Save draft
-            </button>
-            <button style={styles.ghostButton} onClick={handleNewManifest}>
-              New
-            </button>
-          </div>
-          <div
-            style={{
-              marginTop: 10,
-              display: "flex",
-              flexDirection: "column",
-              gap: 6,
-              maxHeight: 160,
-              overflowY: "auto",
-            }}
-          >
-            {drafts.length === 0 && (
-              <div style={{ color: "#6f7a8f", fontSize: 13 }}>No drafts yet</div>
-            )}
-            {drafts.map((draft) => (
-              <div
-                key={draft.id}
-                style={{
-                  border: "1px solid #1f2637",
-                  borderRadius: 10,
-                  padding: "8px 10px",
-                  background: draft.id === manifest.id ? "#141b29" : "transparent",
-                  display: "flex",
-                  justifyContent: "space-between",
-                  gap: 8,
-                  alignItems: "center",
-                }}
-              >
-                <div>
-                  <div style={{ fontWeight: 600 }}>{draft.name}</div>
-                  <div style={{ color: "#7b879b", fontSize: 12 }}>
-                    {formatStamp(draft.updatedAt)}
-                  </div>
-                </div>
-                <div style={{ display: "flex", gap: 6 }}>
-                  <button style={styles.smallButton} onClick={() => handleLoadDraft(draft.id)}>
-                    Load
-                  </button>
-                  <button style={styles.ghostButton} onClick={() => handleDeleteDraft(draft.id)}>
-                    ×
-                  </button>
-                </div>
-              </div>
             ))}
           </div>
-        </div>
-      </aside>
+        </aside>
 
-      <main style={styles.middle}>
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            gap: 12,
-          }}
-        >
-          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-            <input
-              style={{ ...styles.input, width: 240 }}
-              value={manifest.name}
-              onChange={(e) =>
-                setManifest((prev) => withUpdatedAt({ ...prev, name: e.target.value }))
-              }
-              placeholder="Manifest name"
-            />
-            <span style={{ color: "#7c8699", fontSize: 13 }}>
-              v{manifest.version} · updated {formatStamp(manifest.metadata.updatedAt)}
-            </span>
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button style={styles.smallButton} onClick={handleExport}>
-              Export JSON
-            </button>
-          </div>
-        </div>
-
-        <div
-          style={{
-            border: "1px solid #1f2637",
-            borderRadius: 12,
-            padding: 12,
-            background: "#0d111a",
-            display: "grid",
-            gap: 10,
-          }}
-        >
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div style={styles.panelTitle}>Load from PIP</div>
-            <button style={styles.smallButton} onClick={handleLoadFromPip} disabled={pipLoading}>
-              {pipLoading ? "Loading..." : "Load from PIP"}
-            </button>
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 8 }}>
-            <input
-              style={styles.input}
-              placeholder="Tenant"
-              value={pipTenant}
-              onChange={(e) => setPipTenant(e.target.value)}
-            />
-            <input
-              style={styles.input}
-              placeholder="Site"
-              value={pipSite}
-              onChange={(e) => setPipSite(e.target.value)}
-            />
-            <input
-              style={styles.input}
-              placeholder="Subject (optional)"
-              value={pipSubject}
-              onChange={(e) => setPipSubject(e.target.value)}
-            />
-            <input
-              style={styles.input}
-              placeholder="Nonce (optional)"
-              value={pipNonce}
-              onChange={(e) => setPipNonce(e.target.value)}
-            />
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 8 }}>
-            <input
-              style={styles.input}
-              placeholder="Worker base URL"
-              value={pipBaseUrl}
-              onChange={(e) => setPipBaseUrl(e.target.value)}
-            />
-            <input
-              style={styles.input}
-              placeholder="Token (Bearer, optional)"
-              value={pipToken}
-              onChange={(e) => setPipToken(e.target.value)}
-            />
-            <input
-              style={styles.input}
-              placeholder="Latest path (optional, defaults to /pip/latest)"
-              value={pipLatestPath}
-              onChange={(e) => setPipLatestPath(e.target.value)}
-            />
-          </div>
-          <div style={{ color: "#6f7a8f", fontSize: 12 }}>
-            Uses shared pipClient (fetchPip when subject+nonce provided, otherwise getLatestPip).
-            Does not fetch manifest JSON yet; shows manifestTx for manual retrieval.
-          </div>
-        </div>
-
-        <div
-          style={{
-            border: "1px solid #1f2637",
-            borderRadius: 12,
-            padding: 14,
-            background: "rgba(12, 16, 24, 0.75)",
-            display: "flex",
-            gap: 14,
-            flex: 1,
-            minHeight: 320,
-          }}
-        >
-          <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
-            <div style={styles.panelTitle}>Preview placeholder</div>
-            <div style={styles.placeholder}>
-              <div style={{ textAlign: "center" }}>
-                <div style={{ fontWeight: 700, marginBottom: 6 }}>Canvas preview</div>
-                <div style={{ color: "#7c8699", maxWidth: 480 }}>
-                  Blocks you add will appear here. Swap in the real renderer once the manifest
-                  schema is finalized.
-                </div>
-              </div>
-            </div>
-
+        <main className="panel preview">
+          <div className="panel-header">
             <div>
-              <div style={styles.panelTitle}>Manifest nodes</div>
-              {manifest.nodes.length === 0 && (
-                <div
-                  style={{ ...styles.placeholder, justifyContent: "flex-start", minHeight: 90 }}
-                >
-                  Start by adding blocks from the catalog.
-                </div>
-              )}
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {manifest.nodes.map((node, idx) => (
-                  <button
-                    key={node.id}
-                    onClick={() => setSelectedNodeId(node.id)}
-                    style={{
-                      textAlign: "left",
-                      padding: "10px 12px",
-                      borderRadius: 10,
-                      border:
-                        node.id === selectedNode?.id ? "1px solid #3b82f6" : "1px solid #1f2637",
-                      background:
-                        node.id === selectedNode?.id ? "rgba(59,130,246,0.08)" : "#0d121a",
-                      color: "#e7e9ef",
-                      cursor: "pointer",
-                    }}
-                  >
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                      }}
-                    >
-                      <div style={{ fontWeight: 700 }}>
-                        {idx + 1}. {node.title}
-                      </div>
-                      <span style={styles.tag}>{node.type}</span>
-                    </div>
-                    <div style={{ color: "#8fa0b8", fontSize: 13, marginTop: 4 }}>
-                      {Object.keys(node.props || {}).length} props
-                    </div>
-                  </button>
-                ))}
+              <p className="eyebrow">Preview</p>
+              <h3>Composition</h3>
+            </div>
+            <div className="pill ghost">{manifest.nodes.length} nodes</div>
+          </div>
+          <div className="preview-surface">
+            {manifest.nodes.length === 0 ? (
+              <div className="empty">
+                <p>No nodes yet</p>
+                <span>Pick a block from the catalog to begin.</span>
               </div>
+            ) : (
+              manifest.nodes.map((node) => {
+                const isSelected = node.id === selectedNodeId;
+                return (
+                  <article
+                    key={node.id}
+                    className={`preview-card ${isSelected ? "selected" : ""}`}
+                    onClick={() => setSelectedNodeId(node.id)}
+                  >
+                    <div className="card-top">
+                      <span className="pill ghost">{node.type}</span>
+                      {manifest.entry === node.id && <span className="pill accent">entry</span>}
+                    </div>
+                    <h4>{node.title}</h4>
+                    <p className="item-summary">{Object.keys(node.props ?? {}).length} prop fields</p>
+                  </article>
+                );
+              })
+            )}
+          </div>
+        </main>
+
+        <aside className="panel props">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">Inspector</p>
+              <h3>Properties</h3>
             </div>
           </div>
-        </div>
-
-        {status && (
-          <div
-            style={{
-              border: "1px solid #1f2637",
-              borderRadius: 10,
-              padding: "8px 10px",
-              color: "#9fb0c7",
-              fontSize: 13,
-              background: "#0f141d",
-            }}
-          >
-            {status}
+          {!selectedNode ? (
+            <div className="empty">
+              <p>No node selected</p>
+              <span>Click a block in the preview to edit props.</span>
+            </div>
+          ) : (
+            <div className="props-body">
+              <label className="field">
+                <span>Title</span>
+                <input value={selectedNode.title} onChange={(e) => updateNodeTitle(e.target.value)} />
+              </label>
+              <label className="field">
+                <span>Props JSON</span>
+                <textarea rows={10} value={propsDraft} onChange={(e) => setPropsDraft(e.target.value)} />
+                {propsError ? <p className="error">{propsError}</p> : <p className="hint">Edit as JSON</p>}
+              </label>
+              <button className="primary" onClick={applyProps}>
+                Apply props
+              </button>
+            </div>
+          )}
+          <div className="divider" />
+          <div className="meta">
+            <div>
+              <p className="eyebrow">Updated</p>
+              <p>{formatDate(manifest.metadata.updatedAt)}</p>
+            </div>
+            <div>
+              <p className="eyebrow">Created</p>
+              <p>{formatDate(manifest.metadata.createdAt)}</p>
+            </div>
           </div>
-        )}
-      </main>
+        </aside>
+      </div>
 
-      <aside style={styles.right}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div style={styles.panelTitle}>Props</div>
-          <span style={{ color: "#7c8699", fontSize: 12 }}>
-            {selectedNode ? selectedNode.title : "Nothing selected"}
-          </span>
+      {status && <div className="status-bar">{status}</div>}
+      {(pip?.manifestTx || remoteError) && (
+        <div className="status-bar ghost">
+          {pip?.manifestTx && <span className="pill ghost">manifestTx: {pip.manifestTx}</span>}
+          {remoteError && <span className="error">{remoteError}</span>}
         </div>
-
-        <textarea
-          style={{
-            ...styles.input,
-            minHeight: 260,
-            fontFamily: "'JetBrains Mono', 'SFMono-Regular', monospace",
-            background: "#0b1018",
-            border: "1px solid #1f2637",
-          }}
-          value={propsEditor}
-          onChange={(e) => setPropsEditor(e.target.value)}
-        />
-
-        <button style={styles.smallButton} onClick={handlePropsApply} disabled={!selectedNode}>
-          Apply props JSON
-        </button>
-
-        <div style={{ marginTop: 10, borderTop: "1px solid #1f2637", paddingTop: 10 }}>
-          <div style={styles.panelTitle}>Manifest meta</div>
-          <div style={{ color: "#9fb0c7", fontSize: 13, display: "grid", gap: 4 }}>
-            <span>ID: {manifest.id}</span>
-            <span>Version: {manifest.version}</span>
-            <span>Created: {formatStamp(manifest.metadata.createdAt)}</span>
-            <span>Updated: {formatStamp(manifest.metadata.updatedAt)}</span>
-          </div>
-        </div>
-      </aside>
+      )}
     </div>
   );
 }
+
+export default App;

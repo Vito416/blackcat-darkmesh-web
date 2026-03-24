@@ -23,6 +23,17 @@ Set these in your shell or `.env` to let the desktop hit your worker:
 - `WORKER_PIP_LATEST_PATH` – override latest endpoint (defaults to `/pip/latest`)
 - Optional renderer-time aliases (`VITE_PIP_*`) match the same keys for live reload.
 
+### Gateway env (renderer)
+
+- `GATEWAY_URL` / `VITE_GATEWAY_URL` – base gateway or Arweave mirror for pulling manifests by `manifestTx` (defaults to `https://arweave.net`).
+
+### AO deploy helpers (renderer service)
+- `src/renderer/services/aoDeploy.ts` now exposes `deployModule(walletOrPath, moduleSrc, tags?)` and `spawnProcess(scheduler?, manifestTx?)` using `@permaweb/aoconnect`.
+- Wallet load is mocked: pass a JWK object or JSON string directly, or set `AO_WALLET_JSON`; `AO_WALLET_PATH` is recorded but must be read via preload/IPC later.
+- Module deploy adds AO defaults (Type=Module, Module-Format=javascript, Data-Protocol=ao, Content-Type=application/javascript); spawning reads `AO_MODULE_TX` / `VITE_AO_MODULE_TX` and tags Scheduler/Manifest when provided.
+- `serializeManifest(manifest)` returns the same JSON as the Export button; upload that to Arweave and pass the TX as `manifestTx` when spawning.
+- TODO: wire real wallet loading in preload, surface deploy/spawn status in UI, and thread manifest export → module deploy → process spawn flow.
+
 ## TODO
 - Wire Y.js/Automerge for offline collaboration.
 - Add SQLite layer (better-sqlite3 or sql.js depending on sandbox needs).
