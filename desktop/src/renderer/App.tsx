@@ -1,4 +1,4 @@
-import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import "./styles.css";
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -122,6 +122,7 @@ import {
 } from "./utils/propsInspector";
 import { diffManifests, type DraftDiffEntry, type DraftDiffKind } from "./utils/draftDiff";
 import HotkeyOverlay, { type HotkeyOverlaySection } from "./components/HotkeyOverlay";
+import HeroCanvas from "./components/HeroCanvas";
 import Vault from "./components/Vault";
 import Wizard from "./components/Wizard";
 import { validatePipDocument } from "./services/pipValidation";
@@ -4716,6 +4717,7 @@ function App() {
 
   return (
     <div className="app-shell">
+      <HeroCanvas theme={theme} />
       <header className="top-bar">
         <div className="brand-area">
           <div className="brand">
@@ -5123,11 +5125,11 @@ function App() {
             </div>
           )}
           {workspace === "studio" && (
-            <div className="top-buttons">
-              <button className="ghost" onClick={handleUndo} disabled={!canUndo} title="Cmd/Ctrl+Z">
+            <div className="top-buttons hud-bar">
+              <button className="ghost icon-lead" data-icon="↺" onClick={handleUndo} disabled={!canUndo} title="Cmd/Ctrl+Z">
                 Undo
               </button>
-              <button className="ghost" onClick={handleRedo} disabled={!canRedo} title="Shift+Cmd/Ctrl+Z">
+              <button className="ghost icon-lead" data-icon="↻" onClick={handleRedo} disabled={!canRedo} title="Shift+Cmd/Ctrl+Z">
                 Redo
               </button>
               <select
@@ -5144,13 +5146,14 @@ function App() {
                 ))}
               </select>
               {activeDraftId && (
-                <button className="ghost" onClick={() => handleDeleteDraft(activeDraftId)} title="Delete draft">
+                <button className="ghost icon-lead" data-icon="✕" onClick={() => handleDeleteDraft(activeDraftId)} title="Delete draft">
                   Remove
                 </button>
               )}
               <div className="button-with-help">
                 <button
-                  className="ghost"
+                  className="ghost icon-lead"
+                  data-icon="⇄"
                   onClick={() => void openDraftDiffPanel()}
                   onMouseEnter={prefetchDraftDiffPanel}
                   onFocus={prefetchDraftDiffPanel}
@@ -5159,31 +5162,31 @@ function App() {
                 </button>
                 <HelpTip copy="Open the draft diff panel to compare the current manifest against a saved draft and cherry-pick differences." />
               </div>
-              <button className="ghost" onClick={handleLoadPip} disabled={loadingManifest}>
+              <button className="ghost icon-lead" data-icon="↓" onClick={handleLoadPip} disabled={loadingManifest}>
                 {loadingManifest ? "Loading manifest…" : "Load PIP"}
               </button>
-              <button className="ghost" onClick={handleFetchPipFromWorker} disabled={loadingManifest}>
+              <button className="ghost icon-lead" data-icon="⚡" onClick={handleFetchPipFromWorker} disabled={loadingManifest}>
                 {loadingManifest ? "…" : "Fetch PIP (worker)"}
               </button>
-              <button className="ghost" onClick={handleLoadPipFromVault} disabled={pipVaultBusy || pipVaultLocked}>
+              <button className="ghost icon-lead" data-icon="⛃" onClick={handleLoadPipFromVault} disabled={pipVaultBusy || pipVaultLocked}>
                 {pipVaultBusy ? "Vault…" : "Load vault"}
               </button>
-              <button className="ghost" onClick={handleClearPipVault} disabled={pipVaultBusy || pipVaultLocked}>
+              <button className="ghost icon-lead" data-icon="✖" onClick={handleClearPipVault} disabled={pipVaultBusy || pipVaultLocked}>
                 {pipVaultBusy ? "Vault…" : "Delete vault"}
               </button>
-              <button className="ghost" onClick={() => startNewDraft("New draft started")}>
+              <button className="ghost icon-lead" data-icon="＋" onClick={() => startNewDraft("New draft started")}>
                 New draft
               </button>
-              <button className="ghost" onClick={handleImportDrafts}>
+              <button className="ghost icon-lead" data-icon="⇪" onClick={handleImportDrafts}>
                 Import drafts
               </button>
-              <button className="ghost" onClick={handleExportDrafts}>
+              <button className="ghost icon-lead" data-icon="⇩" onClick={handleExportDrafts}>
                 Export drafts
               </button>
-              <button className="ghost" onClick={handleExportManifest}>
+              <button className="ghost icon-lead" data-icon="⤓" onClick={handleExportManifest}>
                 Export manifest
               </button>
-              <button className="ghost" onClick={handleDuplicateDraft} disabled={saving}>
+              <button className="ghost icon-lead" data-icon="⧉" onClick={handleDuplicateDraft} disabled={saving}>
                 Duplicate draft
               </button>
               <span
@@ -5193,7 +5196,7 @@ function App() {
                 <span className="save-status-label">{saveStatusLabel}</span>
                 <span className="save-status-time">{saveStatusTime}</span>
               </span>
-              <button className="primary" onClick={handleSaveDraft} disabled={saving}>
+              <button className="primary icon-lead" data-icon="💾" onClick={handleSaveDraft} disabled={saving}>
                 {saving ? "Saving…" : "Save draft"}
               </button>
               {pipVaultStatus && <span className="pill ghost pip-vault-pill">{pipVaultStatus}</span>}
@@ -5820,10 +5823,11 @@ function App() {
             )}
           </div>
           <div className="catalog-list">
-            {visibleCatalog.map((item) => (
+            {visibleCatalog.map((item, index) => (
               <div
                 key={item.id}
-                className={`catalog-item ${draggedCatalogId === item.id ? "is-dragging" : ""}`}
+                className={`catalog-item motion-stagger-item ${draggedCatalogId === item.id ? "is-dragging" : ""}`}
+                style={{ "--motion-index": index } as CSSProperties}
                 draggable
                 onDragStart={(event) => handleCatalogDragStart(item, event)}
                 onDragEnd={handleCatalogDragEnd}
@@ -5944,7 +5948,7 @@ function App() {
               </span>
             </div>
           </section>
-          <div className="composition-toolbar">
+          <div className="composition-toolbar hud-bar">
             <div className="selection-readout">
               <span className="pill ghost selection-pill">
                 {selectedNodeIds.length ? `${selectedNodeIds.length} selected` : "No selection"}
@@ -5952,16 +5956,16 @@ function App() {
               <span className="hint">Shift/Ctrl-click in the tree to multi-select. Drag/drop still works.</span>
             </div>
             <div className="composition-actions">
-              <button className="ghost small" onClick={handleUndo} disabled={!canUndo} title="Cmd/Ctrl+Z">
+              <button className="ghost small icon-lead" data-icon="↺" onClick={handleUndo} disabled={!canUndo} title="Cmd/Ctrl+Z">
                 Undo
               </button>
-              <button className="ghost small" onClick={handleRedo} disabled={!canRedo} title="Shift+Cmd/Ctrl+Z">
+              <button className="ghost small icon-lead" data-icon="↻" onClick={handleRedo} disabled={!canRedo} title="Shift+Cmd/Ctrl+Z">
                 Redo
               </button>
-              <button className="ghost small" onClick={handleDuplicateSelection} disabled={!selectedNodeIds.length}>
+              <button className="ghost small icon-lead" data-icon="⧉" onClick={handleDuplicateSelection} disabled={!selectedNodeIds.length}>
                 Duplicate
               </button>
-              <button className="ghost small danger" onClick={handleDeleteSelection} disabled={!selectedNodeIds.length}>
+              <button className="ghost small danger icon-lead" data-icon="✖" onClick={handleDeleteSelection} disabled={!selectedNodeIds.length}>
                 Delete
               </button>
             </div>
