@@ -1,5 +1,5 @@
 import type { ManifestDocument } from "../types/manifest";
-import { fetchWalletFromPath } from "./wallet";
+import { fetchWalletFromPath, parseWalletJson } from "./wallet";
 
 // Lazy-load aoconnect to avoid initializing it on app start (and to keep env assumptions isolated)
 async function loadAo() {
@@ -104,8 +104,9 @@ export async function spawnProcess(
   scheduler?: string,
   manifestTx?: string,
   moduleOverride?: string,
+  walletOrPath?: WalletSource,
 ): Promise<SpawnResponse> {
-  const wallet = await resolveWallet();
+  const wallet = await resolveWallet(walletOrPath);
   const moduleTx = moduleOverride?.trim() ?? getEnv("AO_MODULE_TX") ?? getEnv("VITE_AO_MODULE_TX");
   const mergedTags = mergeTags(
     [
@@ -177,7 +178,7 @@ async function resolveWallet(walletOrPath?: WalletSource): Promise<WalletResolut
   }
 
   const jsonCandidate = typeof walletOrPath === "string" ? walletOrPath : getEnv("AO_WALLET_JSON");
-  const parsed = tryParseWallet(jsonCandidate);
+  const parsed = parseWalletJson(jsonCandidate);
 
   if (parsed) {
     return { ready: true, wallet: parsed, note: "Parsed wallet JSON" };
@@ -201,16 +202,6 @@ async function resolveWallet(walletOrPath?: WalletSource): Promise<WalletResolut
   }
 
   return { ready: false, wallet: null, note: "Pass a JWK JSON or set AO_WALLET_PATH" };
-}
-
-function tryParseWallet(input?: string): Record<string, unknown> | null {
-  if (!input) return null;
-  try {
-    const parsed = JSON.parse(input);
-    return typeof parsed === "object" && parsed ? (parsed as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
 }
 
 function mergeTags(base: Tag[], user: Tag[]): Tag[] {
