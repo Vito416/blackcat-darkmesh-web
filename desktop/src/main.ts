@@ -29,11 +29,33 @@ async function createWindow() {
   const win = new BrowserWindow({
     width: 1200,
     height: 800,
+    show: false,
+    backgroundColor: "#05060d",
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
       preload: path.join(__dirname, "preload.js"),
     },
+  });
+
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+
+  win.on("ready-to-show", () => {
+    if (!win.isDestroyed()) win.show();
+  });
+
+  win.webContents.on("did-fail-load", (_e, code, desc, validatedURL) => {
+    // Log and show a minimal fallback page to avoid a blank/crash perception
+    console.error("Renderer failed to load", { code, desc, validatedURL });
+    const html = `<html><body style="font-family: sans-serif; background:#05060d; color:#e3e8ff; display:flex; align-items:center; justify-content:center; height:100vh; text-align:center;">
+      <div>
+        <h2>Renderer failed to load</h2>
+        <p>${validatedURL ?? "unknown URL"}</p>
+        <p>Code ${code}: ${desc}</p>
+        <p>Is Vite dev server running on http://localhost:5174 ?</p>
+      </div>
+    </body></html>`;
+    win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`).catch(() => {});
   });
 
   if (isDev) {
@@ -42,7 +64,9 @@ async function createWindow() {
       await waitForPort("localhost", 5174);
       await win.loadURL(devUrl);
     } catch (err) {
-      await win.loadURL(devUrl); // attempt anyway to see error
+      console.error("Dev server not reachable before timeout", err);
+      // attempt anyway to see error page or fallback
+      await win.loadURL(devUrl);
     }
     win.webContents.openDevTools({ mode: "detach" });
   } else {
@@ -139,6 +163,9 @@ app.whenReady().then(() => {
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+}).catch((err) => {
+  console.error("Failed to start app", err);
+  app.quit();
 });
 
 app.on("window-all-closed", () => {
