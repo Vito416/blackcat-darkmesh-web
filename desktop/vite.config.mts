@@ -12,5 +12,15 @@ export default defineConfig({
   },
   server: {
     port: 5174,
+    host: "localhost",
+  },
+  define: {
+    "process.env.NODE_ENV": JSON.stringify(process.env.NODE_ENV || "development"),
+    "process.env.AO_MODE": JSON.stringify(process.env.AO_MODE || "legacy"),
+    "process.env.AO_URL": JSON.stringify(process.env.AO_URL || ""),
+    "process.env.AO_MODULE_TX": JSON.stringify(process.env.AO_MODULE_TX || ""),
+    "process.env.WORKER_PIP_BASE": JSON.stringify(process.env.WORKER_PIP_BASE || ""),
+    "process.env.WORKER_BASE_URL": JSON.stringify(process.env.WORKER_BASE_URL || ""),
+    "process.env.GATEWAY_URL": JSON.stringify(process.env.GATEWAY_URL || ""),
   },
 });
