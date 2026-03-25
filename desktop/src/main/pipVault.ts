@@ -19,6 +19,37 @@ export interface PipVaultRecord {
   site?: string;
 }
 
+export type VaultAuditStatus = "ok" | "error";
+
+export type VaultAuditAction =
+  | "describe"
+  | "list"
+  | "read"
+  | "readRecord"
+  | "write"
+  | "deleteRecord"
+  | "clear"
+  | "enablePassword"
+  | "disablePassword"
+  | "export"
+  | "import"
+  | "backup";
+
+export interface VaultAuditEvent {
+  at: string;
+  action: VaultAuditAction;
+  status: VaultAuditStatus;
+  detail?: string;
+  manifestTx?: string;
+  recordId?: string;
+  tenant?: string;
+  site?: string;
+  mode?: VaultKeyMode;
+  recordCount?: number;
+  path?: string;
+  filename?: string;
+}
+
 export type VaultKeyMode = "safeStorage" | "plain" | "password";
 
 interface VaultEnvelope {
@@ -72,6 +103,7 @@ interface VaultBackupBundle {
 
 const VAULT_FILENAME = "pip-vault.json";
 const KEY_FILENAME = "pip-vault.key.json";
+const BACKUP_DIRNAME = "pip-vault-backups";
 const KEY_SIZE = 32;
 const KDF_ITERATIONS = 100_000;
 const KDF_DIGEST = "sha256";
@@ -79,6 +111,7 @@ const KDF_SALT_BYTES = 16;
 
 const vaultPath = () => path.join(app.getPath("userData"), VAULT_FILENAME);
 const keyPath = () => path.join(app.getPath("userData"), KEY_FILENAME);
+const backupDirPath = () => path.join(app.getPath("userData"), BACKUP_DIRNAME);
 
 const readJsonFile = async <T>(filePath: string): Promise<T | null> => {
   try {
@@ -111,6 +144,25 @@ const encode = (buffer: Buffer): string => buffer.toString("base64");
 const decode = (value: string): Buffer => Buffer.from(value, "base64");
 const nowIso = () => new Date().toISOString();
 const normalizeText = (value?: string): string => (typeof value === "string" ? value.trim() : "");
+const auditEvent = (action: VaultAuditAction, status: VaultAuditStatus, meta: Partial<VaultAuditEvent> = {}): VaultAuditEvent => ({
+  at: nowIso(),
+  action,
+  status,
+  ...meta,
+});
+
+const ensureBackupDir = async (): Promise<void> => {
+  await fs.mkdir(backupDirPath(), { recursive: true });
+};
+
+const writeBackupFile = async (bundle: string): Promise<{ path: string; filename: string; savedAt: string }> => {
+  await ensureBackupDir();
+  const savedAt = nowIso();
+  const filename = `pip-vault-backup-${savedAt.replace(/[:.]/g, "-")}.json`;
+  const targetPath = path.join(backupDirPath(), filename);
+  await fs.writeFile(targetPath, bundle, "utf-8");
+  return { path: targetPath, filename, savedAt };
+};
 
 const buildRecordKey = (pip: PipDocument): string =>
   [normalizeText(pip.tenant).toLowerCase(), normalizeText(pip.site).toLowerCase(), normalizeText(pip.manifestTx).toLowerCase()]

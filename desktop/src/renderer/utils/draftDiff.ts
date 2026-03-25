@@ -23,6 +23,8 @@ type IndexedNode = {
 };
 
 type NodeIndex = Map<string, IndexedNode>;
+type PathCache = Map<string, string | undefined>;
+type HashCache = Map<string, string | null>;
 
 const normalizeNode = (node: ManifestNode) => ({
   id: node.id,
@@ -32,11 +34,11 @@ const normalizeNode = (node: ManifestNode) => ({
   children: (node.children ?? []).map((child) => child.id),
 });
 
-const nodesEqual = (a: ManifestNode, b: ManifestNode): boolean => {
+const hashNode = (node: ManifestNode): string | null => {
   try {
-    return JSON.stringify(normalizeNode(a)) === JSON.stringify(normalizeNode(b));
+    return JSON.stringify(normalizeNode(node));
   } catch {
-    return false;
+    return null;
   }
 };
 
@@ -62,18 +64,41 @@ const indexManifest = (manifest: ManifestDocument): NodeIndex => {
   return index;
 };
 
-const buildPath = (id: string, index: NodeIndex): string | undefined => {
-  const parts: string[] = [];
-  let current = index.get(id);
-  let guard = 0;
+const createPathBuilder = (index: NodeIndex) => {
+  const cache: PathCache = new Map();
+  return (id: string): string | undefined => {
+    if (cache.has(id)) {
+      return cache.get(id);
+    }
 
-  while (current && guard < 64) {
-    parts.unshift(current.node.title || current.node.id);
-    current = current.parentId ? index.get(current.parentId) : undefined;
-    guard += 1;
-  }
+    const parts: string[] = [];
+    let current = index.get(id);
+    let guard = 0;
 
-  return parts.length ? parts.join(" / ") : undefined;
+    while (current && guard < 64) {
+      parts.unshift(current.node.title || current.node.id);
+      current = current.parentId ? index.get(current.parentId) : undefined;
+      guard += 1;
+    }
+
+    const path = parts.length ? parts.join(" / ") : undefined;
+    cache.set(id, path);
+    return path;
+  };
+};
+
+const createNodeHashLookup = (index: NodeIndex) => {
+  const cache: HashCache = new Map();
+  return (id: string): string | null => {
+    if (cache.has(id)) {
+      return cache.get(id) ?? null;
+    }
+
+    const entry = index.get(id);
+    const hashed = entry ? hashNode(entry.node) : null;
+    cache.set(id, hashed);
+    return hashed;
+  };
 };
 
 export const diffManifests = (
@@ -82,6 +107,10 @@ export const diffManifests = (
 ): { entries: DraftDiffEntry[]; highlight: Record<string, DraftDiffKind> } => {
   const leftIndex = indexManifest(left);
   const rightIndex = indexManifest(right);
+  const leftPathFor = createPathBuilder(leftIndex);
+  const rightPathFor = createPathBuilder(rightIndex);
+  const leftHashFor = createNodeHashLookup(leftIndex);
+  const rightHashFor = createNodeHashLookup(rightIndex);
   const ids = new Set([...leftIndex.keys(), ...rightIndex.keys()]);
   const entries: DraftDiffEntry[] = [];
 
@@ -97,7 +126,7 @@ export const diffManifests = (
         kind: "removed",
         parentId: before.parentId,
         before: before.node,
-        beforePath: buildPath(id, leftIndex),
+        beforePath: leftPathFor(id),
         beforeIndex: before.index,
       });
       return;
@@ -111,13 +140,19 @@ export const diffManifests = (
         kind: "added",
         parentId: after.parentId,
         after: after.node,
-        afterPath: buildPath(id, rightIndex),
+        afterPath: rightPathFor(id),
         afterIndex: after.index,
       });
       return;
     }
 
-    if (before && after && !nodesEqual(before.node, after.node)) {
+    if (before && after) {
+      const leftHash = leftHashFor(id);
+      const rightHash = rightHashFor(id);
+      const nodesMatch = leftHash !== null && leftHash === rightHash;
+
+      if (nodesMatch) return;
+
       entries.push({
         id,
         title: after.node.title || before.node.title,
@@ -126,8 +161,8 @@ export const diffManifests = (
         parentId: after.parentId,
         before: before.node,
         after: after.node,
-        beforePath: buildPath(id, leftIndex),
-        afterPath: buildPath(id, rightIndex),
+        beforePath: leftPathFor(id),
+        afterPath: rightPathFor(id),
         beforeIndex: before.index,
         afterIndex: after.index,
       });

@@ -1,6 +1,7 @@
 import * as pipClient from "../../../../src/manifest/pipClient";
 
 import { normalizePipInput, validatePipDocument, type PipDocument } from "./pipValidation";
+import { resolveEnvWithSettings } from "../storage/settings";
 import {
   clearPipVault,
   deletePipVaultRecord as deletePipVaultRecordImpl,
@@ -14,6 +15,8 @@ import {
 export type PipLoadResult =
   | { ok: true; pip: PipDocument; source: "prompt" | "worker" | "vault" }
   | { ok: false; error: string };
+
+type PipClientOptions = pipClient.PipClientOptions;
 
 const asError = (err: unknown, fallback: string): string => (err instanceof Error ? err.message : fallback);
 
@@ -33,7 +36,11 @@ export async function loadPipFromWorker(
   nonce?: string,
 ): Promise<PipLoadResult> {
   try {
-    const pip = subject && nonce ? await pipClient.fetchPip(subject, nonce) : await pipClient.getLatestPip(tenant, site);
+    const workerOptions: PipClientOptions = resolveWorkerOptions();
+    const pip =
+      subject && nonce
+        ? await pipClient.fetchPip(subject, nonce, workerOptions)
+        : await pipClient.getLatestPip(tenant, site, workerOptions);
     const validated = validatePipDocument(pip);
 
     if (!validated.ok) {
@@ -73,6 +80,31 @@ export async function loadPipFromVaultRecord(id: string): Promise<PipLoadResult>
 
   return { ok: true, pip: validated.pip, source: "vault" };
 }
+
+const resolveWorkerOptions = (): PipClientOptions => {
+  const baseUrl =
+    resolveEnvWithSettings("WORKER_PIP_BASE") ??
+    resolveEnvWithSettings("WORKER_API_BASE") ??
+    resolveEnvWithSettings("WORKER_BASE_URL");
+
+  const token =
+    resolveEnvWithSettings("WORKER_PIP_TOKEN") ??
+    resolveEnvWithSettings("WORKER_AUTH_TOKEN") ??
+    resolveEnvWithSettings("WORKER_API_TOKEN");
+
+  const latestPath = resolveEnvWithSettings("WORKER_PIP_LATEST_PATH") ?? resolveEnvWithSettings("WORKER_LATEST_PATH");
+  const inboxPath =
+    resolveEnvWithSettings("WORKER_INBOX_PATH") ??
+    resolveEnvWithSettings("WORKER_PIP_INBOX_PATH") ??
+    resolveEnvWithSettings("WORKER_INBOX_PATH");
+
+  return {
+    ...(baseUrl ? { baseUrl } : {}),
+    ...(token ? { token } : {}),
+    ...(latestPath ? { latestPath } : {}),
+    ...(inboxPath ? { inboxPath } : {}),
+  };
+};
 
 export async function listPipVaultRecords(): Promise<{ ok: true; records: PipVaultRecord[] } | { ok: false; error: string }> {
   const result = await listPipVaultRecordsImpl();

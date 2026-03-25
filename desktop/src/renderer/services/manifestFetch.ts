@@ -1,13 +1,9 @@
 import { ManifestDocument } from "../types/manifest";
+import { resolveEnvWithSettings } from "../storage/settings";
 
 const DEFAULT_GATEWAY = "https://arweave.net";
 
-const getEnv = (key: string): string | undefined => {
-  if (typeof process !== "undefined" && process.env) {
-    return process.env[key] ?? process.env[`VITE_${key}`];
-  }
-  return undefined;
-};
+const getEnv = (key: string): string | undefined => resolveEnvWithSettings(key);
 
 const normalizeBase = (value?: string) => {
   const base = (value ?? DEFAULT_GATEWAY).trim() || DEFAULT_GATEWAY;
@@ -15,7 +11,7 @@ const normalizeBase = (value?: string) => {
 };
 
 export const resolveGatewayUrl = (): string => {
-  return normalizeBase(getEnv("VITE_GATEWAY_URL") ?? getEnv("GATEWAY_URL"));
+  return normalizeBase(getEnv("GATEWAY_URL"));
 };
 
 /**

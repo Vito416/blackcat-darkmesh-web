@@ -40,9 +40,35 @@ import {
   PropsSchema,
   isManifestExpression,
 } from "./types/manifest";
-const DraftDiffPanel = React.lazy(() => import("./components/DraftDiffPanel"));
-const AoLogPanel = React.lazy(() => import("./components/AoLogPanel"));
+type DraftDiffPanelModule = typeof import("./components/DraftDiffPanel");
+type AoLogPanelModule = typeof import("./components/AoLogPanel");
+const loadDraftDiffPanel = (() => {
+  let modPromise: Promise<DraftDiffPanelModule> | null = null;
+  return () => {
+    if (!modPromise) {
+      modPromise = import("./components/DraftDiffPanel");
+    }
+    return modPromise;
+  };
+})();
+const loadAoLogPanel = (() => {
+  let modPromise: Promise<AoLogPanelModule> | null = null;
+  return () => {
+    if (!modPromise) {
+      modPromise = import("./components/AoLogPanel");
+    }
+    return modPromise;
+  };
+})();
+const DraftDiffPanel = React.lazy(loadDraftDiffPanel);
+const AoLogPanel = React.lazy(loadAoLogPanel);
 const ManifestRenderer = React.lazy(() => import("./components/ManifestRenderer"));
+const prefetchDraftDiffPanel = () => {
+  void loadDraftDiffPanel();
+};
+const prefetchAoLogPanel = () => {
+  void loadAoLogPanel();
+};
 import {
   deleteDraft,
   exportDraftsToJson,
@@ -65,6 +91,14 @@ import {
   listHealthEvents,
   type HealthEvent,
 } from "./storage/healthStore";
+import {
+  hasStoredSettings,
+  loadSettings,
+  markSetupComplete,
+  resolveEnvWithSettings,
+  saveSettings,
+  setupCompleted,
+} from "./storage/settings";
 import { fetchWalletFromPath, parseWalletJson } from "./services/wallet";
 import CommandPalette, { type CommandPaletteAction } from "./components/CommandPalette";
 import {
@@ -373,11 +407,7 @@ const PIP_VAULT_REMEMBER_PASSWORD_KEY = "pip-vault-remember-password";
 const HEALTH_NOTIFY_STORAGE_KEY = "health-sla-notify";
 const HEALTH_SLA_FAILURE_STORAGE_KEY = "health-sla-failure";
 const HEALTH_SLA_LATENCY_STORAGE_KEY = "health-sla-latency";
-const getEnv = (key: string): string | undefined => {
-  const fromProcess = typeof process !== "undefined" ? process.env?.[key] : undefined;
-  const fromProcessPrefixed = typeof process !== "undefined" ? process.env?.[`VITE_${key}`] : undefined;
-  return fromProcess ?? fromProcessPrefixed;
-};
+const getEnv = (key: string): string | undefined => resolveEnvWithSettings(key);
 const parsePositiveNumber = (value: string | undefined, fallback: number): number => {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : fallback;
@@ -4306,6 +4336,8 @@ function App() {
               key={item.id}
               className={`chip ${workspace === (item.id as Workspace) ? "active" : ""}`}
               onClick={() => setWorkspace(item.id as Workspace)}
+              onMouseEnter={item.id === "ao" ? prefetchAoLogPanel : undefined}
+              onFocus={item.id === "ao" ? prefetchAoLogPanel : undefined}
               type="button"
             >
               {item.label}
@@ -4640,7 +4672,12 @@ function App() {
                   Remove
                 </button>
               )}
-              <button className="ghost" onClick={() => void openDraftDiffPanel()}>
+              <button
+                className="ghost"
+                onClick={() => void openDraftDiffPanel()}
+                onMouseEnter={prefetchDraftDiffPanel}
+                onFocus={prefetchDraftDiffPanel}
+              >
                 Draft diff
               </button>
               <button className="ghost" onClick={handleLoadPip} disabled={loadingManifest}>

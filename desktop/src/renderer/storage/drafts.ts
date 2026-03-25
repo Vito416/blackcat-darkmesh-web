@@ -3,8 +3,8 @@ import Dexie, { Table } from "dexie";
 import { ManifestDocument, ManifestDraft } from "../types/manifest";
 
 const DB_NAME = "darkmesh-manifest-drafts";
-const DB_VERSION = 3;
-const CURRENT_SCHEMA_VERSION = 2;
+const DB_VERSION = 4;
+const CURRENT_SCHEMA_VERSION = 3;
 const EXPORT_FORMAT_VERSION = 1;
 const REVISION_LIMIT = 40;
 
@@ -15,7 +15,7 @@ type DraftInput =
 type DraftWriteResult = ManifestDraft;
 export type DraftSaveMode = "autosave" | "manual";
 
-type DraftRow = ManifestDraft & { schemaVersion: number };
+type DraftRow = ManifestDraft & { schemaVersion: number; versionStamp: number };
 
 type DraftRevisionRow = {
   id?: number;
@@ -25,6 +25,7 @@ type DraftRevisionRow = {
   name: string;
   document: ManifestDocument;
   schemaVersion: number;
+  versionStamp?: number;
 };
 
 export interface DraftRevision {
@@ -34,6 +35,7 @@ export interface DraftRevision {
   savedAt: string;
   name: string;
   document: ManifestDocument;
+  versionStamp?: number;
 }
 
 export type DraftSourceRef = { kind: "draft"; id: number } | { kind: "revision"; id: number };
@@ -45,6 +47,21 @@ export interface DraftSource {
   savedAt: string;
   mode?: DraftSaveMode;
   document: ManifestDocument;
+}
+
+export class DraftVersionConflictError extends Error {
+  latest?: ManifestDraft;
+
+  constructor(latest?: ManifestDraft, message = "Draft was updated in another tab") {
+    super(message);
+    this.name = "DraftVersionConflictError";
+    this.latest = latest;
+  }
+}
+
+export interface DraftSaveOptions {
+  expectedVersionStamp?: number;
+  force?: boolean;
 }
 
 interface DraftExportFile {
@@ -92,6 +109,7 @@ const toDraftRow = (draft: DraftInput, options?: { preserveUpdatedAt?: boolean }
   const updatedAt = options?.preserveUpdatedAt ? safeIso((draft as ManifestDraft).updatedAt) : now;
   const name = draft.name?.trim() || draft.document?.name?.trim() || "Untitled manifest";
   const document = normalizeDocument(draft.document as ManifestDocument, name, createdAt, updatedAt);
+  const versionStamp = (draft as ManifestDraft).versionStamp ?? Date.now();
 
   return {
     ...(draft as ManifestDraft),
@@ -100,6 +118,7 @@ const toDraftRow = (draft: DraftInput, options?: { preserveUpdatedAt?: boolean }
     createdAt,
     updatedAt,
     document,
+    versionStamp,
     schemaVersion: CURRENT_SCHEMA_VERSION,
   } as DraftRow;
 };
@@ -122,6 +141,7 @@ const addDraftRevision = async (draftId: number, draft: DraftRow, mode: DraftSav
     name: draft.name,
     document: draft.document,
     schemaVersion: CURRENT_SCHEMA_VERSION,
+    versionStamp: draft.versionStamp,
   };
 
   await db.revisions.add(revision);
@@ -151,7 +171,7 @@ class DraftDatabase extends Dexie {
 
     this.version(DB_VERSION)
       .stores({
-        drafts: "++id, updatedAt, name, schemaVersion",
+        drafts: "++id, updatedAt, name, schemaVersion, versionStamp",
         revisions: "++id, draftId, savedAt, mode, schemaVersion",
       })
       .upgrade(async (tx) => {
@@ -167,6 +187,10 @@ class DraftDatabase extends Dexie {
             record.name = record.name || record.document?.name || "Untitled manifest";
             if (record.document) {
               record.document = normalizeDocument(record.document as ManifestDocument, record.name, createdAt, updatedAt);
+            }
+            if (record.versionStamp == null) {
+              const fallbackStamp = new Date(updatedAt).getTime();
+              record.versionStamp = Number.isFinite(fallbackStamp) ? fallbackStamp : Date.now();
             }
           });
       });
@@ -188,8 +212,22 @@ export async function getDraft(id: number): Promise<ManifestDraft | undefined> {
 export async function saveDraft(
   draft: Omit<ManifestDraft, "updatedAt" | "createdAt"> & Partial<Pick<ManifestDraft, "id" | "createdAt" | "updatedAt">>,
   mode: DraftSaveMode = "manual",
+  options: DraftSaveOptions = {},
 ): Promise<DraftWriteResult> {
-  const payload = toDraftRow(draft);
+  const existing = draft.id ? await db.drafts.get(draft.id) : null;
+
+  if (
+    existing &&
+    !options.force &&
+    options.expectedVersionStamp != null &&
+    existing.versionStamp !== options.expectedVersionStamp
+  ) {
+    throw new DraftVersionConflictError(stripSchema(existing));
+  }
+
+  const previousStamp = existing?.versionStamp ?? options.expectedVersionStamp ?? Date.now();
+  const nextVersionStamp = Math.max(Date.now(), previousStamp + 1);
+  const payload = toDraftRow({ ...draft, versionStamp: nextVersionStamp });
   const draftId = draft.id ?? (await db.drafts.add(payload));
 
   if (draft.id) {

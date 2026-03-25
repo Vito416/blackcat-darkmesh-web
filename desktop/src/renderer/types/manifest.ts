@@ -63,6 +63,7 @@ export interface ManifestDraft {
   document: ManifestDocument;
   createdAt: string;
   updatedAt: string;
+  versionStamp?: number;
 }
 
 export interface CatalogItem {

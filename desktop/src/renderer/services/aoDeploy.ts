@@ -1,5 +1,6 @@
 import type { ManifestDocument } from "../types/manifest";
 import { fetchWalletFromPath, parseWalletJson } from "./wallet";
+import { resolveEnvWithSettings } from "../storage/settings";
 
 type AoClient = Pick<
   typeof import("@permaweb/aoconnect/browser"),
@@ -225,8 +226,5 @@ function mergeTags(base: Tag[], user: Tag[]): Tag[] {
 }
 
 function getEnv(key: string): string | undefined {
-  const fromProcess = typeof process !== "undefined" ? process.env?.[key] : undefined;
-  const fromProcessPrefixed = typeof process !== "undefined" ? process.env?.[`VITE_${key}`] : undefined;
-
-  return fromProcess ?? fromProcessPrefixed;
+  return resolveEnvWithSettings(key);
 }
