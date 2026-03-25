@@ -51,6 +51,7 @@ import {
   type PropsValidationIssue,
 } from "./utils/propsInspector";
 import HotkeyOverlay, { type HotkeyOverlaySection } from "./components/HotkeyOverlay";
+import { validatePipDocument } from "./services/pipValidation";
 
 const randomId = () => crypto.randomUUID?.() ?? Math.random().toString(36).slice(2, 10);
 
@@ -1413,6 +1414,55 @@ function App() {
     } finally {
       setPipVaultBusy(false);
     }
+  };
+
+  const handleExportPip = () => {
+    if (!pip) {
+      flashStatus("Load a PIP to export");
+      return;
+    }
+
+    const data = JSON.stringify(pip, null, 2);
+    const blob = new Blob([data], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const filename = `pip-${pip.manifestTx || "draft"}.json`;
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(url);
+    flashStatus("PIP exported");
+  };
+
+  const handleImportPip = () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "application/json";
+    input.onchange = async (event) => {
+      const file = (event.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+
+      try {
+        const text = await file.text();
+        const parsed = JSON.parse(text);
+        const validated = validatePipDocument(parsed);
+        if (!validated.ok) {
+          flashStatus(validated.error);
+          return;
+        }
+        setPip(validated.pip);
+        setRemoteError(null);
+        setPipVaultStatus("PIP imported");
+        flashStatus("PIP imported");
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to import PIP";
+        flashStatus(message);
+      }
+
+      input.value = "";
+    };
+
+    input.click();
   };
 
   const handleClearPipVault = async () => {
@@ -2818,6 +2868,12 @@ function App() {
               </button>
               <button className="ghost" onClick={() => void refreshPipVaultSnapshot()} disabled={pipVaultBusy}>
                 Refresh
+              </button>
+              <button className="ghost" onClick={handleImportPip}>
+                Import PIP
+              </button>
+              <button className="ghost" onClick={handleExportPip} disabled={!pip}>
+                Export PIP
               </button>
             </div>
           </article>
