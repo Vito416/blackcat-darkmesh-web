@@ -7,12 +7,15 @@ import { runHealthChecks, type HealthStatus } from "./services/health";
 import { fetchManifestDocument } from "./services/manifestFetch";
 import {
   clearPipVaultStorage,
+  deletePipVaultRecordStorage,
   loadPipFromPrompt,
   loadPipFromVault,
+  loadPipFromVaultRecord,
   loadPipFromWorker,
+  listPipVaultRecords,
   savePipToVault,
 } from "./services/pipWorkflow";
-import { describePipVault } from "./services/pipVault";
+import { describePipVault, type PipVaultRecord } from "./services/pipVault";
 import type { PipDocument } from "./services/pipValidation";
 import {
   CatalogItem,
@@ -20,6 +23,7 @@ import {
   ManifestDraft,
   ManifestNode,
   ManifestShape,
+  PropsSchema,
 } from "./types/manifest";
 import ManifestRenderer from "./components/ManifestRenderer";
 import {
@@ -29,19 +33,24 @@ import {
   getDraft,
   importDraftsFromJson,
   listDrafts,
+  listDraftRevisions,
   saveDraft,
+  type DraftRevision,
+  type DraftSaveMode,
 } from "./storage/drafts";
 import { fetchWalletFromPath, parseWalletJson } from "./services/wallet";
 import CommandPalette, { type CommandPaletteAction } from "./components/CommandPalette";
 import {
   diff,
   groupDiffEntries,
+  buildFormValue,
   indexValidationIssues,
   mergeDefaults,
   validate,
   type PropsDiffEntry,
   type PropsValidationIssue,
 } from "./utils/propsInspector";
+import HotkeyOverlay, { type HotkeyOverlaySection } from "./components/HotkeyOverlay";
 
 const randomId = () => crypto.randomUUID?.() ?? Math.random().toString(36).slice(2, 10);
 
@@ -91,6 +100,10 @@ const normalizeText = (value: unknown) => (typeof value === "string" ? value.tri
 const formatTimeShort = (iso?: string) =>
   iso ? new Date(iso).toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit" }) : "—";
 
+const formatDraftSaveMode = (mode: DraftSaveMode) => (mode === "autosave" ? "Autosave" : "Manual save");
+
+const buildAoExplorerUrl = (id?: string | null) => (id ? `https://ao.link/#/entity/${encodeURIComponent(id)}` : null);
+
 const formatHost = (value?: string) => {
   if (!value) return "";
   try {
@@ -98,6 +111,11 @@ const formatHost = (value?: string) => {
   } catch {
     return value.replace(/^https?:\/\//, "");
   }
+};
+
+const openExternal = (url: string) => {
+  if (typeof window === "undefined") return;
+  window.open(url, "_blank", "noopener,noreferrer");
 };
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
@@ -189,6 +207,13 @@ type FileBridgeResult = {
 type Theme = "light" | "cyberpunk";
 type WalletMode = "ipc" | "path" | "jwk";
 type TaskState = "idle" | "pending" | "success" | "error";
+type AoMiniLogEntry = {
+  kind: "deploy" | "spawn";
+  id: string | null;
+  status: string;
+  time: string;
+  href: string | null;
+};
 type PipVaultSnapshot = {
   exists: boolean;
   updatedAt?: string;
@@ -220,6 +245,9 @@ declare global {
       write: (pip: Record<string, unknown>) => Promise<{ updatedAt: string }>;
       clear: () => Promise<{ ok: true }>;
       describe: () => Promise<{ exists: boolean; updatedAt?: string; encrypted: boolean; path: string }>;
+      list: () => Promise<{ exists: boolean; records: PipVaultRecord[] }>;
+      loadRecord: (id: string) => Promise<{ exists: boolean; updatedAt?: string; pip?: Record<string, unknown> }>;
+      deleteRecord: (id: string) => Promise<{ ok: true; removed: boolean }>;
     };
   }
 }
@@ -385,6 +413,263 @@ const formatPropsValue = (value: unknown): string => {
 const getIssueLabel = (issues: PropsValidationIssue[]): string =>
   issues.length === 1 ? "1 issue" : `${issues.length} issues`;
 
+type PropsDraftPath = Array<string | number>;
+type PropsMode = "form" | "json";
+
+const stringifyPropsDraft = (value: unknown): string => JSON.stringify(value, null, 2);
+
+const getSchemaTypeLabel = (schema: PropsSchema | undefined, value: unknown): string => {
+  const type = schema?.type;
+  if (type === "array") return "Array";
+  if (type === "object") return "Object";
+  if (type === "boolean") return "Boolean";
+  if (type === "number") return "Number";
+  if (type === "null") return "Null";
+  if (type === "string") {
+    if (schema?.enum?.length) return "Select";
+    return "Text";
+  }
+  if (Array.isArray(value)) return "Array";
+  if (value === null) return "Null";
+  if (typeof value === "boolean") return "Boolean";
+  if (typeof value === "number") return "Number";
+  if (typeof value === "string") return "Text";
+  return "Value";
+};
+
+const updateDraftValue = (value: unknown, path: PropsDraftPath, nextValue: unknown): unknown => {
+  if (!path.length) {
+    return nextValue;
+  }
+
+  const [head, ...rest] = path;
+
+  if (typeof head === "number") {
+    const current = Array.isArray(value) ? [...value] : [];
+    const index = head < 0 ? 0 : head;
+    if (rest.length === 0) {
+      current[index] = nextValue;
+      return current;
+    }
+    current[index] = updateDraftValue(current[index], rest, nextValue);
+    return current;
+  }
+
+  const current = isPlainObject(value) ? { ...value } : {};
+  if (rest.length === 0) {
+    current[head] = nextValue;
+    return current;
+  }
+
+  current[head] = updateDraftValue(current[head], rest, nextValue);
+  return current;
+};
+
+const removeDraftValue = (value: unknown, path: PropsDraftPath): unknown => {
+  if (!path.length) {
+    return value;
+  }
+
+  const [head, ...rest] = path;
+
+  if (typeof head === "number") {
+    if (!Array.isArray(value)) {
+      return value;
+    }
+
+    const current = [...value];
+    if (rest.length === 0) {
+      current.splice(head, 1);
+      return current;
+    }
+
+    current[head] = removeDraftValue(current[head], rest);
+    return current;
+  }
+
+  if (!isPlainObject(value)) {
+    return value;
+  }
+
+  if (rest.length === 0) {
+    const next = { ...value };
+    delete next[head];
+    return next;
+  }
+
+  return {
+    ...value,
+    [head]: removeDraftValue(value[head], rest),
+  };
+};
+
+const PropsSchemaField: React.FC<{
+  schema: PropsSchema | undefined;
+  value: unknown;
+  path: PropsDraftPath;
+  onChange: (path: PropsDraftPath, value: unknown) => void;
+}> = ({ schema, value, path, onChange }) => {
+  const type = schema?.type ?? (Array.isArray(value) ? "array" : isPlainObject(value) ? "object" : undefined);
+  const label = schema?.title ?? path[path.length - 1]?.toString() ?? "Root";
+  const description = schema?.description;
+
+  if (type === "object" || (!type && isPlainObject(value))) {
+    const record = isPlainObject(value) ? value : {};
+    const properties = schema?.properties ?? {};
+    const propertyKeys = Object.keys(properties);
+    const extraKeys = Object.keys(record).filter((key) => !propertyKeys.includes(key));
+    const allKeys = [...propertyKeys, ...extraKeys];
+
+    return (
+      <fieldset className="schema-fieldset">
+        <div className="schema-fieldset-head">
+          <div>
+            <span className="schema-label">{label}</span>
+            {description ? <p className="schema-description">{description}</p> : null}
+          </div>
+          <span className="badge ghost">{getSchemaTypeLabel(schema, value)}</span>
+        </div>
+        <div className="schema-grid">
+          {allKeys.length ? (
+            allKeys.map((key) => {
+              const childSchema = properties[key] ?? (isPlainObject(schema?.additionalProperties) ? schema?.additionalProperties : undefined);
+              const childValue = record[key];
+              const childPath = [...path, key];
+              return (
+                <PropsSchemaField
+                  key={childPath.join(".")}
+                  schema={childSchema}
+                  value={childValue}
+                  path={childPath}
+                  onChange={onChange}
+                />
+              );
+            })
+          ) : (
+            <p className="hint">No fields in this object schema.</p>
+          )}
+        </div>
+      </fieldset>
+    );
+  }
+
+  if (type === "array") {
+    const items = Array.isArray(value) ? value : [];
+
+    return (
+      <fieldset className="schema-fieldset">
+        <div className="schema-fieldset-head">
+          <div>
+            <span className="schema-label">{label}</span>
+            {description ? <p className="schema-description">{description}</p> : null}
+          </div>
+          <button
+            className="ghost small"
+            type="button"
+            onClick={() => onChange(path, [...items, buildFormValue(schema?.items, undefined)])}
+          >
+            Add item
+          </button>
+        </div>
+        <div className="schema-list">
+          {items.length ? (
+            items.map((entry, index) => (
+              <div key={`${path.join(".")}[${index}]`} className="schema-list-item">
+                <div className="schema-list-item-head">
+                  <span className="schema-label">{schema?.items?.title ?? `${label} ${index + 1}`}</span>
+                  <button className="ghost small" type="button" onClick={() => onChange(path, removeDraftValue(items, [index]))}>
+                    Remove
+                  </button>
+                </div>
+                <PropsSchemaField
+                  schema={schema?.items}
+                  value={entry}
+                  path={[...path, index]}
+                  onChange={onChange}
+                />
+              </div>
+            ))
+          ) : (
+            <p className="hint">No items yet.</p>
+          )}
+        </div>
+      </fieldset>
+    );
+  }
+
+  if (type === "boolean") {
+    return (
+      <div className="schema-control">
+        <span className="schema-label">{label}</span>
+        {description ? <p className="schema-description">{description}</p> : null}
+        <label className="toggle schema-toggle">
+          <input
+            type="checkbox"
+            checked={Boolean(value)}
+            onChange={(e) => onChange(path, e.target.checked)}
+          />
+          <span>{Boolean(value) ? "True" : "False"}</span>
+        </label>
+      </div>
+    );
+  }
+
+  if (type === "number") {
+    return (
+      <div className="schema-control">
+        <span className="schema-label">{label}</span>
+        {description ? <p className="schema-description">{description}</p> : null}
+        <input
+          type="number"
+          value={typeof value === "number" ? value : ""}
+          onChange={(e) => {
+            const next = e.target.value.trim();
+            onChange(path, next === "" ? 0 : Number(next));
+          }}
+        />
+      </div>
+    );
+  }
+
+  if (type === "string" && schema?.enum?.length) {
+    return (
+      <div className="schema-control">
+        <span className="schema-label">{label}</span>
+        {description ? <p className="schema-description">{description}</p> : null}
+        <select value={typeof value === "string" ? value : String(schema.enum[0] ?? "")} onChange={(e) => onChange(path, e.target.value)}>
+          {schema.enum.map((entry) => (
+            <option key={String(entry)} value={String(entry)}>
+              {String(entry)}
+            </option>
+          ))}
+        </select>
+      </div>
+    );
+  }
+
+  if (type === "null") {
+    return (
+      <div className="schema-control">
+        <span className="schema-label">{label}</span>
+        {description ? <p className="schema-description">{description}</p> : null}
+        <input value="null" disabled readOnly />
+      </div>
+    );
+  }
+
+  return (
+    <div className="schema-control">
+      <span className="schema-label">{label}</span>
+      {description ? <p className="schema-description">{description}</p> : null}
+      <input
+        type="text"
+        value={typeof value === "string" ? value : value == null ? "" : String(value)}
+        onChange={(e) => onChange(path, e.target.value)}
+      />
+    </div>
+  );
+};
+
 const DiffGroup: React.FC<{
   label: string;
   kind: PropsDiffEntry["kind"];
@@ -446,18 +731,27 @@ function App() {
   const [manifest, setManifest] = useState<ManifestDocument>(() => initialManifest);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [propsDraft, setPropsDraft] = useState("");
+  const [propsFormDraft, setPropsFormDraft] = useState<ManifestShape>({});
+  const [propsMode, setPropsMode] = useState<PropsMode>("form");
+  const [jsonEditorOpen, setJsonEditorOpen] = useState(false);
   const [drafts, setDrafts] = useState<ManifestDraft[]>([]);
+  const [draftHistory, setDraftHistory] = useState<DraftRevision[]>([]);
   const [activeDraftId, setActiveDraftId] = useState<number | null>(null);
   const [savedSignature, setSavedSignature] = useState<string>(() => manifestSignature(initialManifest));
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [revertTargetId, setRevertTargetId] = useState<number | null>(null);
   const [pip, setPip] = useState<PipDocument | null>(null);
   const [remoteError, setRemoteError] = useState<string | null>(null);
   const [loadingManifest, setLoadingManifest] = useState(false);
   const [pipVaultStatus, setPipVaultStatus] = useState<string | null>(null);
   const [pipVaultBusy, setPipVaultBusy] = useState(false);
   const [pipVaultSnapshot, setPipVaultSnapshot] = useState<PipVaultSnapshot | null>(null);
+  const [pipVaultRecords, setPipVaultRecords] = useState<PipVaultRecord[]>([]);
+  const [pipVaultFilter, setPipVaultFilter] = useState("");
+  const [pipVaultRecordsLoading, setPipVaultRecordsLoading] = useState(false);
   const [health, setHealth] = useState<HealthStatus[]>([]);
   const [healthLoading, setHealthLoading] = useState(false);
   const [healthExpanded, setHealthExpanded] = useState(false);
@@ -491,6 +785,8 @@ function App() {
   const [deployStep, setDeployStep] = useState<string | null>(null);
   const [spawnStep, setSpawnStep] = useState<string | null>(null);
   const [deployedModuleTx, setDeployedModuleTx] = useState<string | null>(null);
+  const [deployLog, setDeployLog] = useState<AoMiniLogEntry | null>(null);
+  const [spawnLog, setSpawnLog] = useState<AoMiniLogEntry | null>(null);
   const [moduleSourceError, setModuleSourceError] = useState<string | null>(null);
   const [moduleTxError, setModuleTxError] = useState<string | null>(null);
   const [manifestTxError, setManifestTxError] = useState<string | null>(null);
@@ -498,6 +794,7 @@ function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [paletteIndex, setPaletteIndex] = useState(0);
+  const [hotkeyOverlayOpen, setHotkeyOverlayOpen] = useState(false);
   const [compositionDropActive, setCompositionDropActive] = useState(false);
   const [treeDropTargetId, setTreeDropTargetId] = useState<string | null>(null);
   const [draggedCatalogId, setDraggedCatalogId] = useState<string | null>(null);
@@ -536,17 +833,22 @@ function App() {
     },
     [selectedCatalogItem, selectedNode],
   );
-  const propsDraftValue = useMemo(
+  const propsFormValue = useMemo(
     () =>
       selectedNode
-        ? ((mergeDefaults(
+        ? ((buildFormValue(
             selectedCatalogItem?.propsSchema,
             selectedNode.props ?? propsDefaults ?? {},
           ) ?? {}) as ManifestShape)
         : null,
     [propsDefaults, selectedCatalogItem, selectedNode],
   );
-  const isDirty = useMemo(() => manifestSignature(manifest) !== savedSignature, [manifest, savedSignature]);
+  const currentManifestSignature = useMemo(() => manifestSignature(manifest), [manifest]);
+  const currentRevisionId = useMemo(
+    () => draftHistory.find((revision) => manifestSignature(revision.document) === currentManifestSignature)?.id ?? null,
+    [currentManifestSignature, draftHistory],
+  );
+  const isDirty = useMemo(() => currentManifestSignature !== savedSignature, [currentManifestSignature, savedSignature]);
   const totalNodes = useMemo(() => countNodes(manifest.nodes), [manifest.nodes]);
   const catalogTypes = useMemo(() => uniqueSorted(catalog.map((item) => item.type)), [catalog]);
   const catalogTags = useMemo(
@@ -586,6 +888,15 @@ function App() {
     return issues;
   }, [pip]);
   const pipVaultBlockingIssues = pipVaultValidationIssues.filter((issue) => issue.severity === "error");
+  const filteredPipVaultRecords = useMemo(() => {
+    const query = pipVaultFilter.trim().toLowerCase();
+    if (!query) return pipVaultRecords;
+
+    return pipVaultRecords.filter((record) => {
+      const haystack = `${record.manifestTx} ${record.tenant ?? ""} ${record.site ?? ""} ${record.createdAt} ${record.updatedAt}`.toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [pipVaultFilter, pipVaultRecords]);
   const propsInspection = useMemo(() => {
     if (!selectedNode) {
       return null;
@@ -606,12 +917,12 @@ function App() {
     }
 
     const validation = parseError ? null : validate(selectedCatalogItem?.propsSchema, parsed);
-    const diffEntries = parseError || !isPlainObject(parsed) ? [] : diff(defaults, parsed);
+    const diffEntries: PropsDiffEntry[] = parseError || !isPlainObject(parsed) ? [] : diff(defaults, parsed);
     const issues = parseError ? [{ path: "", message: parseError }] : validation?.issues ?? [];
     const issuesByPath = indexValidationIssues(issues);
     const diffGroups = groupDiffEntries(diffEntries);
     const diffSummary = diffEntries.reduce(
-      (acc, entry) => {
+      (acc, entry: PropsDiffEntry) => {
         acc[entry.kind] += 1;
         return acc;
       },
@@ -633,6 +944,8 @@ function App() {
       valid: !parseError && (validation?.valid ?? true),
     };
   }, [propsDefaults, propsDraft, selectedCatalogItem?.propsSchema, selectedNode]);
+  const hasPropsSchema = Boolean(selectedCatalogItem?.propsSchema);
+  const inspectorMode: PropsMode = hasPropsSchema && propsMode === "form" ? "form" : "json";
 
   const effectiveModuleTx = useMemo(
     () =>
@@ -644,9 +957,26 @@ function App() {
     [deployedModuleTx, moduleTxInput],
   );
 
+  const currentManifestTx = useMemo(
+    () => manifestTxInput.trim() || pip?.manifestTx?.trim() || "",
+    [manifestTxInput, pip?.manifestTx],
+  );
+
+  const manifestArweaveUrl = useMemo(
+    () => (currentManifestTx ? `https://arweave.net/${encodeURIComponent(currentManifestTx)}` : ""),
+    [currentManifestTx],
+  );
+
+  const manifestGqlExplorerUrl = "https://arweave.net/graphql";
+
   const canSpawn = useMemo(
     () => Boolean((manifestTxInput || pip?.manifestTx)?.trim()) && Boolean(effectiveModuleTx),
     [effectiveModuleTx, manifestTxInput, pip?.manifestTx],
+  );
+
+  const aoMiniLogRows = useMemo(
+    () => [deployLog, spawnLog].filter((entry): entry is AoMiniLogEntry => Boolean(entry)),
+    [deployLog, spawnLog],
   );
 
   const refreshHealth = useCallback(async () => {
@@ -674,6 +1004,41 @@ function App() {
     return null;
   }, []);
 
+  const refreshPipVaultRecords = useCallback(async () => {
+    setPipVaultRecordsLoading(true);
+    try {
+      const result = await listPipVaultRecords();
+      if (result.ok) {
+        setPipVaultRecords(result.records);
+        return result.records;
+      }
+
+      setPipVaultStatus(result.error);
+      return [];
+    } finally {
+      setPipVaultRecordsLoading(false);
+    }
+  }, []);
+
+  const refreshDraftHistory = useCallback(async (draftId: number | null) => {
+    if (!draftId) {
+      setDraftHistory([]);
+      return;
+    }
+
+    setHistoryLoading(true);
+    try {
+      const revisions = await listDraftRevisions(draftId);
+      setDraftHistory(revisions);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshDraftHistory(activeDraftId);
+  }, [activeDraftId, refreshDraftHistory]);
+
   useEffect(() => {
     fetchCatalog().then(setCatalog);
     refreshDrafts(true);
@@ -690,12 +1055,28 @@ function App() {
 
   useEffect(() => {
     if (selectedNode) {
-      const nextProps = propsDraftValue ?? (selectedNode.props ?? {});
-      setPropsDraft(JSON.stringify(nextProps, null, 2));
+      const nextProps = propsFormValue ?? (selectedNode.props ?? {});
+      setPropsFormDraft(nextProps as ManifestShape);
+      setPropsDraft(stringifyPropsDraft(nextProps));
+      setJsonEditorOpen(false);
     } else {
       setPropsDraft("");
+      setPropsFormDraft({});
     }
-  }, [propsDraftValue, selectedNode]);
+  }, [propsFormValue, selectedNode]);
+
+  useEffect(() => {
+    const raw = propsDraft.trim();
+
+    try {
+      const parsed = raw ? JSON.parse(raw) : {};
+      if (isPlainObject(parsed)) {
+        setPropsFormDraft(buildFormValue(selectedCatalogItem?.propsSchema, parsed) as ManifestShape);
+      }
+    } catch {
+      // Keep the last valid form draft while the JSON text is invalid.
+    }
+  }, [propsDraft, selectedCatalogItem?.propsSchema]);
 
   useEffect(() => {
     if (!selectedNodeId && manifest.nodes.length > 0) {
@@ -749,11 +1130,19 @@ function App() {
     let cancelled = false;
 
     const hydratePipVault = async () => {
-      const [vaultDescription, result] = await Promise.all([describePipVault(), loadPipFromVault()]);
+      const [vaultDescription, recordsResult, result] = await Promise.all([
+        describePipVault(),
+        listPipVaultRecords(),
+        loadPipFromVault(),
+      ]);
       if (cancelled) return;
 
       if (vaultDescription.ok) {
         setPipVaultSnapshot(vaultDescription);
+      }
+
+      if (recordsResult.ok) {
+        setPipVaultRecords(recordsResult.records);
       }
 
       if (result.ok) {
@@ -833,6 +1222,7 @@ function App() {
       setSavedSignature(manifestSignature(latest.document));
       setLastSavedAt(latest.updatedAt);
       setSelectedNodeId(latest.document.entry ?? latest.document.nodes[0]?.id ?? null);
+      void refreshDraftHistory(latest.id ?? null);
       flashStatus("Loaded latest draft");
     }
   };
@@ -841,6 +1231,7 @@ function App() {
     const next = newManifest();
     setManifest(next);
     setActiveDraftId(null);
+    setDraftHistory([]);
     setSelectedNodeId(null);
     setSavedSignature(manifestSignature(next));
     setLastSavedAt(null);
@@ -867,12 +1258,15 @@ function App() {
 
       try {
         const saved =
-          mode === "duplicate" ? await duplicateDraft({ name: snapshot.name, document: snapshot }) : await saveDraft(draftInput);
+          mode === "duplicate"
+            ? await duplicateDraft({ name: snapshot.name, document: snapshot })
+            : await saveDraft(draftInput, mode);
 
         setDrafts((current) => upsertDraftRow(current, saved));
         setActiveDraftId(saved.id ?? null);
         setSavedSignature(manifestSignature(saved.document));
         setLastSavedAt(saved.updatedAt);
+        void refreshDraftHistory(saved.id ?? null);
 
         if (mode === "duplicate" || manifestSignature(manifestRef.current) === snapshotSignature) {
           setManifest(saved.document);
@@ -976,6 +1370,7 @@ function App() {
       setPipVaultStatus("Vault loaded");
       flashStatus("PIP loaded from vault");
       await refreshPipVaultSnapshot();
+      await refreshPipVaultRecords();
     } finally {
       setPipVaultBusy(false);
     }
@@ -1004,6 +1399,7 @@ function App() {
         setPipVaultStatus(message);
         flashStatus("PIP saved to vault");
         await refreshPipVaultSnapshot();
+        await refreshPipVaultRecords();
       } else {
         setPipVaultStatus(saved.error);
         flashStatus(saved.error);
@@ -1026,6 +1422,56 @@ function App() {
       setPipVaultStatus("Vault deleted");
       flashStatus("PIP vault deleted");
       await refreshPipVaultSnapshot();
+      await refreshPipVaultRecords();
+    } finally {
+      setPipVaultBusy(false);
+    }
+  };
+
+  const handleLoadVaultRecord = async (recordId: string) => {
+    setPipVaultBusy(true);
+    try {
+      const loaded = await loadPipFromVaultRecord(recordId);
+      if (!loaded.ok) {
+        setPipVaultStatus(loaded.error);
+        flashStatus(loaded.error);
+        return;
+      }
+
+      setPip(loaded.pip);
+      setRemoteError(null);
+      setPipVaultStatus(`Loaded record ${recordId}`);
+      flashStatus(`Loaded PIP record ${abbreviateTx(loaded.pip.manifestTx)}`);
+      await refreshPipVaultSnapshot();
+    } finally {
+      setPipVaultBusy(false);
+    }
+  };
+
+  const handleDeleteVaultRecord = async (recordId: string) => {
+    if (!window.confirm("Delete this vault record?")) {
+      return;
+    }
+
+    setPipVaultBusy(true);
+    try {
+      const result = await deletePipVaultRecordStorage(recordId);
+      if (!result.ok) {
+        setPipVaultStatus(result.error);
+        flashStatus(result.error);
+        return;
+      }
+
+      if (result.removed) {
+        setPipVaultStatus("Vault record deleted");
+        flashStatus("PIP vault record deleted");
+      } else {
+        setPipVaultStatus("Record not found");
+        flashStatus("Record not found");
+      }
+
+      await refreshPipVaultSnapshot();
+      await refreshPipVaultRecords();
     } finally {
       setPipVaultBusy(false);
     }
@@ -1229,6 +1675,7 @@ function App() {
     try {
       setDeployStep("Creating signer");
       const response = await deployModule(walletSource, moduleSource);
+      recordAoLog("deploy", response.txId, response.placeholder ? "Placeholder" : "Success");
 
       if (response.txId) {
         setDeployedModuleTx(response.txId);
@@ -1251,6 +1698,7 @@ function App() {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Module deploy failed";
+      recordAoLog("deploy", null, "Error");
       setDeployOutcome(message);
       setDeployState("error");
       setDeployStep("Failed");
@@ -1306,6 +1754,7 @@ function App() {
         moduleTx,
         walletSource,
       );
+      recordAoLog("spawn", response.processId, response.placeholder ? "Placeholder" : "Success");
 
       if (response.moduleTx) {
         setModuleTxInput(response.moduleTx);
@@ -1329,6 +1778,7 @@ function App() {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Spawn failed";
+      recordAoLog("spawn", null, "Error");
       setSpawnOutcome(message);
       setSpawnState("error");
       setSpawnStep("Failed");
@@ -1443,6 +1893,21 @@ function App() {
     );
   };
 
+  const handlePropsModeChange = (nextMode: PropsMode) => {
+    setPropsMode(nextMode);
+    setJsonEditorOpen(nextMode === "json");
+  };
+
+  const handlePropsFormChange = (path: PropsDraftPath, nextValue: unknown) => {
+    const next = updateDraftValue(propsFormDraft, path, nextValue);
+    setPropsFormDraft(next as ManifestShape);
+    setPropsDraft(stringifyPropsDraft(next));
+  };
+
+  const handlePropsJsonChange = (nextValue: string) => {
+    setPropsDraft(nextValue);
+  };
+
   const applyProps = () => {
     if (!selectedNodeId) return;
     if (!propsInspection?.valid || !propsInspection.parsed) {
@@ -1457,7 +1922,8 @@ function App() {
         nodes: updateNodeInTree(prev.nodes, selectedNodeId, (node) => ({ ...node, props: nextProps })),
       }),
     );
-    setPropsDraft(JSON.stringify(nextProps, null, 2));
+    setPropsFormDraft(nextProps as ManifestShape);
+    setPropsDraft(stringifyPropsDraft(nextProps));
     flashStatus("Props updated");
   };
 
@@ -1465,7 +1931,8 @@ function App() {
     if (!selectedNodeId) return;
 
     const nextProps = propsDefaults ?? {};
-    setPropsDraft(JSON.stringify(nextProps, null, 2));
+    setPropsFormDraft(nextProps as ManifestShape);
+    setPropsDraft(stringifyPropsDraft(nextProps));
     setManifest((prev) =>
       touch({
         ...prev,
@@ -1499,6 +1966,7 @@ function App() {
       setSavedSignature(manifestSignature(draft.document));
       setLastSavedAt(draft.updatedAt);
       setSelectedNodeId(draft.document.entry ?? draft.document.nodes[0]?.id ?? null);
+      void refreshDraftHistory(id);
       flashStatus("Draft loaded");
     }
   };
@@ -1509,7 +1977,22 @@ function App() {
       startNewDraft();
     }
     refreshDrafts();
+    if (id === activeDraftId) {
+      setDraftHistory([]);
+    }
     flashStatus("Draft removed");
+  };
+
+  const handleRevertToRevision = (revision: DraftRevision) => {
+    setRevertTargetId(revision.id);
+    setManifest(revision.document);
+    setActiveDraftId(revision.draftId);
+    setSelectedNodeId(revision.document.entry ?? revision.document.nodes[0]?.id ?? null);
+    setLastSavedAt(revision.savedAt);
+    flashStatus(`Reverted to ${formatDraftSaveMode(revision.mode).toLowerCase()} from ${formatDate(revision.savedAt)}`);
+    window.setTimeout(() => {
+      setRevertTargetId((current) => (current === revision.id ? null : current));
+    }, 160);
   };
 
   const handleDuplicateDraft = async () => {
@@ -1577,6 +2060,42 @@ function App() {
     window.setTimeout(() => setStatus(null), 1800);
   };
 
+  const handleCopyAoId = async (value: string | null, label: string) => {
+    if (!value) return;
+
+    try {
+      await navigator.clipboard.writeText(value);
+      flashStatus(`${label} copied`);
+    } catch {
+      flashStatus(`Could not copy ${label.toLowerCase()}`);
+    }
+  };
+
+  const handleOpenAoId = (value: string | null) => {
+    if (!value) return;
+
+    const url = buildAoExplorerUrl(value);
+    if (!url) return;
+
+    openExternal(url);
+  };
+
+  const recordAoLog = (kind: "deploy" | "spawn", id: string | null, status: string) => {
+    const entry: AoMiniLogEntry = {
+      kind,
+      id,
+      status,
+      time: new Date().toISOString(),
+      href: buildAoExplorerUrl(id),
+    };
+
+    if (kind === "deploy") {
+      setDeployLog(entry);
+    } else {
+      setSpawnLog(entry);
+    }
+  };
+
   const closePalette = useCallback(() => {
     setPaletteOpen(false);
     setPaletteQuery("");
@@ -1589,8 +2108,20 @@ function App() {
       return;
     }
 
+    setHotkeyOverlayOpen(false);
     setPaletteOpen(true);
   }, [closePalette, paletteOpen]);
+
+  const closeHotkeyOverlay = useCallback(() => {
+    setHotkeyOverlayOpen(false);
+  }, []);
+
+  const toggleHotkeyOverlay = useCallback(() => {
+    setPaletteOpen(false);
+    setPaletteQuery("");
+    setPaletteIndex(0);
+    setHotkeyOverlayOpen((open) => !open);
+  }, []);
 
   const runPaletteAction = useCallback(
     async (action: CommandPaletteAction) => {
@@ -1687,15 +2218,76 @@ function App() {
     ? Math.min(paletteIndex, filteredPaletteActions.length - 1)
     : 0;
 
+  const hotkeySections: HotkeyOverlaySection[] = [
+    {
+      title: "Global shortcuts",
+      items: [
+        {
+          shortcut: "Cmd/Ctrl+K",
+          action: "Command palette",
+          description: "Open or close the action palette.",
+        },
+        {
+          shortcut: "Shift+/",
+          action: "Hotkey overlay",
+          description: "Open or close this reference panel.",
+        },
+        {
+          shortcut: "Esc",
+          action: "Close modal",
+          description: "Dismiss the palette or the hotkey overlay.",
+        },
+      ],
+    },
+    {
+      title: "Palette controls",
+      items: [
+        {
+          shortcut: "Arrow keys",
+          action: "Move selection",
+          description: "Step through filtered palette actions.",
+        },
+        {
+          shortcut: "Enter",
+          action: "Run action",
+          description: "Execute the selected palette item.",
+        },
+      ],
+    },
+    {
+      title: "Palette actions",
+      items: paletteActions.map((action) => ({
+        shortcut: action.shortcut ?? "—",
+        action: action.label,
+        description: action.description,
+      })),
+    },
+  ];
+
   useEffect(() => {
     const handleKeydown = (event: KeyboardEvent) => {
       const key = event.key?.toLowerCase();
       const isPaletteShortcut = key === "k" && (event.metaKey || event.ctrlKey);
       const isAltShortcut = event.altKey && !event.metaKey && !event.ctrlKey && !event.shiftKey;
+      const isHotkeyShortcut =
+        (event.shiftKey && key === "/" && !event.metaKey && !event.ctrlKey && !event.altKey) || key === "?";
 
       if (isPaletteShortcut) {
         event.preventDefault();
+        setHotkeyOverlayOpen(false);
         togglePalette();
+        return;
+      }
+
+      if (isHotkeyShortcut) {
+        event.preventDefault();
+        toggleHotkeyOverlay();
+        return;
+      }
+
+      if (hotkeyOverlayOpen && key === "escape") {
+        event.preventDefault();
+        closeHotkeyOverlay();
         return;
       }
 
@@ -1777,9 +2369,12 @@ function App() {
     handleDuplicateDraft,
     healthExpanded,
     paletteOpen,
+    hotkeyOverlayOpen,
     runPaletteAction,
     safePaletteIndex,
     togglePalette,
+    closeHotkeyOverlay,
+    toggleHotkeyOverlay,
     toggleTheme,
     filteredPaletteActions,
   ]);
@@ -1814,6 +2409,15 @@ function App() {
               {theme === "cyberpunk" ? "Cyberpunk" : "Light"} mode
             </span>
           </label>
+          <button
+            className="ghost small hotkey-help-button"
+            type="button"
+            onClick={toggleHotkeyOverlay}
+            aria-label="Open hotkey reference"
+            title="Hotkey reference"
+          >
+            ?
+          </button>
         </div>
         <div className="top-actions">
           <div className={`health-card ${healthExpanded ? "is-open" : "is-collapsed"}`}>
@@ -1953,8 +2557,67 @@ function App() {
             </button>
             {pipVaultStatus && <span className="pill ghost pip-vault-pill">{pipVaultStatus}</span>}
           </div>
+          <section className="draft-history-panel" aria-label="Draft save history">
+            <div className="draft-history-head">
+              <div>
+                <p className="eyebrow">Draft history</p>
+                <h4>Save timeline</h4>
+              </div>
+              <span className="pill ghost">
+                {historyLoading
+                  ? "Loading…"
+                  : draftHistory.length
+                    ? `${draftHistory.length} save${draftHistory.length === 1 ? "" : "s"}`
+                    : "No saves yet"}
+              </span>
+            </div>
+            {activeDraftId ? (
+              draftHistory.length ? (
+                <div className="draft-history-list">
+                  {draftHistory.map((revision) => {
+                    const isCurrent = revision.id === currentRevisionId;
+                    return (
+                      <article
+                        key={revision.id}
+                        className={`draft-history-item ${isCurrent ? "current" : ""}`}
+                      >
+                        <div className="draft-history-meta">
+                          <span className={`history-marker ${revision.mode}`} aria-hidden />
+                          <div className="draft-history-copy">
+                            <strong>{formatDraftSaveMode(revision.mode)}</strong>
+                            <span>{formatDate(revision.savedAt)}</span>
+                          </div>
+                        </div>
+                        <div className="draft-history-actions">
+                          <span className="pill ghost mono">{revision.name}</span>
+                          {isCurrent ? (
+                            <span className="pill accent">Current</span>
+                          ) : (
+                            <button
+                              className="ghost small"
+                              type="button"
+                              onClick={() => handleRevertToRevision(revision)}
+                              disabled={revertTargetId === revision.id}
+                            >
+                              {revertTargetId === revision.id ? "Reverting…" : "Revert"}
+                            </button>
+                          )}
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="draft-history-empty">Autosaves and manual saves for this draft will appear here.</p>
+              )
+            ) : (
+              <p className="draft-history-empty">Save or load a draft to build a reversible history.</p>
+            )}
+          </section>
         </div>
       </header>
+
+      <HotkeyOverlay open={hotkeyOverlayOpen} sections={hotkeySections} onClose={closeHotkeyOverlay} />
 
       <section className="panel pip-vault-panel">
         <div className="panel-header">
@@ -2046,6 +2709,89 @@ function App() {
               <button className="ghost" onClick={() => void refreshPipVaultSnapshot()} disabled={pipVaultBusy}>
                 Refresh
               </button>
+            </div>
+          </article>
+
+          <article className="pip-vault-card pip-vault-records-card">
+            <div className="stack-head pip-vault-records-head">
+              <div>
+                <p className="eyebrow">Records</p>
+                <h4>Vault table</h4>
+              </div>
+              <div className="pip-vault-records-actions">
+                <input
+                  className="pip-vault-filter"
+                  value={pipVaultFilter}
+                  onChange={(e) => setPipVaultFilter(e.target.value)}
+                  placeholder="Filter by tx, tenant, or site"
+                  aria-label="Filter vault records"
+                />
+                <span className="pill ghost">
+                  {filteredPipVaultRecords.length}/{pipVaultRecords.length || 0}
+                </span>
+                <button className="ghost small" onClick={() => void refreshPipVaultRecords()} disabled={pipVaultRecordsLoading || pipVaultBusy}>
+                  {pipVaultRecordsLoading ? "Refreshing…" : "Refresh"}
+                </button>
+                {pipVaultFilter && (
+                  <button className="ghost small" onClick={() => setPipVaultFilter("")}>
+                    Clear
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="pip-vault-table-wrap">
+              <table className="pip-vault-table">
+                <thead>
+                  <tr>
+                    <th>Created</th>
+                    <th>Updated</th>
+                    <th>manifestTx</th>
+                    <th>tenant / site</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredPipVaultRecords.length ? (
+                    filteredPipVaultRecords.map((record) => (
+                      <tr key={record.id}>
+                        <td>{formatDate(record.createdAt)}</td>
+                        <td>{formatDate(record.updatedAt)}</td>
+                        <td className="mono">{abbreviateTx(record.manifestTx)}</td>
+                        <td>
+                          <div className="pip-vault-record-meta">
+                            <strong>{normalizeText(record.tenant) || "—"}</strong>
+                            <span>{normalizeText(record.site) || "—"}</span>
+                          </div>
+                        </td>
+                        <td>
+                          <div className="pip-vault-row-actions">
+                            <button
+                              className="ghost small"
+                              onClick={() => void handleLoadVaultRecord(record.id)}
+                              disabled={pipVaultBusy || pipVaultRecordsLoading}
+                            >
+                              Load
+                            </button>
+                            <button
+                              className="ghost small danger"
+                              onClick={() => void handleDeleteVaultRecord(record.id)}
+                              disabled={pipVaultBusy || pipVaultRecordsLoading}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr className="pip-vault-empty-row">
+                      <td colSpan={5}>
+                        {pipVaultRecords.length ? "No records match the filter." : "No vault records saved yet."}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
           </article>
 
@@ -2187,10 +2933,77 @@ function App() {
               <p className="eyebrow">Preview</p>
               <h3>Composition</h3>
             </div>
-            <div className="pill ghost">
-              {totalNodes} node{totalNodes === 1 ? "" : "s"}
+            <div className="preview-header-meta">
+              <div className="pill ghost">
+                {totalNodes} node{totalNodes === 1 ? "" : "s"}
+              </div>
+              <div className={`pill ${currentManifestTx ? "accent" : "ghost"}`}>
+                {currentManifestTx ? `manifestTx ${abbreviateTx(currentManifestTx)}` : "No manifest tx"}
+              </div>
             </div>
           </div>
+          <section className="manifest-preview-card" aria-label="Current manifest metadata">
+            <div className="stack-head">
+              <div>
+                <p className="eyebrow">Manifest</p>
+                <h4>Current metadata</h4>
+              </div>
+              <div className="manifest-preview-actions">
+                <button
+                  className="ghost small"
+                  type="button"
+                  onClick={() => currentManifestTx && openExternal(manifestArweaveUrl)}
+                  disabled={!currentManifestTx}
+                  title={currentManifestTx ? "Open on arweave.net" : "Load a manifest tx first"}
+                >
+                  Open on arweave.net
+                </button>
+                <button
+                  className="ghost small"
+                  type="button"
+                  onClick={() => openExternal(manifestGqlExplorerUrl)}
+                  title="Open the Arweave GraphQL explorer"
+                >
+                  GQL explorer
+                </button>
+              </div>
+            </div>
+            <div className="manifest-preview-grid">
+              <div>
+                <span>ID</span>
+                <strong className="mono">{manifest.id}</strong>
+              </div>
+              <div>
+                <span>Version</span>
+                <strong>{manifest.version}</strong>
+              </div>
+              <div>
+                <span>Author</span>
+                <strong>{normalizeText(manifest.metadata.author) || "—"}</strong>
+              </div>
+              <div>
+                <span>Created</span>
+                <strong>{formatDate(manifest.metadata.createdAt)}</strong>
+              </div>
+              <div>
+                <span>Updated</span>
+                <strong>{formatDate(manifest.metadata.updatedAt)}</strong>
+              </div>
+              <div>
+                <span>Nodes</span>
+                <strong>{totalNodes}</strong>
+              </div>
+            </div>
+            <div className="manifest-preview-footer">
+              <div className="manifest-preview-tx">
+                <span>manifestTx</span>
+                <strong className="mono">{currentManifestTx ? currentManifestTx : "—"}</strong>
+              </div>
+              <span className={`pill ${loadingManifest ? "ghost" : remoteError ? "error" : "accent"}`}>
+                {loadingManifest ? "Fetching…" : remoteError ? "Fetch error" : "Ready"}
+              </span>
+            </div>
+          </section>
           <div
             className={`preview-surface ${compositionDropActive ? "drop-active" : ""}`}
             onDragOver={handleCompositionDragOver}
@@ -2239,6 +3052,30 @@ function App() {
             </div>
           ) : (
             <div className="props-body">
+              <div className="inspector-toolbar">
+                <div className="mode-toggle" role="tablist" aria-label="Inspector mode">
+                  <button
+                    type="button"
+                    className={inspectorMode === "form" ? "active" : "ghost"}
+                    onClick={() => handlePropsModeChange("form")}
+                    disabled={!hasPropsSchema}
+                  >
+                    Form
+                  </button>
+                  <button
+                    type="button"
+                    className={inspectorMode === "json" ? "active" : "ghost"}
+                    onClick={() => handlePropsModeChange("json")}
+                  >
+                    JSON
+                  </button>
+                </div>
+                <p className="hint">
+                  {hasPropsSchema
+                    ? "Schema-driven inputs stay synced with the raw JSON."
+                    : "No schema found for this block, so the raw JSON editor is the only mode."}
+                </p>
+              </div>
               <div className="inspector-badges">
                 <span className="badge schema">{selectedCatalogItem?.type ?? selectedNode.type}</span>
                 <span className={`badge ${propsInspection?.valid ? "valid" : "invalid"}`}>
@@ -2257,21 +3094,48 @@ function App() {
                 <span>Title</span>
                 <input value={selectedNode.title} onChange={(e) => updateNodeTitle(e.target.value)} />
               </label>
-              <div className="props-json-panel">
-                <label className="field">
-                  <span>Props JSON</span>
-                  <textarea
-                    rows={10}
-                    value={propsDraft}
-                    onChange={(e) => setPropsDraft(e.target.value)}
-                    className={propsInspection && !propsInspection.valid ? "invalid" : ""}
+              {inspectorMode === "form" && hasPropsSchema ? (
+                <div className="props-form-panel">
+                  <PropsSchemaField
+                    schema={selectedCatalogItem?.propsSchema}
+                    value={propsFormDraft}
+                    path={[]}
+                    onChange={handlePropsFormChange}
                   />
+                  <div className="props-json-toggle">
+                    <button className="ghost small" type="button" onClick={() => setJsonEditorOpen((current) => !current)}>
+                      {jsonEditorOpen ? "Hide raw JSON" : "Show raw JSON"}
+                    </button>
+                    <span className="hint">Raw JSON stays available for advanced edits.</span>
+                  </div>
+                </div>
+              ) : null}
+              <div className="props-json-panel">
+                {inspectorMode === "json" || jsonEditorOpen ? (
+                  <label className="field props-json-editor">
+                    <span>Props JSON</span>
+                    <textarea
+                      rows={10}
+                      value={propsDraft}
+                      onChange={(e) => handlePropsJsonChange(e.target.value)}
+                      className={propsInspection && !propsInspection.valid ? "invalid" : ""}
+                    />
+                  </label>
+                ) : (
+                  <div className="props-json-placeholder">
+                    <p className="hint">Raw JSON editor is hidden.</p>
+                    <button className="ghost small" type="button" onClick={() => setJsonEditorOpen(true)}>
+                      Open JSON editor
+                    </button>
+                  </div>
+                )}
+                <div className="diff-summary">
+                  <div className="diff-summary-head">
+                    <span className="eyebrow">Validation</span>
+                    <span className="badge ghost">{propsInspection?.issueCount ?? 0}</span>
+                  </div>
                   {propsInspection?.issues.length ? (
                     <div className="validation-list">
-                      <div className="validation-list-head">
-                        <span className="eyebrow">Validation</span>
-                        <span className="badge ghost">{propsInspection.issueCount}</span>
-                      </div>
                       {propsInspection.issues.map((issue) => (
                         <div key={`${issue.path}:${issue.message}`} className="validation-row">
                           <span className="badge issue">{issue.path || "root"}</span>
@@ -2280,11 +3144,9 @@ function App() {
                       ))}
                     </div>
                   ) : (
-                    <p className="hint">Edit as JSON</p>
+                    <p className="hint">No validation issues.</p>
                   )}
-                </label>
-                <div className="diff-summary">
-                  <div className="diff-summary-head">
+                  <div className="diff-summary-head diff-summary-spaced">
                     <span className="eyebrow">Diff vs defaults</span>
                     <label className="toggle">
                       <input
@@ -2617,6 +3479,82 @@ function App() {
             {!spawnOutcome && deployedModuleTx && (
               <p className="subtle mono">Spawn will use module tx: {deployedModuleTx}</p>
             )}
+          </div>
+        </div>
+
+        <div className="ao-mini-log">
+          <div className="ao-mini-log-header">
+            <div>
+              <p className="eyebrow">AO mini-log</p>
+              <h4>Latest deploys and spawns</h4>
+            </div>
+            <p className="subtle">Quick access to the last response from each action.</p>
+          </div>
+          <div className="ao-mini-log-table-wrap">
+            <table className="ao-mini-log-table">
+              <thead>
+                <tr>
+                  <th scope="col">Type</th>
+                  <th scope="col">tx / processId</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Time</th>
+                  <th scope="col">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {aoMiniLogRows.length ? (
+                  aoMiniLogRows.map((entry) => (
+                    <tr key={entry.kind}>
+                      <td>
+                        <span className={`mini-log-kind ${entry.kind}`}>{entry.kind}</span>
+                      </td>
+                      <td>
+                        <span className={`mini-log-id ${entry.id ? "mono" : "empty"}`} title={entry.id ?? ""}>
+                          {entry.id ?? "—"}
+                        </span>
+                      </td>
+                      <td>
+                        <span className={`mini-log-status ${entry.status.toLowerCase()}`}>{entry.status}</span>
+                      </td>
+                      <td>
+                        <time dateTime={entry.time}>{formatDate(entry.time)}</time>
+                      </td>
+                      <td>
+                        <div className="mini-log-actions">
+                          <button
+                            className="ghost small"
+                            type="button"
+                            onClick={() =>
+                              void handleCopyAoId(
+                                entry.id,
+                                entry.kind === "deploy" ? "Deploy tx" : "Process id",
+                              )
+                            }
+                            disabled={!entry.id}
+                          >
+                            Copy
+                          </button>
+                          <button
+                            className="ghost small"
+                            type="button"
+                            onClick={() => handleOpenAoId(entry.id)}
+                            disabled={!entry.id}
+                          >
+                            Open
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={5} className="ao-mini-log-empty">
+                      Run a deploy or spawn to capture the latest AO response here.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
       </div>

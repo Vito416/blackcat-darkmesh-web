@@ -2,6 +2,15 @@ import type { PipDocument } from "./pipValidation";
 
 type PipVaultBridge = Window["pipVault"];
 
+export type PipVaultRecord = {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  manifestTx: string;
+  tenant?: string;
+  site?: string;
+};
+
 export type PipVaultReadResult =
   | { ok: true; pip: PipDocument; updatedAt?: string; exists: true }
   | { ok: false; error: string; exists?: false };
@@ -45,6 +54,61 @@ export async function writePipVault(pip: PipDocument): Promise<{ ok: true; updat
     return {
       ok: false,
       error: err instanceof Error ? err.message : "Unable to write PIP vault",
+    };
+  }
+}
+
+export async function listPipVaultRecords(): Promise<{ ok: true; records: PipVaultRecord[] } | { ok: false; error: string }> {
+  const api = bridge();
+  if (!api?.list) {
+    return { ok: false, error: "PIP vault IPC bridge is unavailable" };
+  }
+
+  try {
+    const result = await api.list();
+    return { ok: true, records: result.records ?? [] };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Unable to list PIP vault records",
+    };
+  }
+}
+
+export async function loadPipVaultRecord(id: string): Promise<PipVaultReadResult> {
+  const api = bridge();
+  if (!api?.loadRecord) {
+    return { ok: false, error: "PIP vault IPC bridge is unavailable" };
+  }
+
+  try {
+    const result = await api.loadRecord(id);
+    if (!result.exists || !result.pip) {
+      return { ok: false, error: "No PIP vault record found", exists: false };
+    }
+
+    return { ok: true, pip: result.pip as PipDocument, updatedAt: result.updatedAt, exists: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Unable to load PIP vault record",
+    };
+  }
+}
+
+export async function deletePipVaultRecord(id: string): Promise<{ ok: true; removed: boolean } | { ok: false; error: string }> {
+  const api = bridge();
+  if (!api?.deleteRecord) {
+    return { ok: false, error: "PIP vault IPC bridge is unavailable" };
+  }
+
+  try {
+    const result = await api.deleteRecord(id);
+    return { ok: true, removed: Boolean(result.removed) };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Unable to delete PIP vault record",
     };
   }
 }

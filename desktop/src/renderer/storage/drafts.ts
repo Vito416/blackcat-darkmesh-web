@@ -3,17 +3,38 @@ import Dexie, { Table } from "dexie";
 import { ManifestDocument, ManifestDraft } from "../types/manifest";
 
 const DB_NAME = "darkmesh-manifest-drafts";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const CURRENT_SCHEMA_VERSION = 2;
 const EXPORT_FORMAT_VERSION = 1;
+const REVISION_LIMIT = 40;
 
 type DraftInput =
   | ManifestDraft
   | (Omit<ManifestDraft, "updatedAt" | "createdAt"> & Partial<Pick<ManifestDraft, "id" | "createdAt" | "updatedAt">>);
 
 type DraftWriteResult = ManifestDraft;
+export type DraftSaveMode = "autosave" | "manual";
 
 type DraftRow = ManifestDraft & { schemaVersion: number };
+
+type DraftRevisionRow = {
+  id?: number;
+  draftId: number;
+  mode: DraftSaveMode;
+  savedAt: string;
+  name: string;
+  document: ManifestDocument;
+  schemaVersion: number;
+};
+
+export interface DraftRevision {
+  id: number;
+  draftId: number;
+  mode: DraftSaveMode;
+  savedAt: string;
+  name: string;
+  document: ManifestDocument;
+}
 
 interface DraftExportFile {
   format: "darkmesh-drafts";
@@ -77,8 +98,34 @@ const stripSchema = (draft: DraftRow): ManifestDraft => {
   return rest;
 };
 
+const stripRevisionSchema = (revision: DraftRevisionRow): DraftRevision => {
+  const { schemaVersion, ...rest } = revision;
+  return rest as DraftRevision;
+};
+
+const addDraftRevision = async (draftId: number, draft: DraftRow, mode: DraftSaveMode): Promise<void> => {
+  const revision: DraftRevisionRow = {
+    draftId,
+    mode,
+    savedAt: draft.updatedAt,
+    name: draft.name,
+    document: draft.document,
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+  };
+
+  await db.revisions.add(revision);
+
+  const revisions = await db.revisions.where("draftId").equals(draftId).sortBy("savedAt");
+  const excess = revisions.length - REVISION_LIMIT;
+  if (excess > 0) {
+    const stale = revisions.slice(0, excess);
+    await db.revisions.bulkDelete(stale.map((item) => item.id!).filter(Boolean));
+  }
+};
+
 class DraftDatabase extends Dexie {
   drafts!: Table<DraftRow, number>;
+  revisions!: Table<DraftRevisionRow, number>;
 
   constructor() {
     super(DB_NAME);
@@ -87,9 +134,14 @@ class DraftDatabase extends Dexie {
       drafts: "++id, updatedAt, name",
     });
 
+    this.version(2).stores({
+      drafts: "++id, updatedAt, name, schemaVersion",
+    });
+
     this.version(DB_VERSION)
       .stores({
         drafts: "++id, updatedAt, name, schemaVersion",
+        revisions: "++id, draftId, savedAt, mode, schemaVersion",
       })
       .upgrade(async (tx) => {
         await tx
@@ -124,16 +176,19 @@ export async function getDraft(id: number): Promise<ManifestDraft | undefined> {
 
 export async function saveDraft(
   draft: Omit<ManifestDraft, "updatedAt" | "createdAt"> & Partial<Pick<ManifestDraft, "id" | "createdAt" | "updatedAt">>,
+  mode: DraftSaveMode = "manual",
 ): Promise<DraftWriteResult> {
   const payload = toDraftRow(draft);
+  const draftId = draft.id ?? (await db.drafts.add(payload));
 
   if (draft.id) {
     await db.drafts.put({ ...payload, id: draft.id });
-    return { ...stripSchema({ ...payload, id: draft.id }) };
+  } else {
+    // draftId already assigned by the add above
   }
 
-  const id = await db.drafts.add(payload);
-  return { ...stripSchema({ ...payload, id }) };
+  await addDraftRevision(draftId, { ...payload, id: draftId }, mode);
+  return { ...stripSchema({ ...payload, id: draftId }) };
 }
 
 export async function duplicateDraft(
@@ -143,11 +198,22 @@ export async function duplicateDraft(
   return saveDraft({
     name: copyName,
     document: draft.document,
-  });
+  }, "manual");
 }
 
 export async function deleteDraft(id: number): Promise<void> {
   await db.drafts.delete(id);
+  await db.revisions.where("draftId").equals(id).delete();
+}
+
+export async function listDraftRevisions(draftId: number, limit = REVISION_LIMIT): Promise<DraftRevision[]> {
+  const revisions = await db.revisions.where("draftId").equals(draftId).sortBy("savedAt");
+  return revisions.reverse().slice(0, limit).map(stripRevisionSchema);
+}
+
+export async function getDraftRevision(id: number): Promise<DraftRevision | undefined> {
+  const revision = await db.revisions.get(id);
+  return revision ? stripRevisionSchema(revision) : undefined;
 }
 
 export async function exportDraftsToJson(): Promise<string> {

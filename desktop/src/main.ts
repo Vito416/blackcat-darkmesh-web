@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import fs from "fs/promises";
 import path from "path";
 import net from "net";
-import { clearPipVault, describePipVault, readPipVault, writePipVault } from "./main/pipVault";
+import { clearPipVault, deletePipVaultRecord, describePipVault, listPipVaultRecords, readPipVault, readPipVaultRecord, writePipVault } from "./main/pipVault";
 
 const isDev = process.env.NODE_ENV !== "production";
 
@@ -107,6 +107,26 @@ app.whenReady().then(() => {
 
   ipcMain.handle("pipVault:describe", async () => {
     return describePipVault();
+  });
+
+  ipcMain.handle("pipVault:list", async () => {
+    return listPipVaultRecords();
+  });
+
+  ipcMain.handle("pipVault:readRecord", async (_event, id: unknown) => {
+    if (typeof id !== "string" || !id.trim()) {
+      throw new Error("Invalid PIP vault record id");
+    }
+
+    return readPipVaultRecord(id);
+  });
+
+  ipcMain.handle("pipVault:deleteRecord", async (_event, id: unknown) => {
+    if (typeof id !== "string" || !id.trim()) {
+      throw new Error("Invalid PIP vault record id");
+    }
+
+    return deletePipVaultRecord(id);
   });
 
   ipcMain.handle("wallet:read", async (_event, walletPath: unknown) => {

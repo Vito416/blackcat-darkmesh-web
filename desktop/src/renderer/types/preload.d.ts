@@ -23,6 +23,24 @@ declare global {
       write: (pip: Record<string, unknown>) => Promise<{ updatedAt: string }>;
       clear: () => Promise<{ ok: true }>;
       describe: () => Promise<{ exists: boolean; updatedAt?: string; encrypted: boolean; path: string }>;
+      list: () => Promise<
+        | {
+            exists: boolean;
+            records: Array<{
+              id: string;
+              createdAt: string;
+              updatedAt: string;
+              manifestTx: string;
+              tenant?: string;
+              site?: string;
+            }>;
+          }
+        | undefined
+      >;
+      loadRecord: (
+        id: string,
+      ) => Promise<{ exists: boolean; updatedAt?: string; pip?: Record<string, unknown> } | undefined>;
+      deleteRecord: (id: string) => Promise<{ ok: true; removed: boolean } | undefined>;
     };
   }
 }

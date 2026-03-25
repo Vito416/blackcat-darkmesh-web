@@ -1,7 +1,15 @@
 import * as pipClient from "../../../../src/manifest/pipClient";
 
 import { normalizePipInput, validatePipDocument, type PipDocument } from "./pipValidation";
-import { clearPipVault, readPipVault, writePipVault } from "./pipVault";
+import {
+  clearPipVault,
+  deletePipVaultRecord as deletePipVaultRecordImpl,
+  listPipVaultRecords as listPipVaultRecordsImpl,
+  readPipVault,
+  loadPipVaultRecord,
+  writePipVault,
+  type PipVaultRecord,
+} from "./pipVault";
 
 export type PipLoadResult =
   | { ok: true; pip: PipDocument; source: "prompt" | "worker" | "vault" }
@@ -52,10 +60,37 @@ export async function loadPipFromVault(): Promise<PipLoadResult> {
   return { ok: true, pip: validated.pip, source: "vault" };
 }
 
+export async function loadPipFromVaultRecord(id: string): Promise<PipLoadResult> {
+  const result = await loadPipVaultRecord(id);
+  if (!result.ok) {
+    return { ok: false, error: "No PIP vault record found" };
+  }
+
+  const validated = validatePipDocument(result.pip);
+  if (!validated.ok) {
+    return validated;
+  }
+
+  return { ok: true, pip: validated.pip, source: "vault" };
+}
+
+export async function listPipVaultRecords(): Promise<{ ok: true; records: PipVaultRecord[] } | { ok: false; error: string }> {
+  const result = await listPipVaultRecordsImpl();
+  if (!result.ok) {
+    return { ok: false, error: result.error };
+  }
+
+  return { ok: true, records: result.records };
+}
+
 export async function savePipToVault(pip: PipDocument): Promise<{ ok: true; updatedAt: string } | { ok: false; error: string }> {
   return writePipVault(pip);
 }
 
 export async function clearPipVaultStorage(): Promise<{ ok: true } | { ok: false; error: string }> {
   return clearPipVault();
+}
+
+export async function deletePipVaultRecordStorage(id: string): Promise<{ ok: true; removed: boolean } | { ok: false; error: string }> {
+  return deletePipVaultRecordImpl(id);
 }

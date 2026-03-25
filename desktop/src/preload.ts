@@ -2,6 +2,14 @@ import { contextBridge, ipcRenderer } from "electron";
 
 type WalletResponse = { path: string; wallet: Record<string, unknown> };
 type PipVaultReadResult = { exists: boolean; updatedAt?: string; pip?: Record<string, unknown> };
+type PipVaultRecord = {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  manifestTx: string;
+  tenant?: string;
+  site?: string;
+};
 type PipVaultDescribeResult = { exists: boolean; updatedAt?: string; encrypted: boolean; path: string };
 
 const walletApi = {
@@ -23,6 +31,9 @@ contextBridge.exposeInMainWorld("pipVault", {
   write: (pip: Record<string, unknown>) => ipcRenderer.invoke("pipVault:write", pip),
   clear: (): Promise<{ ok: true }> => ipcRenderer.invoke("pipVault:clear"),
   describe: (): Promise<PipVaultDescribeResult> => ipcRenderer.invoke("pipVault:describe"),
+  list: (): Promise<{ exists: boolean; records: PipVaultRecord[] }> => ipcRenderer.invoke("pipVault:list"),
+  loadRecord: (id: string): Promise<PipVaultReadResult> => ipcRenderer.invoke("pipVault:readRecord", id),
+  deleteRecord: (id: string): Promise<{ ok: true; removed: boolean }> => ipcRenderer.invoke("pipVault:deleteRecord", id),
 });
 
 export {};

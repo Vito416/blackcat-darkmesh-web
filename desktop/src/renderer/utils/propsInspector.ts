@@ -40,6 +40,35 @@ const cloneValue = (value: unknown): unknown => {
   return value;
 };
 
+const createEmptyValue = (schema: PropsSchema | undefined): unknown => {
+  if (!schema) {
+    return undefined;
+  }
+
+  if (schema.default !== undefined) {
+    return cloneValue(schema.default);
+  }
+
+  const resolvedType = inferType(schema, undefined);
+
+  switch (resolvedType) {
+    case "object":
+      return {};
+    case "array":
+      return [];
+    case "string":
+      return "";
+    case "number":
+      return 0;
+    case "boolean":
+      return false;
+    case "null":
+      return null;
+    default:
+      return undefined;
+  }
+};
+
 const joinPath = (base: string, segment: string): string => {
   if (!base) return segment;
   return segment.startsWith("[") ? `${base}${segment}` : `${base}.${segment}`;
@@ -137,6 +166,56 @@ export const mergeDefaults = (schema: PropsSchema | undefined, value: unknown): 
   }
 
   return undefined;
+};
+
+export const buildFormValue = (schema: PropsSchema | undefined, value: unknown): unknown => {
+  if (!schema) {
+    return cloneValue(value);
+  }
+
+  const resolvedType = inferType(schema, value);
+
+  if (resolvedType === "object") {
+    const source = isPlainObject(value)
+      ? value
+      : isPlainObject(schema.default)
+        ? (schema.default as Record<string, unknown>)
+        : {};
+    const properties = schema.properties ?? {};
+    const result: Record<string, unknown> = {};
+
+    for (const [key, childSchema] of Object.entries(properties)) {
+      result[key] = buildFormValue(childSchema, Object.prototype.hasOwnProperty.call(source, key) ? source[key] : undefined);
+    }
+
+    for (const [key, entry] of Object.entries(source)) {
+      if (Object.prototype.hasOwnProperty.call(properties, key)) continue;
+
+      if (isPlainObject(schema.additionalProperties)) {
+        result[key] = buildFormValue(schema.additionalProperties, entry);
+      } else {
+        result[key] = cloneValue(entry);
+      }
+    }
+
+    return result;
+  }
+
+  if (resolvedType === "array") {
+    const source = Array.isArray(value)
+      ? value
+      : Array.isArray(schema.default)
+        ? schema.default
+        : [];
+
+    return source.map((entry) => (schema.items ? buildFormValue(schema.items, entry) : cloneValue(entry)));
+  }
+
+  if (value !== undefined) {
+    return cloneValue(value);
+  }
+
+  return createEmptyValue(schema);
 };
 
 export const validate = (schema: PropsSchema | undefined, value: unknown): PropsValidationResult => {
