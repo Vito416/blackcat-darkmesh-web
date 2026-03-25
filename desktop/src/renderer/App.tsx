@@ -5154,9 +5154,11 @@ function App() {
                 <button
                   className="ghost icon-lead"
                   data-icon="⇄"
+                  data-testid="draft-diff-btn"
                   onClick={() => void openDraftDiffPanel()}
                   onMouseEnter={prefetchDraftDiffPanel}
                   onFocus={prefetchDraftDiffPanel}
+                  aria-label="Open draft diff panel"
                 >
                   Draft diff
                 </button>
@@ -5426,6 +5428,7 @@ function App() {
               </div>
               <button
                 className="primary"
+                data-testid="vault-unlock-btn"
                 onClick={handleEnableVaultPassword}
                 disabled={
                   pipVaultBusy ||

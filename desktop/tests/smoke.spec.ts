@@ -187,7 +187,7 @@ test.describe("Desktop renderer smoke", () => {
     await redo.click();
     await expect(titleInput).toHaveValue("Smoke Draft v2");
 
-    await page.getByRole("button", { name: "Draft diff" }).click();
+    await page.getByTestId("draft-diff-btn").click();
     const diffDialog = page.getByRole("dialog", { name: "Draft diff panel" });
     await expect(diffDialog.getByText("Cherry-pick changes")).toBeVisible();
     await expect(diffDialog.getByText(/Select a draft|No diffs found/)).toBeVisible();
@@ -212,7 +212,7 @@ test.describe("Desktop renderer smoke", () => {
     await expect(header).toContainText("Locked");
 
     await page.getByLabel("Vault password").fill(TEST_PASSWORD);
-    await page.getByRole("button", { name: /Unlock|Enable password/ }).click();
+    await page.getByTestId("vault-unlock-btn").click();
 
     await expect(header).toContainText("Password ready");
     await expect(header).toContainText("Unlocked");
