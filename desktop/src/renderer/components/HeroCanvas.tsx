@@ -5,6 +5,7 @@ type HeroMode = "idle" | "webgl" | "fallback";
 
 type HeroCanvasProps = {
   theme: "light" | "cyberpunk";
+  highEffects: boolean;
 };
 
 const PARTICLE_COUNT = 220;
@@ -12,7 +13,7 @@ const FRAME_INTERVAL = 1000 / 30; // throttle to ~30fps to keep perf steady
 
 const cssColor = (value: string, fallback: string) => value.trim() || fallback;
 
-const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme }) => {
+const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme, highEffects }) => {
   const mountRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [mode, setMode] = useState<HeroMode>("idle");
@@ -26,8 +27,8 @@ const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme }) => {
       return;
     }
 
-    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    if (reduceMotion) {
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    if (reduceMotion || !highEffects) {
       setMode("fallback");
       return;
     }
@@ -38,6 +39,9 @@ const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme }) => {
     let particles: THREE.Points | null = null;
     let particleGeometry: THREE.BufferGeometry | null = null;
     let gradientMesh: THREE.Mesh | null = null;
+    let gridMesh: THREE.Mesh | null = null;
+    let gridGeometry: THREE.PlaneGeometry | null = null;
+    let gridMaterial: THREE.ShaderMaterial | null = null;
     let animationFrame = 0;
     let disposed = false;
 
@@ -78,13 +82,16 @@ const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme }) => {
 
     scene = new THREE.Scene();
     camera = new THREE.PerspectiveCamera(46, 1, 0.1, 100);
-    camera.position.set(0, 0.35, 9);
+    camera.position.set(0, 1.1, 9.6);
 
     const rootStyle = getComputedStyle(document.documentElement);
     const accent = cssColor(rootStyle.getPropertyValue("--accent"), "#00eaff");
     const accentStrong = cssColor(rootStyle.getPropertyValue("--accent-strong"), "#ff2ddf");
+    const fogBase = cssColor(rootStyle.getPropertyValue("--bg"), "#040815");
     const accentColor = new THREE.Color(accent);
     const accentStrongColor = new THREE.Color(accentStrong);
+    const fogColor = new THREE.Color(fogBase);
+    scene.fog = new THREE.FogExp2(fogColor, 0.085);
 
     const gradientMaterial = new THREE.ShaderMaterial({
       uniforms: {
@@ -116,6 +123,80 @@ const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme }) => {
     gradientMesh.position.set(0, -0.28, -6.4);
     gradientMesh.rotation.set(-0.18, 0.22, 0);
     scene.add(gradientMesh);
+
+    const gridUniforms = {
+      time: { value: 0 },
+      color1: { value: accentStrongColor },
+      color2: { value: accentColor },
+      fogColor: { value: fogColor },
+      fogNear: { value: 5.5 },
+      fogFar: { value: 18.0 },
+    } satisfies Record<string, { value: number | THREE.Color }>;
+
+    gridMaterial = new THREE.ShaderMaterial({
+      uniforms: gridUniforms,
+      vertexShader: `
+        varying vec2 vUv;
+        varying float vDepth;
+        void main() {
+          vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+          vDepth = -worldPosition.z;
+          vUv = position.xz * 0.42;
+          gl_Position = projectionMatrix * viewMatrix * worldPosition;
+        }
+      `,
+      fragmentShader: `
+        #ifdef GL_OES_standard_derivatives
+        #extension GL_OES_standard_derivatives : enable
+        #endif
+        uniform float time;
+        uniform vec3 color1;
+        uniform vec3 color2;
+        uniform vec3 fogColor;
+        uniform float fogNear;
+        uniform float fogFar;
+        varying vec2 vUv;
+        varying float vDepth;
+
+        float gridLine(vec2 uv, float thickness) {
+          vec2 cell = abs(fract(uv) - 0.5);
+          float line = min(cell.x, cell.y);
+          float aa = min(fwidth(uv.x), fwidth(uv.y));
+          return 1.0 - smoothstep(thickness, thickness + aa, line);
+        }
+
+        void main() {
+          vec2 uv = vUv;
+          uv.y += time * 0.55;
+
+          float major = gridLine(uv * 0.55, 0.035);
+          float minor = gridLine(uv, 0.02) * 0.85;
+          float grid = max(major, minor);
+
+          float pulse = sin((uv.y + time * 0.75) * 0.6) * 0.5 + 0.5;
+          vec3 neon = mix(color1, color2, pulse);
+
+          float depthFog = smoothstep(fogNear, fogFar, vDepth);
+          float intensity = grid * (1.15 - depthFog * 0.7);
+          vec3 color = neon * intensity;
+
+          color = mix(color, fogColor, depthFog * 0.85);
+          float alpha = clamp(intensity * (1.0 - depthFog * 0.55), 0.0, 0.92);
+
+          gl_FragColor = vec4(color, alpha);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+
+    gridGeometry = new THREE.PlaneGeometry(34, 62, 1, 1);
+    gridGeometry.rotateX(-Math.PI / 2);
+    gridMesh = new THREE.Mesh(gridGeometry, gridMaterial);
+    gridMesh.position.set(0, -3.6, -12);
+    gridMesh.rotation.set(-0.06, 0.24, 0.18);
+    scene.add(gridMesh);
 
     particleGeometry = new THREE.BufferGeometry();
     const positions = new Float32Array(PARTICLE_COUNT * 3);
@@ -155,11 +236,13 @@ const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme }) => {
     resize();
 
     let lastFrame = 0;
+    const startTime = performance.now();
     const renderFrame = (time: number) => {
       if (disposed) return;
 
       if (time - lastFrame >= FRAME_INTERVAL) {
         lastFrame = time;
+        const elapsed = (time - startTime) * 0.001;
 
         if (particles && particleGeometry) {
           const positionAttr = particleGeometry.getAttribute("position") as THREE.BufferAttribute;
@@ -174,15 +257,30 @@ const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme }) => {
           particles.rotation.z += 0.0008;
         }
 
+        if (gridMaterial) {
+          gridMaterial.uniforms.time.value = elapsed;
+        }
+
         if (camera) {
-          camera.position.x += (pointer.x - camera.position.x) * 0.035;
-          camera.position.y += (pointer.y - camera.position.y) * 0.035;
-          camera.lookAt(0, 0, -6.5);
+          const targetX = pointer.x * 0.8;
+          const targetY = -1.6 + pointer.y * 0.85;
+          const targetZ = -8.6 + pointer.y * 0.4;
+          camera.position.x += (pointer.x * 0.9 - camera.position.x) * 0.045;
+          camera.position.y += ((1.1 + pointer.y * 0.7) - camera.position.y) * 0.05;
+          camera.lookAt(targetX, targetY, targetZ);
         }
 
         if (gradientMesh) {
           gradientMesh.rotation.y += (pointer.x * 0.25 - gradientMesh.rotation.y) * 0.05;
-          gradientMesh.rotation.x += (-0.18 + pointer.y * 0.25 - gradientMesh.rotation.x) * 0.05;
+          gradientMesh.rotation.x += (-0.24 + pointer.y * 0.35 - gradientMesh.rotation.x) * 0.05;
+        }
+
+        if (gridMesh) {
+          const targetX = pointer.x * 1.6;
+          const targetY = -3.6 + pointer.y * 0.8;
+          gridMesh.position.x += (targetX - gridMesh.position.x) * 0.06;
+          gridMesh.position.y += (targetY - gridMesh.position.y) * 0.06;
+          gridMesh.rotation.y += (pointer.x * 0.4 - gridMesh.rotation.y) * 0.04;
         }
 
         renderer?.render(scene as THREE.Scene, camera as THREE.PerspectiveCamera);
@@ -208,14 +306,22 @@ const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme }) => {
       if (gradientMesh?.material instanceof THREE.Material) {
         gradientMesh.material.dispose();
       }
+      gridGeometry?.dispose();
+      gridMaterial?.dispose();
       particleGeometry?.dispose();
       renderer?.dispose();
       setMode("idle");
     };
-  }, [theme]);
+  }, [highEffects, theme]);
 
   return (
-    <div ref={mountRef} className="hero-stage" data-mode={mode} aria-hidden="true">
+    <div
+      ref={mountRef}
+      className="hero-stage"
+      data-mode={mode}
+      data-high-effects={highEffects ? "on" : "off"}
+      aria-hidden="true"
+    >
       <canvas ref={canvasRef} className="hero-canvas" />
       <div className="hero-fallback">
         <div className="hero-fallback-layer glow" />

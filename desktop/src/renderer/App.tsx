@@ -109,6 +109,7 @@ import {
   setupCompleted,
 } from "./storage/settings";
 import { fetchWalletFromPath, parseWalletJson } from "./services/wallet";
+import VaultCrystal, { type VaultCrystalPulse, type VaultCrystalState } from "./components/VaultCrystal";
 import CommandPalette, { type CommandPaletteAction } from "./components/CommandPalette";
 import {
   diff,
@@ -1455,6 +1456,11 @@ const DraftDiffPanelFallback: React.FC<{
 
 function App() {
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
+const [highEffects, setHighEffects] = useState<boolean>(() => {
+  if (typeof window === "undefined") return true;
+  const stored = window.localStorage.getItem("darkmesh-high-effects");
+  return stored ? stored === "1" : true;
+});
   const [offlineMode, setOfflineMode] = useState<boolean>(() => getInitialOffline());
   const [workspace, setWorkspace] = useState<Workspace>("studio");
   const [catalog, setCatalog] = useState<CatalogItem[]>(seedCatalog);
@@ -1727,6 +1733,14 @@ function App() {
   }, [pip, pipVaultSnapshot]);
   const pipVaultBlockingIssues = pipVaultValidationIssues.filter((issue) => issue.severity === "error");
   const pipVaultLocked = pipVaultSnapshot?.mode === "password" && pipVaultSnapshot.locked;
+  const vaultCrystalState: VaultCrystalState =
+    pipVaultSnapshot?.mode === "password" ? (pipVaultLocked ? "locked" : "password") : "unlocked";
+  const vaultCrystalPulse: VaultCrystalPulse =
+    pipVaultTask?.kind === "unlock"
+      ? "unlock"
+      : pipVaultTask?.kind === "export" || pipVaultTask?.kind === "import"
+        ? "backup"
+        : null;
   const latestVaultAudit = useMemo(() => vaultAuditEvents[0] ?? null, [vaultAuditEvents]);
   const readRememberedPassword = useCallback((): string | null => {
     if (typeof window === "undefined") return null;
@@ -2340,6 +2354,13 @@ function App() {
     document.documentElement.setAttribute("data-theme", theme);
     window.localStorage.setItem(THEME_STORAGE_KEY, theme);
   }, [theme]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-high-effects", highEffects ? "on" : "off");
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("darkmesh-high-effects", highEffects ? "1" : "0");
+    }
+  }, [highEffects]);
 
   useEffect(() => {
     void refreshHealthHistory();
@@ -4717,7 +4738,7 @@ function App() {
 
   return (
     <div className="app-shell">
-      <HeroCanvas theme={theme} />
+      <HeroCanvas theme={theme} highEffects={highEffects} />
       <header className="top-bar">
         <div className="brand-area">
           <div className="brand">
@@ -5291,6 +5312,7 @@ function App() {
               </p>
             </div>
             <div className="pip-vault-header-actions">
+              <VaultCrystal state={vaultCrystalState} pulse={vaultCrystalPulse} />
               <span className={`pill ${pipVaultSnapshot?.exists ? "accent" : "ghost"}`}>
                 {pipVaultSnapshot?.exists ? "Vault present" : "Vault empty"}
               </span>
