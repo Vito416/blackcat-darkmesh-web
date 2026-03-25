@@ -172,6 +172,13 @@ const mergeHealthResults = (previous: HealthStatus[], next: HealthStatus[]): Hea
 
   return next.map((item) => {
     const prior = previousById.get(item.id);
+    const latencyHistory = (() => {
+      const history = [...(prior?.latencyHistory ?? [])];
+      if (typeof item.latencyMs === "number") {
+        history.push(item.latencyMs);
+      }
+      return history.slice(-12);
+    })();
     const lastSuccessAt =
       item.status === "ok" || item.status === "warn"
         ? item.lastSuccessAt ?? item.checkedAt
@@ -185,6 +192,7 @@ const mergeHealthResults = (previous: HealthStatus[], next: HealthStatus[]): Hea
       ...prior,
       ...item,
       lastSuccessAt,
+      ...(latencyHistory.length ? { latencyHistory } : {}),
       ...(lastError ? { lastError } : {}),
     };
   });
@@ -787,8 +795,7 @@ function App() {
   const [deployStep, setDeployStep] = useState<string | null>(null);
   const [spawnStep, setSpawnStep] = useState<string | null>(null);
   const [deployedModuleTx, setDeployedModuleTx] = useState<string | null>(null);
-  const [deployLog, setDeployLog] = useState<AoMiniLogEntry | null>(null);
-  const [spawnLog, setSpawnLog] = useState<AoMiniLogEntry | null>(null);
+  const [aoLog, setAoLog] = useState<AoMiniLogEntry[]>([]);
   const [moduleSourceError, setModuleSourceError] = useState<string | null>(null);
   const [moduleTxError, setModuleTxError] = useState<string | null>(null);
   const [manifestTxError, setManifestTxError] = useState<string | null>(null);
@@ -976,10 +983,7 @@ function App() {
     [effectiveModuleTx, manifestTxInput, pip?.manifestTx],
   );
 
-  const aoMiniLogRows = useMemo(
-    () => [deployLog, spawnLog].filter((entry): entry is AoMiniLogEntry => Boolean(entry)),
-    [deployLog, spawnLog],
-  );
+  const aoMiniLogRows = useMemo(() => aoLog.slice(0, 20), [aoLog]);
 
   const refreshHealth = useCallback(async () => {
     setHealthLoading(true);
@@ -2091,11 +2095,10 @@ function App() {
       href: buildAoExplorerUrl(id),
     };
 
-    if (kind === "deploy") {
-      setDeployLog(entry);
-    } else {
-      setSpawnLog(entry);
-    }
+    setAoLog((current) => {
+      const next = [entry, ...current].slice(0, 20);
+      return next;
+    });
   };
 
   const closePalette = useCallback(() => {
@@ -2138,6 +2141,34 @@ function App() {
   );
 
   const paletteActions: CommandPaletteAction[] = [
+    {
+      id: "workspace-studio",
+      label: "Switch to Creator Studio",
+      description: "Edit manifests and blocks.",
+      shortcut: "Alt+1",
+      run: () => setWorkspace("studio"),
+    },
+    {
+      id: "workspace-ao",
+      label: "Switch to AO Console",
+      description: "Deploy modules and spawn processes.",
+      shortcut: "Alt+2",
+      run: () => setWorkspace("ao"),
+    },
+    {
+      id: "workspace-data",
+      label: "Switch to Data Core",
+      description: "Manage encrypted PIP vaults.",
+      shortcut: "Alt+3",
+      run: () => setWorkspace("data"),
+    },
+    {
+      id: "workspace-preview",
+      label: "Switch to Preview Hub",
+      description: "View live manifest previews.",
+      shortcut: "Alt+4",
+      run: () => setWorkspace("preview"),
+    },
     {
       id: "toggle-theme",
       label: "Toggle cyberpunk",
@@ -2257,6 +2288,15 @@ function App() {
       ],
     },
     {
+      title: "Workspaces",
+      items: [
+        { shortcut: "Alt+1", action: "Creator Studio", description: "Build and edit manifests." },
+        { shortcut: "Alt+2", action: "AO Console", description: "Deploy and spawn AO processes." },
+        { shortcut: "Alt+3", action: "Data Core", description: "Manage PIP vaults and records." },
+        { shortcut: "Alt+4", action: "Preview Hub", description: "Preview manifests and blocks." },
+      ],
+    },
+    {
       title: "Palette actions",
       items: paletteActions.map((action) => ({
         shortcut: action.shortcut ?? "—",
@@ -2302,6 +2342,21 @@ function App() {
           shortcut: "Alt+N",
           run: () => void handleDuplicateDraft(),
         });
+        return;
+      }
+
+      if (isAltShortcut && ["1", "2", "3", "4"].includes(key)) {
+        event.preventDefault();
+        const target: Workspace =
+          key === "1" ? "studio" : key === "2" ? "ao" : key === "3" ? "data" : "preview";
+        void runPaletteAction(
+          paletteActions.find((action) => action.id === `workspace-${target}`) ?? {
+            id: `workspace-${target}`,
+            label: "Switch workspace",
+            description: "",
+            run: () => setWorkspace(target),
+          },
+        );
         return;
       }
 
@@ -2379,6 +2434,7 @@ function App() {
     toggleHotkeyOverlay,
     toggleTheme,
     filteredPaletteActions,
+    paletteActions,
   ]);
 
   return (
@@ -2493,16 +2549,44 @@ function App() {
                           <span className={`health-status ${item.status}`}>{healthStatusLabel(item.status)}</span>
                         </div>
                         <div className="health-detail">
-                          {item.detail ?? (item.status === "missing" ? "Not configured" : "No detail")}
+                        {item.detail ?? (item.status === "missing" ? "Not configured" : "No detail")}
+                      </div>
+                      {item.lastError && (
+                        <div className="health-last-error">Last error: {item.lastError}</div>
+                      )}
+                      {item.latencyHistory?.length ? (
+                        <div className="health-latency">
+                          <div className="health-latency-bars">
+                            {item.latencyHistory.map((value, idx, arr) => {
+                              const max = Math.max(...arr, 1);
+                              const height = Math.max(12, Math.min(64, Math.round((value / max) * 64)));
+                              return (
+                                <span
+                                  key={`${item.id}-lat-${idx}`}
+                                  style={{ height: `${height}px` }}
+                                  title={`${value} ms`}
+                                />
+                              );
+                            })}
+                          </div>
+                          <div className="health-latency-meta">
+                            <span className="mono">{item.latencyHistory[item.latencyHistory.length - 1]} ms</span>
+                            <span className="mono subtle">
+                              avg{" "}
+                              {Math.round(
+                                item.latencyHistory.reduce((acc, v) => acc + v, 0) /
+                                  (item.latencyHistory.length || 1),
+                              )}{" "}
+                              ms
+                            </span>
+                          </div>
                         </div>
-                        {item.lastError && (
-                          <div className="health-last-error">Last error: {item.lastError}</div>
-                        )}
-                        <div className="health-meta">
-                          {typeof item.latencyMs === "number" && <span>{item.latencyMs} ms</span>}
-                          <span>
-                            {item.lastSuccessAt
-                              ? `Last success ${formatTime(item.lastSuccessAt)}`
+                      ) : null}
+                      <div className="health-meta">
+                        {typeof item.latencyMs === "number" && <span>{item.latencyMs} ms</span>}
+                        <span>
+                          {item.lastSuccessAt
+                            ? `Last success ${formatTime(item.lastSuccessAt)}`
                               : item.status === "missing"
                                 ? "Set env to enable"
                                 : `Checked ${formatTime(item.checkedAt)}`}
@@ -3533,8 +3617,8 @@ function App() {
               </thead>
               <tbody>
                 {aoMiniLogRows.length ? (
-                  aoMiniLogRows.map((entry) => (
-                    <tr key={entry.kind}>
+                  aoMiniLogRows.map((entry, index) => (
+                    <tr key={`${entry.kind}-${entry.time}-${index}`}>
                       <td>
                         <span className={`mini-log-kind ${entry.kind}`}>{entry.kind}</span>
                       </td>

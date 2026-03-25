@@ -11,6 +11,7 @@ export type HealthStatus = {
   detail?: string;
   checkedAt: string;
   latencyMs?: number;
+  latencyHistory?: number[];
   url?: string;
   lastError?: string;
   lastSuccessAt?: string;

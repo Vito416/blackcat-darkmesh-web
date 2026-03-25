@@ -10,6 +10,14 @@ export default defineConfig({
     outDir: path.resolve(__dirname, "dist/renderer"),
     emptyOutDir: true,
     chunkSizeWarningLimit: 1200,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          react: ["react", "react-dom"],
+          aoconnect: ["@permaweb/aoconnect"],
+        },
+      },
+    },
   },
   server: {
     port: 5174,
