@@ -1,4 +1,5 @@
-import { connect, createDataItemSigner } from "@permaweb/aoconnect";
+// Use browser build to avoid Node-only expectations in renderer
+import { connect, createDataItemSigner } from "@permaweb/aoconnect/browser";
 
 import type { ManifestDocument } from "../types/manifest";
 import { fetchWalletFromPath } from "./wallet";
