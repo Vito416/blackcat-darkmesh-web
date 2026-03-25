@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import ErrorBoundary from "./components/ErrorBoundary";
 
 // Minimal process shim so browser-only renderer can load Node-oriented deps (e.g. aoconnect bundles
 // readable-stream) without crashing on `process` access.
@@ -24,6 +25,8 @@ if (!globalAny.process) {
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <App />
+    <ErrorBoundary name="Renderer">
+      <App />
+    </ErrorBoundary>
   </React.StrictMode>,
 );

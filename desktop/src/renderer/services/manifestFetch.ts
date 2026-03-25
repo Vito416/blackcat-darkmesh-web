@@ -21,9 +21,14 @@ export const resolveGatewayUrl = (): string => {
 export async function fetchManifestDocument(
   manifestTx: string,
   fetcher: typeof fetch | undefined = (globalThis as any).fetch,
+  options?: { offline?: boolean },
 ): Promise<ManifestDocument> {
   const tx = manifestTx.trim();
   if (!tx) throw new Error("manifestTx is required");
+
+  if (options?.offline) {
+    throw new Error("Offline mode is enabled; manifest fetch is blocked");
+  }
 
   if (!fetcher) throw new Error("Fetch is not available in this runtime");
 

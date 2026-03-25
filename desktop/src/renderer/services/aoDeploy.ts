@@ -44,6 +44,10 @@ export type SpawnResponse = {
   moduleTx?: string;
 };
 
+type AoNetworkOptions = {
+  offline?: boolean;
+};
+
 const baseConnect = async () => {
   const modeEnv = getEnv("AO_MODE");
   const mode: "legacy" | "mainnet" = modeEnv === "mainnet" ? "mainnet" : "legacy";
@@ -64,7 +68,12 @@ const baseConnect = async () => {
     : connect({ MODE: "legacy", ...common });
 };
 
-export async function deployModule(walletOrPath: WalletSource, moduleSrc: string, tags: Tag[] = []): Promise<DeployResponse> {
+export async function deployModule(
+  walletOrPath: WalletSource,
+  moduleSrc: string,
+  tags: Tag[] = [],
+  options?: AoNetworkOptions,
+): Promise<DeployResponse> {
   const wallet = await resolveWallet(walletOrPath);
   const mergedTags = mergeTags(
     [
@@ -76,6 +85,16 @@ export async function deployModule(walletOrPath: WalletSource, moduleSrc: string
     ],
     tags,
   );
+
+  if (options?.offline) {
+    return {
+      txId: null,
+      tags: mergedTags,
+      placeholder: true,
+      note: "Offline mode is enabled; deploy is blocked",
+      walletPath: wallet.path,
+    };
+  }
 
   if (!wallet.ready) {
     return {
@@ -116,6 +135,7 @@ export async function spawnProcess(
   manifestTx?: string,
   moduleOverride?: string,
   walletOrPath?: WalletSource,
+  options?: AoNetworkOptions,
 ): Promise<SpawnResponse> {
   const wallet = await resolveWallet(walletOrPath);
   const moduleTx = moduleOverride?.trim() ?? getEnv("AO_MODULE_TX") ?? getEnv("VITE_AO_MODULE_TX");
@@ -136,6 +156,17 @@ export async function spawnProcess(
       tags: mergedTags,
       placeholder: true,
       note: "Set AO_MODULE_TX (or VITE_AO_MODULE_TX) before spawning",
+      walletPath: wallet.path,
+      moduleTx,
+    };
+  }
+
+  if (options?.offline) {
+    return {
+      processId: null,
+      tags: mergedTags,
+      placeholder: true,
+      note: "Offline mode is enabled; spawn is blocked",
       walletPath: wallet.path,
       moduleTx,
     };

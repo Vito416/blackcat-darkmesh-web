@@ -144,6 +144,7 @@ const encode = (buffer: Buffer): string => buffer.toString("base64");
 const decode = (value: string): Buffer => Buffer.from(value, "base64");
 const nowIso = () => new Date().toISOString();
 const normalizeText = (value?: string): string => (typeof value === "string" ? value.trim() : "");
+const sha256 = (value: string | Buffer): string => crypto.createHash("sha256").update(value).digest("hex");
 const auditEvent = (action: VaultAuditAction, status: VaultAuditStatus, meta: Partial<VaultAuditEvent> = {}): VaultAuditEvent => ({
   at: nowIso(),
   action,
@@ -575,20 +576,32 @@ export async function disableVaultPassword(): Promise<{ ok: true; mode: VaultKey
   return { ok: true, mode: envelope.mode };
 }
 
-export async function exportPipVault(): Promise<{ ok: true; bundle: string }> {
+export async function exportPipVault(): Promise<{
+  ok: true;
+  bundle: string;
+  checksum: string;
+  bytes: number;
+  createdAt: string;
+  recordCount: number;
+}> {
   const envelope = await ensureKeyEnvelope();
   const store = normalizeVaultStore(await readVaultStore());
+  const createdAt = nowIso();
 
   const bundle: VaultBackupBundle = {
     format: "pip-vault-bundle",
     version: 1,
-    createdAt: nowIso(),
+    createdAt,
     mode: envelope.mode,
     key: envelope,
     vault: store,
   };
 
-  return { ok: true, bundle: JSON.stringify(bundle, null, 2) };
+  const serialized = JSON.stringify(bundle, null, 2);
+  const checksum = sha256(serialized);
+  const bytes = Buffer.byteLength(serialized, "utf-8");
+
+  return { ok: true, bundle: serialized, checksum, bytes, createdAt, recordCount: store.records.length };
 }
 
 const parseBundleInput = (bundleInput: unknown): VaultBackupBundle => {

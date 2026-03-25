@@ -30,6 +30,17 @@ export type PipVaultDescribeResult =
     }
   | { ok: false; error: string };
 
+export type PipVaultExportSuccess = {
+  ok: true;
+  bundle: string;
+  checksum: string;
+  bytes: number;
+  createdAt: string;
+  recordCount: number;
+};
+
+export type PipVaultExportResult = PipVaultExportSuccess | { ok: false; error: string };
+
 const bridge = (): PipVaultBridge | undefined => {
   if (typeof window === "undefined") return undefined;
   return window.pipVault;
@@ -197,15 +208,22 @@ export async function disableVaultPassword(): Promise<{ ok: true; mode: string }
   }
 }
 
-export async function exportPipVaultBundle(): Promise<{ ok: true; bundle: string } | { ok: false; error: string }> {
+export async function exportPipVaultBundle(): Promise<PipVaultExportResult> {
   const api = bridge();
   if (!api?.exportVault) {
     return { ok: false, error: "PIP vault IPC bridge is unavailable" };
   }
 
   try {
-    const result = await api.exportVault();
-    return { ok: true, bundle: result.bundle };
+    const result = (await api.exportVault()) as PipVaultExportSuccess;
+    return {
+      ok: true,
+      bundle: result.bundle,
+      checksum: result.checksum,
+      bytes: result.bytes,
+      createdAt: result.createdAt,
+      recordCount: result.recordCount,
+    };
   } catch (err) {
     return {
       ok: false,

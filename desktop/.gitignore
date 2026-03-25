@@ -1,5 +1,8 @@
 node_modules/
 dist/
 release/
+playwright-report/
+test-results/
+blob-report/
 *.log
 .DS_Store

@@ -13,6 +13,7 @@ export type HealthEvent = HealthSnapshot & {
   warn: number;
   error: number;
   missing: number;
+  offline: number;
 };
 
 type HealthEventRow = HealthSnapshot & {
@@ -22,6 +23,7 @@ type HealthEventRow = HealthSnapshot & {
   warn: number;
   error: number;
   missing: number;
+  offline: number;
 };
 
 class HealthDatabase extends Dexie {
@@ -40,6 +42,7 @@ const db = new HealthDatabase();
 
 const stripRow = (row: HealthEventRow): HealthEvent => ({
   ...row,
+  offline: row.offline ?? 0,
   id: row.id ?? 0,
 });
 
@@ -63,6 +66,7 @@ export async function addHealthEvent(snapshot: HealthSnapshot, limit = DEFAULT_H
     warn: snapshot.summary.warn,
     error: snapshot.summary.error,
     missing: snapshot.summary.missing,
+    offline: snapshot.summary.offline,
   };
 
   const id = await db.events.add(payload);
@@ -98,6 +102,7 @@ export const healthEventsToCsv = (events: HealthEvent[]): string => {
     "warn",
     "error",
     "missing",
+    "offline",
     "averageLatencyMs",
     "failing",
     "checks",
@@ -122,6 +127,7 @@ export const healthEventsToCsv = (events: HealthEvent[]): string => {
       event.warn,
       event.error,
       event.missing,
+      event.offline ?? "",
       event.averageLatencyMs ?? "",
       failing,
       checks,

@@ -1,8 +1,10 @@
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import "./styles.css";
+import ErrorBoundary from "./components/ErrorBoundary";
 import type { DraftDiffOption } from "./components/DraftDiffPanel";
 import { fetchCatalog, catalogItems as seedCatalog } from "./services/catalog";
+import whatsNewData from "./whats-new.json";
 import {
   runHealthChecks,
   serializeHealthSnapshot,
@@ -92,6 +94,13 @@ import {
   type HealthEvent,
 } from "./storage/healthStore";
 import {
+  addVaultAuditEvent,
+  listVaultAuditEvents,
+  vaultAuditToCsv,
+  vaultAuditToJson,
+  type VaultAuditEvent,
+} from "./storage/vaultAudit";
+import {
   hasStoredSettings,
   loadSettings,
   markSetupComplete,
@@ -113,7 +122,21 @@ import {
 } from "./utils/propsInspector";
 import { diffManifests, type DraftDiffEntry, type DraftDiffKind } from "./utils/draftDiff";
 import HotkeyOverlay, { type HotkeyOverlaySection } from "./components/HotkeyOverlay";
+import Vault from "./components/Vault";
+import Wizard from "./components/Wizard";
 import { validatePipDocument } from "./services/pipValidation";
+
+type WhatsNewEntry = {
+  version: string;
+  date: string;
+  highlights: string[];
+};
+
+const HelpTip = ({ copy, label }: { copy: string; label?: string }) => (
+  <button type="button" className="help-tip" title={copy} aria-label={label ?? copy}>
+    ?
+  </button>
+);
 
 type AoDeployModule = typeof import("./services/aoDeploy");
 
@@ -163,6 +186,11 @@ const getInitialTheme = (): Theme => {
   return next;
 };
 
+const getInitialOffline = (): boolean => {
+  if (typeof window === "undefined") return false;
+  return window.localStorage.getItem(OFFLINE_STORAGE_KEY) === "true";
+};
+
 const formatDate = (iso?: string) => (iso ? new Date(iso).toLocaleString() : "—");
 const formatTime = (iso?: string) =>
   iso
@@ -175,6 +203,13 @@ const formatVaultMode = (mode?: string) => {
   if (mode === "plain") return "Local key";
   return "Safe storage";
 };
+function formatBytes(bytes?: number): string {
+  if (bytes == null || Number.isNaN(bytes)) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
 const normalizeText = (value: unknown) => (typeof value === "string" ? value.trim() : "");
 
 const formatTimeShort = (iso?: string) =>
@@ -266,6 +301,8 @@ const healthStatusLabel = (status: HealthStatus["status"]) => {
       return "Error";
     case "missing":
       return "Missing";
+    case "offline":
+      return "Offline";
   }
   return status;
 };
@@ -354,6 +391,7 @@ const snapshotToEvent = (snapshot: HealthSnapshot, id: number): HealthEvent => (
   warn: snapshot.summary.warn,
   error: snapshot.summary.error,
   missing: snapshot.summary.missing,
+  offline: snapshot.summary.offline,
 });
 
 type WalletBridgeResult = {
@@ -401,6 +439,8 @@ type PipVaultIssue = {
 };
 
 const THEME_STORAGE_KEY = "darkmesh-theme";
+const OFFLINE_STORAGE_KEY = "darkmesh-offline-mode";
+const OFFLINE_FETCH_ERROR = "Offline mode is enabled; network requests are blocked";
 const HEALTH_AUTO_REFRESH_STORAGE_KEY = "health-auto-refresh";
 const PIP_VAULT_REMEMBER_KEY = "pip-vault-remember";
 const PIP_VAULT_REMEMBER_PASSWORD_KEY = "pip-vault-remember-password";
@@ -417,6 +457,7 @@ const HEALTH_EVENT_DISPLAY_LIMIT = 10;
 const DEFAULT_SLA_FAILURE_THRESHOLD = parsePositiveNumber(getEnv("HEALTH_SLA_FAILURE_THRESHOLD"), 3);
 const DEFAULT_SLA_LATENCY_THRESHOLD_MS = parsePositiveNumber(getEnv("HEALTH_SLA_LATENCY_MS"), 1500);
 const MANIFEST_HISTORY_LIMIT = 20;
+const VAULT_AUDIT_DISPLAY_LIMIT = 12;
 
 declare global {
   interface Window {
@@ -451,7 +492,14 @@ declare global {
         records?: number;
       }>;
       disablePasswordMode: () => Promise<{ ok: true; mode: "safeStorage" | "plain" | "password" }>;
-      exportVault: () => Promise<{ ok: true; bundle: string }>;
+      exportVault: () => Promise<{
+        ok: true;
+        bundle: string;
+        checksum: string;
+        bytes: number;
+        createdAt: string;
+        recordCount: number;
+      }>;
       importVault: (bundle: string | ArrayBuffer, password?: string) => Promise<{
         ok: true;
         mode: "safeStorage" | "plain" | "password";
@@ -1406,6 +1454,7 @@ const DraftDiffPanelFallback: React.FC<{
 
 function App() {
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
+  const [offlineMode, setOfflineMode] = useState<boolean>(() => getInitialOffline());
   const [workspace, setWorkspace] = useState<Workspace>("studio");
   const [catalog, setCatalog] = useState<CatalogItem[]>(seedCatalog);
   const [search, setSearch] = useState("");
@@ -1449,6 +1498,9 @@ function App() {
   const [pipVaultBusy, setPipVaultBusy] = useState(false);
   const [pipVaultSnapshot, setPipVaultSnapshot] = useState<PipVaultSnapshot | null>(null);
   const [pipVaultRecords, setPipVaultRecords] = useState<PipVaultRecord[]>([]);
+  const [vaultAuditEvents, setVaultAuditEvents] = useState<VaultAuditEvent[]>([]);
+  const [vaultAuditLoading, setVaultAuditLoading] = useState(false);
+  const [vaultAuditExporting, setVaultAuditExporting] = useState<"csv" | "json" | null>(null);
   const [pipVaultFilter, setPipVaultFilter] = useState("");
   const [pipVaultRecordsLoading, setPipVaultRecordsLoading] = useState(false);
   const [pipVaultPassword, setPipVaultPassword] = useState("");
@@ -1528,8 +1580,15 @@ function App() {
   const [compositionDropActive, setCompositionDropActive] = useState(false);
   const [treeDropTargetId, setTreeDropTargetId] = useState<string | null>(null);
   const [draggedCatalogId, setDraggedCatalogId] = useState<string | null>(null);
+  const [whatsNewOpen, setWhatsNewOpen] = useState(false);
+
+  const whatsNewEntries = useMemo<WhatsNewEntry[]>(() => {
+    const entries = (whatsNewData as { entries?: WhatsNewEntry[] }).entries ?? [];
+    return [...entries].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, []);
 
   const paletteInputRef = useRef<HTMLInputElement>(null);
+  const originalFetchRef = useRef<typeof fetch | undefined>((globalThis as any).fetch);
   const manifestRef = useRef(manifest);
   const activeDraftIdRef = useRef(activeDraftId);
   const saveTimerRef = useRef<number | null>(null);
@@ -1537,6 +1596,16 @@ function App() {
   const autoUnlockAttemptRef = useRef(false);
   const lastHealthNotificationRef = useRef<string | null>(null);
   const historySuppressedRef = useRef(false);
+  const wizardRegionRef = useRef<HTMLElement>(null);
+  const vaultRegionRef = useRef<HTMLElement>(null);
+  const wizardWalletRef = useRef<HTMLButtonElement>(null);
+  const wizardModuleRef: React.RefObject<HTMLTextAreaElement> = useRef<HTMLTextAreaElement>(null);
+  const wizardSpawnRef = useRef<HTMLInputElement>(null);
+  const vaultPasswordRef = useRef<HTMLInputElement>(null);
+  const vaultFilterRef = useRef<HTMLInputElement>(null);
+  const healthCardRef = useRef<HTMLDivElement>(null);
+  const healthFailureInputRef = useRef<HTMLInputElement>(null);
+  const healthLatencyInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     manifestRef.current = manifest;
@@ -1657,6 +1726,7 @@ function App() {
   }, [pip, pipVaultSnapshot]);
   const pipVaultBlockingIssues = pipVaultValidationIssues.filter((issue) => issue.severity === "error");
   const pipVaultLocked = pipVaultSnapshot?.mode === "password" && pipVaultSnapshot.locked;
+  const latestVaultAudit = useMemo(() => vaultAuditEvents[0] ?? null, [vaultAuditEvents]);
   const readRememberedPassword = useCallback((): string | null => {
     if (typeof window === "undefined") return null;
     const stored = window.sessionStorage.getItem(PIP_VAULT_REMEMBER_PASSWORD_KEY);
@@ -1912,7 +1982,7 @@ function App() {
   const refreshHealth = useCallback(async () => {
     setHealthLoading(true);
     try {
-      const results = await runHealthChecks();
+      const results = await runHealthChecks(undefined, { offline: offlineMode });
       setHealth((current) => mergeHealthResults(current, results));
 
       const snapshot = serializeHealthSnapshot(results);
@@ -1926,7 +1996,7 @@ function App() {
     } finally {
       setHealthLoading(false);
     }
-  }, []);
+  }, [offlineMode]);
 
   const handleExportHealthHistory = useCallback(
     async (format: "json" | "csv") => {
@@ -1952,6 +2022,38 @@ function App() {
       } catch (err) {
         console.error("Failed to export health history", err);
         flashStatus("Export failed");
+      }
+    },
+    [flashStatus],
+  );
+
+  const handleExportVaultAudit = useCallback(
+    async (format: "csv" | "json") => {
+      setVaultAuditExporting(format);
+      try {
+        const events = await listVaultAuditEvents();
+        if (!events.length) {
+          flashStatus("No vault audit entries to export");
+          return;
+        }
+
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const filename = `pip-vault-audit-${stamp}.${format}`;
+        const content = format === "csv" ? vaultAuditToCsv(events) : vaultAuditToJson(events);
+        const mime = format === "csv" ? "text/csv" : "application/json";
+        const blob = new Blob([content], { type: mime });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        link.click();
+        URL.revokeObjectURL(url);
+        flashStatus(`Exported ${events.length} audit entr${events.length === 1 ? "y" : "ies"}`);
+      } catch (err) {
+        console.error("Failed to export vault audit", err);
+        flashStatus("Audit export failed");
+      } finally {
+        setVaultAuditExporting(null);
       }
     },
     [flashStatus],
@@ -2019,6 +2121,97 @@ function App() {
     }
   }, []);
 
+  const resetVaultPanelBoundary = useCallback(() => {
+    setPipVaultError(null);
+    setPipVaultTask(null);
+    setPipVaultStatus(null);
+    setPipVaultPasswordError(null);
+    setPipVaultBusy(false);
+    setPipVaultPassword("");
+    setPipVaultSnapshot(null);
+    setPipVaultRecords([]);
+    setPipVaultRecordsLoading(false);
+    void refreshPipVaultSnapshot();
+    void refreshPipVaultRecords();
+  }, [refreshPipVaultRecords, refreshPipVaultSnapshot]);
+
+  const focusElement = useCallback((element: HTMLElement | null | undefined) => {
+    if (!element) return;
+    element.focus({ preventScroll: true });
+    element.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, []);
+
+  const focusWizardStep = useCallback(
+    (step: "wallet" | "module" | "spawn") => {
+      setWorkspace("ao");
+      window.setTimeout(() => {
+        wizardRegionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        const target =
+          step === "wallet"
+            ? wizardWalletRef.current
+            : step === "module"
+              ? wizardModuleRef.current
+              : wizardSpawnRef.current;
+        focusElement(target);
+      }, 20);
+    },
+    [focusElement],
+  );
+
+  const focusVaultField = useCallback(
+    (field: "password" | "filter") => {
+      setWorkspace("data");
+      window.setTimeout(() => {
+        vaultRegionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        const target = field === "password" ? vaultPasswordRef.current : vaultFilterRef.current;
+        focusElement(target);
+      }, 20);
+    },
+    [focusElement],
+  );
+
+  const focusHealthThreshold = useCallback(
+    (field: "failure" | "latency") => {
+      setWorkspace("ao");
+      setHealthExpanded(true);
+      window.setTimeout(() => {
+        healthCardRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+        const target = field === "failure" ? healthFailureInputRef.current : healthLatencyInputRef.current;
+        focusElement(target);
+      }, 20);
+    },
+    [focusElement],
+  );
+
+  const refreshVaultAudit = useCallback(
+    async (limit = VAULT_AUDIT_DISPLAY_LIMIT): Promise<VaultAuditEvent[]> => {
+      setVaultAuditLoading(true);
+      try {
+        const events = await listVaultAuditEvents(limit);
+        setVaultAuditEvents(events);
+        return events;
+      } catch (err) {
+        console.error("Failed to load vault audit log", err);
+        return [];
+      } finally {
+        setVaultAuditLoading(false);
+      }
+    },
+    [],
+  );
+
+  const recordVaultAudit = useCallback(
+    async (event: Omit<VaultAuditEvent, "id">) => {
+      try {
+        await addVaultAuditEvent(event);
+        await refreshVaultAudit();
+      } catch (err) {
+        console.error("Failed to record vault audit event", err);
+      }
+    },
+    [refreshVaultAudit],
+  );
+
   const refreshDraftHistory = useCallback(async (draftId: number | null) => {
     if (!draftId) {
       setDraftHistory([]);
@@ -2084,6 +2277,15 @@ function App() {
     setDraftDiffLoading(false);
   }, []);
 
+  const resetDraftDiffBoundary = useCallback(() => {
+    setDraftDiffEntries([]);
+    setDraftDiffHighlight({});
+    setDraftDiffRight(null);
+    setDraftDiffRightRef(null);
+    setDraftDiffLoading(false);
+    setDraftDiffOpen(false);
+  }, []);
+
   const handleSelectDraftDiffOption = useCallback(
     async (value: string) => {
       const ref = value ? draftDiffLookup.get(value) ?? null : null;
@@ -2105,6 +2307,33 @@ function App() {
   useEffect(() => {
     void refreshPipVaultSnapshot();
   }, [refreshPipVaultSnapshot]);
+
+  useEffect(() => {
+    void refreshVaultAudit();
+  }, [refreshVaultAudit]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(OFFLINE_STORAGE_KEY, offlineMode ? "true" : "false");
+    } catch {
+      // ignore storage failures
+    }
+  }, [offlineMode]);
+
+  useEffect(() => {
+    const original = originalFetchRef.current ?? (globalThis as any).fetch;
+    originalFetchRef.current = original;
+    if (!original) return;
+
+    const offlineFetch: typeof fetch = (..._args) => Promise.reject(new Error(OFFLINE_FETCH_ERROR));
+
+    (globalThis as any).fetch = offlineMode ? offlineFetch : original;
+
+    return () => {
+      (globalThis as any).fetch = original;
+    };
+  }, [offlineMode]);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -2162,6 +2391,7 @@ function App() {
 
   useEffect(() => {
     if (!healthNotifyEnabled) return;
+    if (offlineMode) return;
     if (typeof window === "undefined" || typeof Notification === "undefined") return;
     if (Notification.permission !== "granted") return;
     if (!healthSla.breached) {
@@ -2189,7 +2419,7 @@ function App() {
     });
 
     lastHealthNotificationRef.current = notificationKey;
-  }, [healthAlertCopy, healthEventLog, healthNotifyEnabled, healthSla]);
+  }, [healthAlertCopy, healthEventLog, healthNotifyEnabled, healthSla, offlineMode]);
 
   useEffect(() => {
     if (!draftDiffOpen) return;
@@ -2307,12 +2537,18 @@ function App() {
     const tx = pip?.manifestTx?.trim();
     if (!tx) return;
 
+    if (offlineMode) {
+      setLoadingManifest(false);
+      setRemoteError("Offline mode enabled; manifest fetch skipped");
+      return;
+    }
+
     let cancelled = false;
     setLoadingManifest(true);
     setRemoteError(null);
     flashStatus("Fetching manifest…");
 
-    fetchManifestDocument(tx)
+    fetchManifestDocument(tx, undefined, { offline: offlineMode })
       .then((doc) => {
         if (cancelled) return;
         const normalized = normalizeManifest(doc);
@@ -2335,7 +2571,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [adoptManifest, flashStatus, pip]);
+  }, [adoptManifest, flashStatus, offlineMode, pip]);
 
   useEffect(() => {
     if (pip?.manifestTx) {
@@ -2978,6 +3214,7 @@ function App() {
   }, []);
 
   const handleExportVaultBundle = async () => {
+    const startedAt = new Date().toISOString();
     setPipVaultError(null);
     setPipVaultTask({ kind: "export", label: "Exporting vault backup…" });
     setPipVaultBusy(true);
@@ -2987,6 +3224,14 @@ function App() {
         setPipVaultStatus(result.error);
         setPipVaultError(result.error);
         flashStatus(result.error);
+        await recordVaultAudit({
+          at: startedAt,
+          action: "backup",
+          status: "error",
+          mode: pipVaultSnapshot?.mode,
+          recordCount: pipVaultSnapshot?.recordCount,
+          detail: result.error,
+        });
         return;
       }
 
@@ -2995,12 +3240,37 @@ function App() {
       const link = document.createElement("a");
       link.href = url;
       const suffix = pipVaultSnapshot?.mode === "password" ? "-pw" : "";
-      link.download = `pip-vault-backup${suffix}-${new Date().toISOString().slice(0, 10)}.json`;
+      const createdAt = result.createdAt ?? startedAt;
+      const filename = `pip-vault-backup${suffix}-${createdAt.slice(0, 10)}.json`;
+      link.download = filename;
       link.click();
       URL.revokeObjectURL(url);
+      await recordVaultAudit({
+        at: createdAt,
+        action: "backup",
+        status: "ok",
+        mode: pipVaultSnapshot?.mode,
+        recordCount: result.recordCount ?? pipVaultSnapshot?.recordCount,
+        filename,
+        checksum: result.checksum,
+        bytes: result.bytes ?? new TextEncoder().encode(result.bundle).byteLength,
+      });
       setPipVaultStatus("Vault backup exported");
       setPipVaultError(null);
       flashStatus("Vault backup exported");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Vault export failed";
+      setPipVaultStatus(message);
+      setPipVaultError(message);
+      flashStatus(message);
+      await recordVaultAudit({
+        at: startedAt,
+        action: "backup",
+        status: "error",
+        mode: pipVaultSnapshot?.mode,
+        recordCount: pipVaultSnapshot?.recordCount,
+        detail: message,
+      });
     } finally {
       setPipVaultBusy(false);
       setPipVaultTask(null);
@@ -3285,6 +3555,15 @@ function App() {
     setModuleSourceError(null);
     setWalletFieldError(null);
 
+    if (offlineMode) {
+      const message = "Offline mode is enabled; deploy is blocked";
+      setDeployOutcome(message);
+      setDeployState("error");
+      setDeployStep(null);
+      flashStatus(message);
+      return;
+    }
+
     if (!moduleSource.trim()) {
       setModuleSourceError("Add module source before deploying");
       setDeployOutcome("Add module source before deploying");
@@ -3299,14 +3578,14 @@ function App() {
       return;
     }
 
-    setDeployState("pending");
-    setDeployStep("Validating wallet");
-    setDeploying(true);
+      setDeployState("pending");
+      setDeployStep("Validating wallet");
+      setDeploying(true);
 
     try {
       setDeployStep("Creating signer");
       const { deployModule } = await loadAoDeployModule();
-      const response = await deployModule(walletSource, moduleSource);
+      const response = await deployModule(walletSource, moduleSource, [], { offline: offlineMode });
       recordAoLog("deploy", response.txId, response.placeholder ? "Placeholder" : "Success", response.raw ?? response);
 
       if (response.txId) {
@@ -3353,6 +3632,15 @@ function App() {
     setSchedulerError(null);
     setWalletFieldError(null);
 
+    if (offlineMode) {
+      const message = "Offline mode is enabled; spawn is blocked";
+      setSpawnOutcome(message);
+      setSpawnState("error");
+      setSpawnStep(null);
+      flashStatus(message);
+      return;
+    }
+
     const manifestTx = manifestTxInput.trim() || pip?.manifestTx || "";
     if (!manifestTx) {
       setManifestTxError("Provide a manifestTx before spawning");
@@ -3391,6 +3679,7 @@ function App() {
         manifestTx,
         moduleTx,
         walletSource,
+        { offline: offlineMode },
       );
       recordAoLog("spawn", response.processId, response.placeholder ? "Placeholder" : "Success", response.raw ?? response);
 
@@ -3986,11 +4275,69 @@ function App() {
       run: toggleTheme,
     },
     {
+      id: "toggle-offline",
+      label: offlineMode ? "Go online (disable offline)" : "Enable offline / air-gap",
+      description: offlineMode
+        ? "Allow renderer network requests again."
+        : "Block all network requests from the renderer.",
+      shortcut: "Alt+O",
+      run: () => setOfflineMode((current) => !current),
+    },
+    {
       id: "toggle-health",
       label: healthExpanded ? "Collapse health" : "Expand health",
       description: "Show or hide the diagnostics panel.",
       shortcut: "Alt+H",
       run: () => setHealthExpanded((open) => !open),
+    },
+    {
+      id: "focus-wizard-wallet",
+      label: "Focus deploy wizard · wallet",
+      description: "Jump to the wallet step in the AO deploy wizard.",
+      shortcut: "Alt+Shift+W",
+      run: () => focusWizardStep("wallet"),
+    },
+    {
+      id: "focus-wizard-module",
+      label: "Focus deploy wizard · module",
+      description: "Move to the module source input in the deploy wizard.",
+      shortcut: "Alt+Shift+M",
+      run: () => focusWizardStep("module"),
+    },
+    {
+      id: "focus-wizard-process",
+      label: "Focus deploy wizard · process",
+      description: "Move to the manifestTx spawn input in the deploy wizard.",
+      shortcut: "Alt+Shift+P",
+      run: () => focusWizardStep("spawn"),
+    },
+    {
+      id: "focus-vault-password",
+      label: "Focus vault password",
+      description: "Jump to the vault password input in Data Core.",
+      shortcut: "Alt+Shift+V",
+      run: () => focusVaultField("password"),
+    },
+    {
+      id: "focus-vault-filter",
+      label: "Focus vault filter",
+      description: "Move to the vault records filter.",
+      shortcut: "Alt+Shift+F",
+      run: () => focusVaultField("filter"),
+    },
+    {
+      id: "focus-health-failure",
+      label: "Focus SLA failure threshold",
+      description: "Jump to the failure streak input in diagnostics.",
+      shortcut: "Alt+Shift+H",
+      run: () => focusHealthThreshold("failure"),
+    },
+    {
+      id: "focus-health-latency",
+      label: "Focus SLA latency threshold",
+      description: "Jump to the average latency input in diagnostics.",
+      shortcut: "Alt+Shift+L",
+      run: () => focusHealthThreshold("latency"),
     },
     {
       id: "new-draft",
@@ -4123,6 +4470,18 @@ function App() {
       ],
     },
     {
+      title: "Focus jumps",
+      items: [
+        { shortcut: "Alt+Shift+W", action: "Wizard · Wallet", description: "Focus wallet step in AO deploy." },
+        { shortcut: "Alt+Shift+M", action: "Wizard · Module", description: "Focus module source input." },
+        { shortcut: "Alt+Shift+P", action: "Wizard · Process", description: "Focus manifestTx spawn input." },
+        { shortcut: "Alt+Shift+V", action: "Vault password", description: "Focus password field in Data Core." },
+        { shortcut: "Alt+Shift+F", action: "Vault filter", description: "Focus vault records filter field." },
+        { shortcut: "Alt+Shift+H", action: "SLA failure threshold", description: "Focus failure streak input in Health." },
+        { shortcut: "Alt+Shift+L", action: "SLA latency threshold", description: "Focus latency threshold input in Health." },
+      ],
+    },
+    {
       title: "Palette actions",
       items: paletteActions.map((action) => ({
         shortcut: action.shortcut ?? "—",
@@ -4137,6 +4496,7 @@ function App() {
       const key = event.key?.toLowerCase();
       const isPaletteShortcut = key === "k" && (event.metaKey || event.ctrlKey);
       const isAltShortcut = event.altKey && !event.metaKey && !event.ctrlKey && !event.shiftKey;
+      const isAltShiftShortcut = event.altKey && event.shiftKey && !event.metaKey && !event.ctrlKey;
       const isHotkeyShortcut =
         (event.shiftKey && key === "/" && !event.metaKey && !event.ctrlKey && !event.altKey) || key === "?";
       const isUndoShortcut = key === "z" && (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey;
@@ -4175,6 +4535,44 @@ function App() {
         event.preventDefault();
         closeHotkeyOverlay();
         return;
+      }
+
+      if (isAltShiftShortcut) {
+        if (key === "w") {
+          event.preventDefault();
+          focusWizardStep("wallet");
+          return;
+        }
+        if (key === "m") {
+          event.preventDefault();
+          focusWizardStep("module");
+          return;
+        }
+        if (key === "p") {
+          event.preventDefault();
+          focusWizardStep("spawn");
+          return;
+        }
+        if (key === "v") {
+          event.preventDefault();
+          focusVaultField("password");
+          return;
+        }
+        if (key === "f") {
+          event.preventDefault();
+          focusVaultField("filter");
+          return;
+        }
+        if (key === "h") {
+          event.preventDefault();
+          focusHealthThreshold("failure");
+          return;
+        }
+        if (key === "l") {
+          event.preventDefault();
+          focusHealthThreshold("latency");
+          return;
+        }
       }
 
       if (isAltShortcut && key === "n") {
@@ -4228,6 +4626,20 @@ function App() {
         return;
       }
 
+      if (isAltShortcut && key === "o") {
+        event.preventDefault();
+        void runPaletteAction({
+          id: "toggle-offline",
+          label: offlineMode ? "Go online (disable offline)" : "Enable offline / air-gap",
+          description: offlineMode
+            ? "Allow renderer network requests again."
+            : "Block all network requests from the renderer.",
+          shortcut: "Alt+O",
+          run: () => setOfflineMode((current) => !current),
+        });
+        return;
+      }
+
       if (!paletteOpen) return;
 
       if (key === "escape") {
@@ -4277,13 +4689,30 @@ function App() {
     closeHotkeyOverlay,
     toggleHotkeyOverlay,
     toggleTheme,
+    offlineMode,
     filteredPaletteActions,
     paletteActions,
     handleUndo,
     handleRedo,
+    focusWizardStep,
+    focusVaultField,
+    focusHealthThreshold,
   ]);
 
-  const hasHealthAlert = healthSummary.failing.length > 0;
+  useEffect(() => {
+    if (!whatsNewOpen) return;
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setWhatsNewOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [whatsNewOpen]);
+
+  const hasHealthAlert =
+    !offlineMode && healthSummary.failing.some((item) => item.status !== "offline");
 
   return (
     <div className="app-shell">
@@ -4315,6 +4744,25 @@ function App() {
               {theme === "cyberpunk" ? "Cyberpunk" : "Light"} mode
             </span>
           </label>
+          <label className="toggle offline-toggle" title="Offline / air-gap mode blocks renderer network requests">
+            <input
+              type="checkbox"
+              checked={offlineMode}
+              onChange={(e) => setOfflineMode(e.target.checked)}
+              aria-pressed={offlineMode}
+              aria-label="Toggle offline / air-gap mode"
+            />
+            <span>{offlineMode ? "Offline" : "Online"}</span>
+          </label>
+          <button
+            className="ghost small whats-new-button"
+            type="button"
+            onClick={() => setWhatsNewOpen(true)}
+            aria-label="Open what's new modal"
+            title="See recent changes"
+          >
+            What&rsquo;s new
+          </button>
           <button
             className="ghost small hotkey-help-button"
             type="button"
@@ -4346,16 +4794,23 @@ function App() {
         </div>
         <div className="top-actions">
           {workspace === "ao" && (
-            <div className={`health-card ${healthExpanded ? "is-open" : "is-collapsed"}`}>
+            <div
+              ref={healthCardRef}
+              className={`health-card ${healthExpanded ? "is-open" : "is-collapsed"}`}
+              role="region"
+              aria-labelledby="health-diagnostics-heading"
+              aria-describedby="health-sla-caption health-sla-note"
+              tabIndex={-1}
+            >
               <div className="health-header">
                 <div>
                   <p className="eyebrow">Health</p>
-                  <h4>Diagnostics</h4>
-                  <div className="health-sla">
+                  <h4 id="health-diagnostics-heading">Diagnostics</h4>
+                  <div className="health-sla" aria-live="polite">
                     <span className={`sla-pill ${healthSla.breached ? "breached" : "ok"}`}>
                       {healthSla.breached ? "SLA breach" : "SLA OK"}
                     </span>
-                    <span className="health-sla-note">
+                    <span className="health-sla-note" id="health-sla-note">
                       {healthSla.breached
                         ? healthSla.failureBreached
                           ? `Failures ${healthSla.failureStreak}/${slaFailureThreshold}`
@@ -4363,6 +4818,9 @@ function App() {
                         : `Target: < ${slaFailureThreshold} failures • ≤ ${slaLatencyThresholdMs} ms avg`}
                     </span>
                   </div>
+                  <p id="health-sla-caption" className="sr-only">
+                    Use Alt+Shift+H to focus the failure threshold and Alt+Shift+L to focus the latency threshold inputs.
+                  </p>
                 </div>
                 <div className="health-actions">
                   <div className="health-auto-refresh">
@@ -4452,18 +4910,28 @@ function App() {
                   </div>
                   <div className="health-config-grid">
                     <label className="health-input">
-                      <span>Fail streak</span>
+                      <span className="label-with-help">
+                        Fail streak
+                        <HelpTip copy="How many consecutive failed checks trigger an SLA breach notification." />
+                      </span>
                       <input
+                        id="health-failure-threshold"
                         type="number"
                         min={1}
                         value={slaFailureThreshold}
                         onChange={(e) => setSlaFailureThreshold(Math.max(1, Math.round(Number(e.target.value) || 1)))}
                         aria-label="Failure streak threshold"
+                        aria-describedby="health-failure-help"
+                        ref={healthFailureInputRef}
                       />
                     </label>
                     <label className="health-input">
-                      <span>Avg latency (ms)</span>
+                      <span className="label-with-help">
+                        Avg latency (ms)
+                        <HelpTip copy="Average latency ceiling for recent checks. Breach when the rolling average exceeds this value." />
+                      </span>
                       <input
+                        id="health-latency-threshold"
                         type="number"
                         min={50}
                         step={50}
@@ -4474,9 +4942,17 @@ function App() {
                           )
                         }
                         aria-label="Average latency threshold (ms)"
+                        aria-describedby="health-latency-help"
+                        ref={healthLatencyInputRef}
                       />
                     </label>
                   </div>
+                  <p id="health-failure-help" className="sr-only">
+                    Consecutive failed checks needed before an SLA breach is reported. Press Alt+Shift+H to focus this field.
+                  </p>
+                  <p id="health-latency-help" className="sr-only">
+                    Average latency threshold in milliseconds. Press Alt+Shift+L to focus this field.
+                  </p>
                   {healthSparkline && (
                     <div className="health-sparkline" aria-label="Latency trend sparkline">
                       <svg
@@ -4672,14 +5148,17 @@ function App() {
                   Remove
                 </button>
               )}
-              <button
-                className="ghost"
-                onClick={() => void openDraftDiffPanel()}
-                onMouseEnter={prefetchDraftDiffPanel}
-                onFocus={prefetchDraftDiffPanel}
-              >
-                Draft diff
-              </button>
+              <div className="button-with-help">
+                <button
+                  className="ghost"
+                  onClick={() => void openDraftDiffPanel()}
+                  onMouseEnter={prefetchDraftDiffPanel}
+                  onFocus={prefetchDraftDiffPanel}
+                >
+                  Draft diff
+                </button>
+                <HelpTip copy="Open the draft diff panel to compare the current manifest against a saved draft and cherry-pick differences." />
+              </div>
               <button className="ghost" onClick={handleLoadPip} disabled={loadingManifest}>
                 {loadingManifest ? "Loading manifest…" : "Load PIP"}
               </button>
@@ -4787,36 +5266,46 @@ function App() {
 
       <HotkeyOverlay open={hotkeyOverlayOpen} sections={hotkeySections} onClose={closeHotkeyOverlay} />
 
-      <section
-        className="panel pip-vault-panel"
-        style={{ display: workspace === "data" ? undefined : "none" }}
-      >
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">PIP vault</p>
-            <h3>Local vault panel</h3>
+      <ErrorBoundary name="PIP vault" variant="panel" onReset={resetVaultPanelBoundary}>
+        <Vault
+          ref={vaultRegionRef}
+          className="panel pip-vault-panel"
+          open={workspace === "data"}
+          labelledBy="pip-vault-heading"
+          describedBy="pip-vault-desc"
+        >
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">PIP vault</p>
+              <div className="title-with-help">
+                <h3 id="pip-vault-heading">Local vault panel</h3>
+                <HelpTip copy="Manage the encrypted local PIP vault: unlock it, back it up, and restore records safely." />
+              </div>
+              <p id="pip-vault-desc" className="sr-only">
+                Vault section with snapshot, password controls, records, and issues. Use Alt+Shift+V to focus the password input and Alt+Shift+F to move to the records filter.
+              </p>
+            </div>
+            <div className="pip-vault-header-actions">
+              <span className={`pill ${pipVaultSnapshot?.exists ? "accent" : "ghost"}`}>
+                {pipVaultSnapshot?.exists ? "Vault present" : "Vault empty"}
+              </span>
+              <span className={`pill ${pipVaultSnapshot?.mode === "password" ? "accent" : "ghost"}`}>
+                {pipVaultSnapshot?.mode === "password"
+                  ? pipVaultSnapshot.locked
+                    ? "Password locked"
+                    : "Password ready"
+                  : pipVaultSnapshot?.mode === "plain"
+                    ? "Local key"
+                    : "Safe storage"}
+              </span>
+              <span className={`pill ${pipVaultLocked ? "issue" : "ghost"}`}>
+                {pipVaultLocked ? "Locked" : "Unlocked"}
+              </span>
+              <span className="pill ghost">
+                {pipVaultBlockingIssues.length ? `${pipVaultBlockingIssues.length} blocking issue${pipVaultBlockingIssues.length === 1 ? "" : "s"}` : "Ready to save"}
+              </span>
+            </div>
           </div>
-          <div className="pip-vault-header-actions">
-            <span className={`pill ${pipVaultSnapshot?.exists ? "accent" : "ghost"}`}>
-              {pipVaultSnapshot?.exists ? "Vault present" : "Vault empty"}
-            </span>
-            <span className={`pill ${pipVaultSnapshot?.mode === "password" ? "accent" : "ghost"}`}>
-              {pipVaultSnapshot?.mode === "password"
-                ? pipVaultSnapshot.locked
-                  ? "Password locked"
-                  : "Password ready"
-                : pipVaultSnapshot?.mode === "plain"
-                  ? "Local key"
-                  : "Safe storage"}
-            </span>
-            <span className={`pill ${pipVaultLocked ? "issue" : "ghost"}`}>
-              {pipVaultLocked ? "Locked" : "Unlocked"}
-            </span>
-            <span className="pill ghost">
-              {pipVaultBlockingIssues.length ? `${pipVaultBlockingIssues.length} blocking issue${pipVaultBlockingIssues.length === 1 ? "" : "s"}` : "Ready to save"}
-            </span>
-          </div>
-        </div>
         {pipVaultTask && (
           <div className="pip-vault-progress" role="status">
             <div className="pip-vault-progress-bar">
@@ -4879,7 +5368,10 @@ function App() {
             <div className="stack-head">
               <div>
                 <p className="eyebrow">Security</p>
-                <h4>Password & backups</h4>
+                <div className="title-with-help">
+                  <h4>Password & backups</h4>
+                  <HelpTip copy="Enable password mode to encrypt the vault and backups; use the same password when importing an encrypted bundle." />
+                </div>
               </div>
               <span className={`pill ${pipVaultSnapshot?.mode === "password" ? "accent" : "ghost"}`}>
                 {pipVaultSnapshot?.mode === "password" ? (pipVaultSnapshot.locked ? "Locked" : "Password") : "Keychain"}
@@ -4902,10 +5394,21 @@ function App() {
                 <span>Lock</span>
                 <strong>{pipVaultLocked ? "Locked" : "Unlocked"}</strong>
               </div>
+              <div>
+                <span>Last backup</span>
+                <strong>{latestVaultAudit ? formatDate(latestVaultAudit.at) : "—"}</strong>
+              </div>
+              <div>
+                <span>Checksum</span>
+                <strong className="mono pip-vault-checksum" title={latestVaultAudit?.checksum ?? ""}>
+                  {latestVaultAudit?.checksum ? `${latestVaultAudit.checksum.slice(0, 14)}…` : "—"}
+                </strong>
+              </div>
             </div>
             <div className="pip-vault-password-row">
               <div className={`pip-vault-password-input ${pipVaultPasswordError ? "has-error" : ""}`}>
                 <input
+                  ref={vaultPasswordRef}
                   type="password"
                   value={pipVaultPassword}
                   onChange={(e) => {
@@ -4914,6 +5417,7 @@ function App() {
                   }}
                   placeholder={pipVaultSnapshot?.mode === "password" ? "Enter vault password" : "Set a vault password"}
                   aria-label="Vault password"
+                  aria-describedby="vault-password-help"
                 />
                 {pipVaultPasswordError ? <p className="field-error">{pipVaultPasswordError}</p> : null}
               </div>
@@ -4934,21 +5438,24 @@ function App() {
                       : "Rotate password"
                     : "Enable password"}
               </button>
-              {pipVaultSnapshot?.mode === "password" && (
-                <button
-                  className="ghost"
-                  onClick={handleDisableVaultPassword}
-                  disabled={pipVaultBusy || pipVaultTask?.kind === "unlock"}
-                >
-                  Disable password
-                </button>
-              )}
-            </div>
-            <div className="pip-vault-password-meta">
-              <label className="remember-toggle">
-                <input
-                  type="checkbox"
-                  checked={pipVaultRememberUnlock}
+            {pipVaultSnapshot?.mode === "password" && (
+              <button
+                className="ghost"
+                onClick={handleDisableVaultPassword}
+                disabled={pipVaultBusy || pipVaultTask?.kind === "unlock"}
+              >
+                Disable password
+              </button>
+            )}
+          </div>
+          <p id="vault-password-help" className="sr-only">
+            Unlock or set the vault password. Press Alt+Shift+V to focus this input quickly.
+          </p>
+          <div className="pip-vault-password-meta">
+            <label className="remember-toggle">
+              <input
+                type="checkbox"
+                checked={pipVaultRememberUnlock}
                   onChange={(e) => handleRememberUnlockToggle(e.target.checked)}
                 />
                 Remember unlock for this session
@@ -4987,7 +5494,10 @@ function App() {
             <div className="stack-head">
               <div>
                 <p className="eyebrow">Active document</p>
-                <h4>Current PIP</h4>
+                <div className="title-with-help">
+                  <h4>Current PIP</h4>
+                  <HelpTip copy="Load pulls the selected PIP from the vault; Save writes the current PIP once validation issues are resolved." />
+                </div>
               </div>
               <span className={`pill ${pip ? "accent" : "ghost"}`}>{pip ? "Loaded" : "Empty"}</span>
             </div>
@@ -5040,7 +5550,10 @@ function App() {
             <div className="stack-head pip-vault-records-head">
               <div>
                 <p className="eyebrow">Records</p>
-                <h4>Vault table</h4>
+                <div className="title-with-help">
+                  <h4>Vault table</h4>
+                  <HelpTip copy="Browse, filter, export, or delete stored PIP records inside the vault." />
+                </div>
               </div>
               <div className="pip-vault-records-actions">
                 <input
@@ -5049,6 +5562,8 @@ function App() {
                   onChange={(e) => setPipVaultFilter(e.target.value)}
                   placeholder="Filter by tx, tenant, or site"
                   aria-label="Filter vault records"
+                  aria-describedby="vault-filter-help"
+                  ref={vaultFilterRef}
                 />
                 <span className="pill ghost">
                   {filteredPipVaultRecords.length}/{pipVaultRecords.length || 0}
@@ -5065,6 +5580,9 @@ function App() {
                     Clear
                   </button>
                 )}
+                <p id="vault-filter-help" className="sr-only">
+                  Filter vault records by transaction id, tenant, or site. Press Alt+Shift+F to focus this field.
+                </p>
                 <button className="ghost small" onClick={handleExportPipVaultRecords} disabled={!pipVaultRecords.length}>
                   Export JSON
                 </button>
@@ -5126,6 +5644,88 @@ function App() {
             </div>
           </article>
 
+          <article className="pip-vault-card pip-vault-audit-card">
+            <div className="stack-head">
+              <div>
+                <p className="eyebrow">Backups</p>
+                <div className="title-with-help">
+                  <h4>Audit log</h4>
+                  <HelpTip copy="Each vault backup is hashed with SHA-256 and recorded locally. Export this log for integrity checks." />
+                </div>
+              </div>
+              <div className="pip-vault-audit-actions">
+                <span className="pill ghost">
+                  {vaultAuditLoading ? "Loading…" : vaultAuditEvents.length ? `${vaultAuditEvents.length} recent` : "No entries"}
+                </span>
+                <button
+                  className="ghost small"
+                  onClick={() => void refreshVaultAudit()}
+                  disabled={vaultAuditLoading || pipVaultBusy}
+                >
+                  {vaultAuditLoading ? "Refreshing…" : "Refresh"}
+                </button>
+                <button
+                  className="ghost small"
+                  onClick={() => void handleExportVaultAudit("csv")}
+                  disabled={!vaultAuditEvents.length || vaultAuditExporting === "csv"}
+                >
+                  {vaultAuditExporting === "csv" ? "Exporting…" : "Export CSV"}
+                </button>
+                <button
+                  className="ghost small"
+                  onClick={() => void handleExportVaultAudit("json")}
+                  disabled={!vaultAuditEvents.length || vaultAuditExporting === "json"}
+                >
+                  {vaultAuditExporting === "json" ? "Exporting…" : "Export JSON"}
+                </button>
+              </div>
+            </div>
+            {vaultAuditEvents.length ? (
+              <div className="pip-vault-audit-table-wrap">
+                <table className="pip-vault-audit-table">
+                  <thead>
+                    <tr>
+                      <th>When</th>
+                      <th>Status</th>
+                      <th>Checksum</th>
+                      <th>Size</th>
+                      <th>Mode / file</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {vaultAuditEvents.map((event) => (
+                      <tr key={event.id}>
+                        <td>
+                          <div className="pip-vault-audit-when">
+                            <strong>{formatTimeShort(event.at)}</strong>
+                            <span className="subtle">{new Date(event.at).toLocaleDateString()}</span>
+                          </div>
+                        </td>
+                        <td>
+                          <span className={`pill ${event.status === "ok" ? "accent" : "issue"}`}>
+                            {event.status === "ok" ? "OK" : "Error"}
+                          </span>
+                        </td>
+                        <td className="mono pip-vault-checksum-cell" title={event.checksum ?? ""}>
+                          {event.checksum ? `${event.checksum.slice(0, 18)}…` : "—"}
+                        </td>
+                        <td className="mono">{formatBytes(event.bytes)}</td>
+                        <td>
+                          <div className="pip-vault-audit-meta">
+                            <span className="pill ghost">{event.mode ? formatVaultMode(event.mode) : "—"}</span>
+                            <span className="mono subtle">{event.filename ?? "—"}</span>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="hint">Export a vault backup to capture its checksum and audit trail.</p>
+            )}
+          </article>
+
           <article className="pip-vault-card">
             <div className="stack-head">
               <div>
@@ -5153,8 +5753,13 @@ function App() {
             )}
           </article>
         </div>
-        {pipVaultStatus && <div className="pip-vault-footer"><span className="pill ghost pip-vault-pill">{pipVaultStatus}</span></div>}
-      </section>
+        {pipVaultStatus && (
+          <div className="pip-vault-footer">
+            <span className="pill ghost pip-vault-pill">{pipVaultStatus}</span>
+          </div>
+        )}
+        </Vault>
+      </ErrorBoundary>
 
       <div className="panels" style={{ display: workspace === "studio" ? undefined : "none" }}>
         <aside className="panel catalog">
@@ -5510,7 +6115,10 @@ function App() {
                     <p className="hint">No validation issues.</p>
                   )}
                   <div className="diff-summary-head diff-summary-spaced">
-                    <span className="eyebrow">Diff vs defaults</span>
+                    <span className="eyebrow label-with-help">
+                      Diff vs defaults
+                      <HelpTip copy="Shows how your current props differ from the catalog defaults; hide overrides to view only changed fields." />
+                    </span>
                     <label className="toggle">
                       <input
                         type="checkbox"
@@ -5584,13 +6192,27 @@ function App() {
         </aside>
       </div>
 
-      <div className="panel deploy" style={{ display: workspace === "ao" ? undefined : "none" }}>
+      <Wizard
+        ref={wizardRegionRef}
+        className="panel deploy"
+        open={workspace === "ao"}
+        labelledBy="ao-wizard-heading"
+        describedBy="ao-wizard-desc"
+      >
         <div className="panel-header">
           <div>
             <p className="eyebrow">AO deploy</p>
-            <h3>Wallet · Module · Process</h3>
+            <h3 id="ao-wizard-heading">Wallet · Module · Process</h3>
+            <p id="ao-wizard-desc" className="sr-only">
+              Deploy wizard broken into wallet, module, and process steps. Use Alt+Shift+W, Alt+Shift+M, or Alt+Shift+P to jump to a step.
+            </p>
           </div>
           <div className="deploy-chips">
+            {offlineMode && (
+              <span className="progress-chip offline" title="Offline mode blocks network actions">
+                Offline
+              </span>
+            )}
             <span className={`progress-chip ${deployState}`}>
               {deployState === "pending"
                 ? "Deploying"
@@ -5617,7 +6239,10 @@ function App() {
         <div className="deploy-grid">
           <div className="stack">
             <div className="stack-head">
-              <p className="eyebrow">Wallet</p>
+              <div className="label-with-help">
+                <p className="eyebrow">Wallet</p>
+                <HelpTip copy="Choose IPC for the system wallet picker, Path to load a wallet JSON from disk, or JWK to paste raw JSON." />
+              </div>
               <span className={`progress-chip wallet ${walletMode}`}>
                 {walletMode === "ipc" ? "IPC" : walletMode === "path" ? "Path" : "JWK"}
               </span>
@@ -5626,6 +6251,8 @@ function App() {
               <button
                 className={`chip ${walletMode === "ipc" ? "active" : ""}`}
                 type="button"
+                ref={wizardWalletRef}
+                aria-pressed={walletMode === "ipc"}
                 onClick={() => {
                   setWalletMode("ipc");
                   setWalletFieldError(null);
@@ -5636,6 +6263,7 @@ function App() {
               <button
                 className={`chip ${walletMode === "path" ? "active" : ""}`}
                 type="button"
+                aria-pressed={walletMode === "path"}
                 onClick={() => {
                   setWalletMode("path");
                   setWalletFieldError(null);
@@ -5646,6 +6274,7 @@ function App() {
               <button
                 className={`chip ${walletMode === "jwk" ? "active" : ""}`}
                 type="button"
+                aria-pressed={walletMode === "jwk"}
                 onClick={() => {
                   setWalletMode("jwk");
                   setWalletFieldError(null);
@@ -5735,7 +6364,10 @@ function App() {
 
           <div className="stack">
             <label className="field">
-              <span>Module path (optional)</span>
+              <span className="label-with-help">
+                Module path (optional)
+                <HelpTip copy="Load a local AO module file; when loaded it fills Module source below." />
+              </span>
               <input
                 placeholder="/path/to/module.js"
                 value={modulePath}
@@ -5754,8 +6386,12 @@ function App() {
               </div>
             </label>
             <label className="field">
-              <span>Module source</span>
+              <span className="label-with-help">
+                Module source
+                <HelpTip copy="Paste the AO module JavaScript that Deploy will send to the network." />
+              </span>
               <textarea
+                ref={wizardModuleRef}
                 rows={8}
                 value={moduleSource}
                 onChange={(e) => {
@@ -5770,9 +6406,10 @@ function App() {
               <button
                 className="primary"
                 onClick={handleDeployModuleClick}
-                disabled={deploying}
+                disabled={deploying || offlineMode}
                 type="button"
                 aria-label="Deploy module"
+                title={offlineMode ? "Offline mode is enabled; deploy is blocked" : "Deploy module"}
               >
                 {deploying ? "Deploying…" : "Deploy module"}
               </button>
@@ -5787,19 +6424,35 @@ function App() {
 
           <div className="stack">
             <label className="field">
-              <span>manifestTx</span>
+              <span className="label-with-help">
+                manifestTx
+                <HelpTip copy="Transaction id of the manifest (PIP) you want to spawn as a process." />
+              </span>
               <input
+                ref={wizardSpawnRef}
                 placeholder="Manifest transaction id"
                 value={manifestTxInput}
                 onChange={(e) => {
                   setManifestTxInput(e.target.value);
                   setManifestTxError(null);
                 }}
+                aria-describedby="manifest-tx-help"
               />
-              {manifestTxError ? <p className="error field-error">{manifestTxError}</p> : <p className="hint">PIP-loaded manifests auto-fill this field.</p>}
+              {manifestTxError ? (
+                <p className="error field-error" id="manifest-tx-help">
+                  {manifestTxError}
+                </p>
+              ) : (
+                <p className="hint" id="manifest-tx-help">
+                  PIP-loaded manifests auto-fill this field.
+                </p>
+              )}
             </label>
             <label className="field">
-              <span>AO_MODULE_TX</span>
+              <span className="label-with-help">
+                AO_MODULE_TX
+                <HelpTip copy="Module transaction id produced by deploy; spawn uses it to start the process." />
+              </span>
               <input
                 placeholder="Module transaction id"
                 value={moduleTxInput}
@@ -5811,7 +6464,10 @@ function App() {
               {moduleTxError ? <p className="error field-error">{moduleTxError}</p> : <p className="hint">Autofills from the latest deploy, or read from env.</p>}
             </label>
             <label className="field">
-              <span>Scheduler</span>
+              <span className="label-with-help">
+                Scheduler
+                <HelpTip copy="Optional scheduler process id. Leave blank to use AO defaults." />
+              </span>
               <input
                 placeholder="Scheduler process id"
                 value={scheduler}
@@ -5826,10 +6482,16 @@ function App() {
               <button
                 className="primary"
                 onClick={handleSpawnProcessClick}
-                disabled={spawning || !canSpawn}
+                disabled={spawning || !canSpawn || offlineMode}
                 type="button"
                 aria-label="Spawn process"
-                title={!canSpawn ? "Add manifestTx and moduleTx to spawn" : "Spawn process"}
+                title={
+                  offlineMode
+                    ? "Offline mode is enabled; spawning is blocked"
+                    : !canSpawn
+                      ? "Add manifestTx and moduleTx to spawn"
+                      : "Spawn process"
+                }
               >
                 {spawning ? "Spawning…" : "Spawn process"}
               </button>
@@ -5923,37 +6585,39 @@ function App() {
         <Suspense fallback={<AoLogPanelFallback />}>
           <AoLogPanel aoLog={aoLog} onCopy={handleCopyAoId} onOpen={handleOpenAoId} />
         </Suspense>
-      </div>
+      </Wizard>
 
       {(draftDiffOpen || draftDiffLoading) && (
-        <Suspense
-          fallback={
-            <DraftDiffPanelFallback
+        <ErrorBoundary name="Draft diff" variant="overlay" onReset={resetDraftDiffBoundary}>
+          <Suspense
+            fallback={
+              <DraftDiffPanelFallback
+                leftLabel={`${manifest.name} (current)`}
+                leftDetail={`Updated ${formatDate(manifest.metadata.updatedAt)}`}
+                onClose={closeDraftDiffPanel}
+              />
+            }
+          >
+            <DraftDiffPanel
+              open={draftDiffOpen}
+              loading={draftDiffLoading}
+              entries={draftDiffEntries}
+              options={draftDiffOptions}
+              rightValue={draftDiffRightValue}
               leftLabel={`${manifest.name} (current)`}
               leftDetail={`Updated ${formatDate(manifest.metadata.updatedAt)}`}
+              rightLabel={draftDiffRight ? draftDiffRight.name : undefined}
+              rightDetail={
+                draftDiffRight
+                  ? `${draftDiffRight.mode ? formatDraftSaveMode(draftDiffRight.mode) : "Draft"} • ${formatDate(draftDiffRight.savedAt)}`
+                  : undefined
+              }
               onClose={closeDraftDiffPanel}
+              onSelectRight={handleSelectDraftDiffOption}
+              onCherryPick={handleCherryPick}
             />
-          }
-        >
-          <DraftDiffPanel
-            open={draftDiffOpen}
-            loading={draftDiffLoading}
-            entries={draftDiffEntries}
-            options={draftDiffOptions}
-            rightValue={draftDiffRightValue}
-            leftLabel={`${manifest.name} (current)`}
-            leftDetail={`Updated ${formatDate(manifest.metadata.updatedAt)}`}
-            rightLabel={draftDiffRight ? draftDiffRight.name : undefined}
-            rightDetail={
-              draftDiffRight
-                ? `${draftDiffRight.mode ? formatDraftSaveMode(draftDiffRight.mode) : "Draft"} • ${formatDate(draftDiffRight.savedAt)}`
-                : undefined
-            }
-            onClose={closeDraftDiffPanel}
-            onSelectRight={handleSelectDraftDiffOption}
-            onCherryPick={handleCherryPick}
-          />
-        </Suspense>
+          </Suspense>
+        </ErrorBoundary>
       )}
 
       {pipVaultModeConfirm && (
@@ -5973,6 +6637,47 @@ function App() {
               <button className="primary" onClick={handleConfirmVaultMode}>
                 {pipVaultModeConfirm.action === "enable" ? "Enable password" : "Use keychain"}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {whatsNewOpen && (
+        <div
+          className="whats-new-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="whats-new-title"
+          onClick={() => setWhatsNewOpen(false)}
+        >
+          <div className="whats-new-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="whats-new-head">
+              <div>
+                <p className="eyebrow">Changelog</p>
+                <h3 id="whats-new-title">What's new</h3>
+              </div>
+              <button className="ghost small" onClick={() => setWhatsNewOpen(false)}>
+                Close
+              </button>
+            </div>
+            <div className="whats-new-list">
+              {whatsNewEntries.length === 0 ? (
+                <p className="hint">No changelog entries found.</p>
+              ) : (
+                whatsNewEntries.map((entry) => (
+                  <article key={`${entry.version}-${entry.date}`} className="whats-new-item">
+                    <div className="whats-new-meta">
+                      <span className="pill ghost">v{entry.version}</span>
+                      <span className="mono subtle">{formatDate(entry.date)}</span>
+                    </div>
+                    <ul>
+                      {entry.highlights.map((note, idx) => (
+                        <li key={`${entry.version}-${idx}`}>{note}</li>
+                      ))}
+                    </ul>
+                  </article>
+                ))
+              )}
             </div>
           </div>
         </div>

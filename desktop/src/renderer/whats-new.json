@@ -1,0 +1,22 @@
+{
+  "entries": [
+    {
+      "version": "0.18.0",
+      "date": "2026-03-20T00:00:00.000Z",
+      "highlights": [
+        "Contextual help tooltips for AO deploy/spawn forms, vault controls, diff panel, and health thresholds.",
+        "In-app \"What's new\" modal with static changelog data for quick release visibility.",
+        "Guidance baked into AO deploy/spawn to clarify required env and module wiring."
+      ]
+    },
+    {
+      "version": "0.17.2",
+      "date": "2026-03-05T00:00:00.000Z",
+      "highlights": [
+        "Vault import/export messaging and session unlock flow refinements.",
+        "Health SLA notification cadence respects failure streaks and averages.",
+        "Draft diff overlay performance and empty states tuned."
+      ]
+    }
+  ]
+}

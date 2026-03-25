@@ -5,7 +5,7 @@ type Fetcher = typeof fetch;
 
 export type HealthId = "gateway" | "worker" | "ao";
 
-export type HealthState = "ok" | "warn" | "error" | "missing";
+export type HealthState = "ok" | "warn" | "error" | "missing" | "offline";
 
 export type HealthAttempt = {
   attempt: number;
@@ -37,6 +37,7 @@ export type HealthStatusSummary = {
   warn: number;
   error: number;
   missing: number;
+  offline: number;
   overall: HealthState;
   failing: HealthStatus[];
 };
@@ -48,7 +49,11 @@ export type HealthSnapshot = {
   checks: HealthStatus[];
 };
 
-const defaultFetch = (globalThis as any).fetch as Fetcher | undefined;
+type HealthOptions = {
+  offline?: boolean;
+};
+
+const getDefaultFetch = () => (globalThis as any).fetch as Fetcher | undefined;
 
 const nowIso = () => new Date().toISOString();
 const nowMs = () =>
@@ -131,6 +136,16 @@ const makeMissing = (id: HealthId, label: string, detail: string): HealthStatus 
   detail,
   checkedAt: nowIso(),
   lastError: detail,
+});
+
+const makeOffline = (id: HealthId, label: string, url?: string): HealthStatus => ({
+  id,
+  label,
+  status: "offline",
+  detail: "Offline mode is enabled; check skipped",
+  checkedAt: nowIso(),
+  url,
+  lastError: "Offline mode is enabled",
 });
 
 const makeError = (
@@ -374,39 +389,57 @@ const withRetries = async (runner: () => Promise<HealthStatus>): Promise<HealthS
   return annotateAttempts((lastResult as HealthStatus) ?? (history[history.length - 1] as unknown as HealthStatus), history, maxAttempts);
 };
 
-export async function checkGatewayHealth(fetcher: Fetcher | undefined = defaultFetch): Promise<HealthStatus> {
+export async function checkGatewayHealth(fetcher?: Fetcher, options: HealthOptions = {}): Promise<HealthStatus> {
   const url = resolveGatewayUrl();
+  if (options.offline) {
+    return makeOffline("gateway", "Gateway", url);
+  }
+
+  const resolvedFetch = fetcher ?? getDefaultFetch();
+
   return withRetries(() =>
-    ping("gateway", "Gateway", url, fetcher, {
+    ping("gateway", "Gateway", url, resolvedFetch, {
       missingDetail: `Gateway URL is not configured (${formatHost(url) || "arweave.net"})`,
     }),
   );
 }
 
-export async function checkWorkerHealth(fetcher: Fetcher | undefined = defaultFetch): Promise<HealthStatus> {
+export async function checkWorkerHealth(fetcher?: Fetcher, options: HealthOptions = {}): Promise<HealthStatus> {
   const base = resolveWorkerBase();
+  const path = readEnv("WORKER_HEALTH_PATH") ?? "/health";
+
+  if (options.offline) {
+    return makeOffline("worker", "Worker", base ? buildPingUrl(base, path) : base);
+  }
+
   if (!base) {
     return makeMissing("worker", "Worker", "Set WORKER_PIP_BASE / WORKER_BASE_URL to enable health checks");
   }
 
-  const path = readEnv("WORKER_HEALTH_PATH") ?? "/health";
+  const resolvedFetch = fetcher ?? getDefaultFetch();
   return withRetries(() =>
-    ping("worker", "Worker", buildPingUrl(base, path), fetcher, {
+    ping("worker", "Worker", buildPingUrl(base, path), resolvedFetch, {
       missingDetail: "Set WORKER_PIP_BASE / WORKER_BASE_URL to enable health checks",
     }),
   );
 }
 
-export async function checkAoHealth(fetcher: Fetcher | undefined = defaultFetch): Promise<HealthStatus> {
+export async function checkAoHealth(fetcher?: Fetcher, options: HealthOptions = {}): Promise<HealthStatus> {
   const base = resolveAoBase();
+  const path = readEnv("AO_HEALTH_PATH") ?? readEnv("AO_PING_PATH") ?? "/health";
+  const mode = readEnv("AO_MODE");
+
+  if (options.offline) {
+    return makeOffline("ao", "AO", base ? buildPingUrl(base, path) : base);
+  }
+
   if (!base) {
     return makeMissing("ao", "AO", "Set AO_URL to enable AO ping");
   }
 
-  const path = readEnv("AO_HEALTH_PATH") ?? readEnv("AO_PING_PATH") ?? "/health";
-  const mode = readEnv("AO_MODE");
+  const resolvedFetch = fetcher ?? getDefaultFetch();
   const result = await withRetries(() =>
-    ping("ao", "AO", buildPingUrl(base, path), fetcher, {
+    ping("ao", "AO", buildPingUrl(base, path), resolvedFetch, {
       missingDetail: "Set AO_URL to enable AO ping",
     }),
   );
@@ -421,37 +454,39 @@ export async function checkAoHealth(fetcher: Fetcher | undefined = defaultFetch)
   return result;
 }
 
-export async function runHealthChecks(fetcher?: Fetcher): Promise<HealthStatus[]> {
-  const resolvedFetch = fetcher ?? defaultFetch;
+export async function runHealthChecks(fetcher?: Fetcher, options: HealthOptions = {}): Promise<HealthStatus[]> {
+  const resolvedFetch = fetcher ?? getDefaultFetch();
 
   return Promise.all([
-    checkGatewayHealth(resolvedFetch),
-    checkWorkerHealth(resolvedFetch),
-    checkAoHealth(resolvedFetch),
+    checkGatewayHealth(resolvedFetch, options),
+    checkWorkerHealth(resolvedFetch, options),
+    checkAoHealth(resolvedFetch, options),
   ]);
 }
 
 export const summarizeHealthStatuses = (items: HealthStatus[]): HealthStatusSummary => {
-  const counts = { ok: 0, warn: 0, error: 0, missing: 0 };
+  const counts: Record<HealthState, number> = { ok: 0, warn: 0, error: 0, missing: 0, offline: 0 };
   const failing: HealthStatus[] = [];
 
   for (const item of items) {
-    if (item.status === "error" || item.status === "missing") {
+    if (item.status === "error" || item.status === "missing" || item.status === "offline") {
       failing.push(item);
     }
     counts[item.status] += 1;
   }
 
   const overall: HealthStatusSummary["overall"] =
-    failing.length > 0
-      ? counts.error > 0
-        ? "error"
-        : "missing"
-      : counts.warn > 0
-        ? "warn"
-        : items.length > 0
-          ? "ok"
-          : "missing";
+    counts.error > 0
+      ? "error"
+      : counts.offline > 0
+        ? "offline"
+        : failing.length > 0
+          ? "missing"
+          : counts.warn > 0
+            ? "warn"
+            : items.length > 0
+              ? "ok"
+              : "missing";
 
   return {
     ...counts,
