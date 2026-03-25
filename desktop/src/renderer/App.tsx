@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import "./styles.css";
 import * as pipClient from "../../../src/manifest/pipClient";
@@ -51,6 +51,14 @@ const fromCatalog = (item: CatalogItem): ManifestNode => ({
   children: [],
 });
 
+const getInitialTheme = (): Theme => {
+  if (typeof window === "undefined") return "light";
+  const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+  const next = stored === "cyberpunk" ? "cyberpunk" : "light";
+  document.documentElement.setAttribute("data-theme", next);
+  return next;
+};
+
 const formatDate = (iso?: string) => (iso ? new Date(iso).toLocaleString() : "—");
 const formatTime = (iso?: string) =>
   iso
@@ -84,6 +92,10 @@ type FileBridgeResult = {
   error?: string;
   canceled?: boolean;
 };
+
+type Theme = "light" | "cyberpunk";
+
+const THEME_STORAGE_KEY = "darkmesh-theme";
 
 declare global {
   interface Window {
@@ -154,6 +166,7 @@ const countNodes = (nodes: ManifestNode[]): number =>
   nodes.reduce((total, node) => total + 1 + (node.children ? countNodes(node.children) : 0), 0);
 
 function App() {
+  const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
   const [catalog, setCatalog] = useState<CatalogItem[]>(seedCatalog);
   const [search, setSearch] = useState("");
   const [manifest, setManifest] = useState<ManifestDocument>(() => newManifest());
@@ -169,6 +182,7 @@ function App() {
   const [loadingManifest, setLoadingManifest] = useState(false);
   const [health, setHealth] = useState<HealthStatus[]>([]);
   const [healthLoading, setHealthLoading] = useState(false);
+  const [healthExpanded, setHealthExpanded] = useState(true);
   const [walletPath, setWalletPath] = useState<string | null>(null);
   const [walletJwk, setWalletJwk] = useState<Record<string, unknown> | null>(null);
   const [walletNote, setWalletNote] = useState<string | null>(null);
@@ -181,6 +195,11 @@ function App() {
   const [deployOutcome, setDeployOutcome] = useState<string | null>(null);
   const [spawnOutcome, setSpawnOutcome] = useState<string | null>(null);
   const [deployedModuleTx, setDeployedModuleTx] = useState<string | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteQuery, setPaletteQuery] = useState("");
+  const [paletteIndex, setPaletteIndex] = useState(0);
+
+  const paletteInputRef = useRef<HTMLInputElement>(null);
 
   const selectedNode = useMemo(
     () => (selectedNodeId ? findNodeById(manifest.nodes, selectedNodeId) : null),
@@ -202,6 +221,11 @@ function App() {
     fetchCatalog().then(setCatalog);
     refreshDrafts(true);
   }, []);
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  }, [theme]);
 
   useEffect(() => {
     refreshHealth();
@@ -260,6 +284,35 @@ function App() {
       setManifestTxInput(pip.manifestTx);
     }
   }, [pip?.manifestTx]);
+
+  useEffect(() => {
+    const handleKeydown = (event: KeyboardEvent) => {
+      const key = event.key?.toLowerCase();
+      const isPaletteShortcut = key === "k" && (event.metaKey || event.ctrlKey);
+
+      if (isPaletteShortcut) {
+        event.preventDefault();
+        setPaletteOpen(true);
+        return;
+      }
+
+      if (paletteOpen && key === "escape") {
+        event.preventDefault();
+        setPaletteOpen(false);
+        setPaletteQuery("");
+      }
+    };
+
+    window.addEventListener("keydown", handleKeydown);
+    return () => window.removeEventListener("keydown", handleKeydown);
+  }, [paletteOpen]);
+
+  useEffect(() => {
+    if (!paletteOpen) return;
+    setPaletteQuery("");
+    setPaletteIndex(0);
+    window.setTimeout(() => paletteInputRef.current?.focus(), 10);
+  }, [paletteOpen]);
 
   const refreshDrafts = async (loadLatest?: boolean) => {
     const all = await listDrafts();
@@ -654,54 +707,84 @@ function App() {
   return (
     <div className="app-shell">
       <header className="top-bar">
-        <div className="brand">
-          <div className="brand-dot" />
-          <div>
-            <p className="eyebrow">Darkmesh editor</p>
-            <input
-              className="title-input"
-              value={manifest.name}
-              onChange={(e) => handleManifestName(e.target.value)}
-              aria-label="Manifest name"
-            />
+        <div className="brand-area">
+          <div className="brand">
+            <div className="brand-dot" />
+            <div>
+              <p className="eyebrow">Darkmesh editor</p>
+              <input
+                className="title-input"
+                value={manifest.name}
+                onChange={(e) => handleManifestName(e.target.value)}
+                aria-label="Manifest name"
+              />
+            </div>
           </div>
+          <label className="theme-toggle" title="Toggle theme">
+            <input
+              type="checkbox"
+              checked={theme === "cyberpunk"}
+              onChange={(e) => setTheme(e.target.checked ? "cyberpunk" : "light")}
+              aria-label="Toggle theme"
+            />
+            <span className="toggle-rail">
+              <span className="toggle-thumb" />
+            </span>
+            <span className="theme-toggle-label">
+              {theme === "cyberpunk" ? "Cyberpunk" : "Light"} mode
+            </span>
+          </label>
         </div>
         <div className="top-actions">
-          <div className="health-card">
+          <div className={`health-card ${healthExpanded ? "is-open" : "is-collapsed"}`}>
             <div className="health-header">
               <div>
                 <p className="eyebrow">Health</p>
                 <h4>Diagnostics</h4>
               </div>
-              <button className="ghost small" onClick={refreshHealth} disabled={healthLoading}>
-                {healthLoading ? "Checking…" : "Refresh"}
-              </button>
+              <div className="health-actions">
+                <button className="ghost small" onClick={refreshHealth} disabled={healthLoading}>
+                  {healthLoading ? "Checking…" : "Refresh"}
+                </button>
+                <button
+                  className="ghost small"
+                  onClick={() => setHealthExpanded((open) => !open)}
+                  aria-expanded={healthExpanded}
+                  aria-controls="health-panel"
+                >
+                  {healthExpanded ? "Collapse" : "Expand"}
+                </button>
+              </div>
             </div>
-            <div className="health-list">
-              {health.length === 0 ? (
-                <p className="health-empty">No checks yet</p>
-              ) : (
-                health.map((item) => (
-                  <div key={item.id} className="health-row">
-                    <span className={`status-dot ${item.status}`} aria-hidden />
-                    <div className="health-row-content">
-                      <div className="health-row-top">
-                        <span className="health-label">{item.label}</span>
-                        <span className="health-metric">
-                          {typeof item.latencyMs === "number" ? `${item.latencyMs} ms` : "—"}
-                        </span>
-                      </div>
-                      <div className="health-detail">
-                        {item.detail ?? (item.status === "missing" ? "Not configured" : "No detail")}
-                      </div>
-                      <div className="health-meta">
-                        {item.status === "missing" ? "Set env to enable" : `Checked ${formatTime(item.checkedAt)}`}
-                        {item.url && <span className="health-url"> · {formatHost(item.url)}</span>}
+            <div className="health-collapse" id="health-panel" aria-hidden={!healthExpanded}>
+              <div className="health-list">
+                {health.length === 0 ? (
+                  <p className="health-empty">No checks yet</p>
+                ) : (
+                  health.map((item) => (
+                    <div key={item.id} className="health-row">
+                      <span className={`status-dot ${item.status}`} aria-hidden />
+                      <div className="health-row-content">
+                        <div className="health-row-top">
+                          <span className="health-label">{item.label}</span>
+                          <span className="health-metric">
+                            {typeof item.latencyMs === "number" ? `${item.latencyMs} ms` : "—"}
+                          </span>
+                        </div>
+                        <div className="health-detail">
+                          {item.detail ?? (item.status === "missing" ? "Not configured" : "No detail")}
+                        </div>
+                        <div className="health-meta">
+                          {item.status === "missing"
+                            ? "Set env to enable"
+                            : `Checked ${formatTime(item.checkedAt)}`}
+                          {item.url && <span className="health-url"> · {formatHost(item.url)}</span>}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))
-              )}
+                  ))
+                )}
+              </div>
             </div>
           </div>
           <div className="top-buttons">
@@ -958,7 +1041,7 @@ function App() {
         </div>
       </div>
 
-      {status && <div className="status-bar">{status}</div>}
+      {status && <div className="status-bar toast">{status}</div>}
       {(pip?.manifestTx || remoteError) && (
         <div className="status-bar ghost">
           {pip?.manifestTx && <span className="pill ghost">manifestTx: {pip.manifestTx}</span>}

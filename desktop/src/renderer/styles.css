@@ -14,6 +14,8 @@
 
   --accent: #0ea5e9;
   --accent-strong: #22c55e;
+  --accent-rgb: 14, 165, 233;
+  --accent-strong-rgb: 34, 197, 94;
   --border: #e2e8f5;
   --border-strong: #cfd7e7;
 
@@ -30,6 +32,70 @@
   --space-4: 16px;
   --space-5: 20px;
   --space-6: 24px;
+
+  --page-bg: radial-gradient(140% 100% at 10% 20%, #e8f4ff 0%, #f7f9ff 42%, #fdf7ef 100%),
+    linear-gradient(120deg, rgba(14, 165, 233, 0.05) 0%, rgba(34, 197, 94, 0.04) 100%);
+  --topbar-bg: linear-gradient(145deg, rgba(255, 255, 255, 0.9), rgba(241, 246, 255, 0.92));
+  --top-actions-bg: rgba(244, 247, 255, 0.94);
+  --health-card-bg: linear-gradient(160deg, #ffffff 0%, #eef5ff 100%);
+  --panel-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(247, 250, 255, 0.96));
+  --panel-overlay: linear-gradient(90deg, rgba(var(--accent-rgb), 0.06), rgba(var(--accent-strong-rgb), 0.05));
+  --card-bg: linear-gradient(135deg, #ffffff 0%, #f4f8ff 100%);
+  --preview-bg: linear-gradient(160deg, #ffffff 0%, #f6fbff 100%);
+  --pill-bg: rgba(var(--accent-rgb), 0.12);
+  --pill-accent-bg: rgba(var(--accent-strong-rgb), 0.12);
+  --pill-border: rgba(var(--accent-rgb), 0.22);
+  --pill-text: var(--ink-strong);
+  --scroll-thumb: rgba(15, 23, 42, 0.12);
+  --brand-glow: rgba(var(--accent-rgb), 0.12);
+  --selection: rgba(var(--accent-rgb), 0.15);
+  --accent-wash: rgba(var(--accent-rgb), 0.06);
+  --accent-ring: rgba(var(--accent-rgb), 0.3);
+  --primary-shadow: 0 10px 28px rgba(var(--accent-rgb), 0.35);
+  --primary-shadow-hover: 0 14px 32px rgba(var(--accent-rgb), 0.42);
+  --status-bar-bg: var(--accent);
+}
+
+:root[data-theme="cyberpunk"] {
+  --bg: #06060e;
+  --bg-soft: #0b0f1f;
+  --surface: #0f1628;
+  --surface-muted: #141c30;
+  --ink-strong: #e3e8ff;
+  --ink-muted: #a2add6;
+  --ink-soft: #7b85ad;
+
+  --accent: #00eaff;
+  --accent-strong: #ff2ddf;
+  --accent-rgb: 0, 234, 255;
+  --accent-strong-rgb: 255, 45, 223;
+  --border: #1f2640;
+  --border-strong: #2d3554;
+
+  --shadow-soft: 0 28px 70px rgba(0, 0, 0, 0.55);
+  --shadow-card: 0 18px 46px rgba(0, 0, 0, 0.45);
+
+  --page-bg: radial-gradient(140% 120% at 12% 18%, rgba(0, 234, 255, 0.12) 0%, rgba(12, 10, 32, 0.88) 32%, #05040d 100%),
+    linear-gradient(120deg, rgba(255, 45, 223, 0.12) 0%, rgba(0, 234, 255, 0.12) 100%);
+  --topbar-bg: linear-gradient(145deg, rgba(20, 26, 52, 0.9), rgba(12, 10, 26, 0.92));
+  --top-actions-bg: rgba(20, 26, 52, 0.8);
+  --health-card-bg: linear-gradient(160deg, rgba(18, 26, 52, 0.96) 0%, rgba(16, 20, 44, 0.92) 100%);
+  --panel-bg: linear-gradient(180deg, rgba(18, 24, 48, 0.96), rgba(12, 14, 30, 0.94));
+  --panel-overlay: linear-gradient(90deg, rgba(0, 234, 255, 0.14), rgba(255, 45, 223, 0.12));
+  --card-bg: linear-gradient(145deg, rgba(24, 30, 60, 0.98), rgba(18, 22, 46, 0.95));
+  --preview-bg: linear-gradient(160deg, rgba(24, 30, 60, 0.98), rgba(16, 22, 44, 0.94));
+  --pill-bg: rgba(0, 234, 255, 0.14);
+  --pill-accent-bg: rgba(255, 45, 223, 0.14);
+  --pill-border: rgba(0, 234, 255, 0.25);
+  --pill-text: #d8dfff;
+  --scroll-thumb: rgba(0, 234, 255, 0.35);
+  --brand-glow: rgba(0, 234, 255, 0.35);
+  --selection: rgba(0, 234, 255, 0.24);
+  --accent-wash: rgba(0, 234, 255, 0.12);
+  --accent-ring: rgba(0, 234, 255, 0.35);
+  --primary-shadow: 0 10px 28px rgba(255, 45, 223, 0.32);
+  --primary-shadow-hover: 0 14px 32px rgba(255, 45, 223, 0.42);
+  --status-bar-bg: linear-gradient(120deg, var(--accent), var(--accent-strong));
 }
 
 * {
@@ -42,12 +108,12 @@ body {
   color: var(--ink-strong);
   line-height: 1.55;
   letter-spacing: 0.01em;
-  background: radial-gradient(140% 100% at 10% 20%, #e8f4ff 0%, #f7f9ff 42%, #fdf7ef 100%),
-    linear-gradient(120deg, rgba(14, 165, 233, 0.05) 0%, rgba(34, 197, 94, 0.04) 100%);
+  background: var(--page-bg);
+  background-color: var(--bg);
 }
 
 ::selection {
-  background: rgba(14, 165, 233, 0.15);
+  background: var(--selection);
 }
 
 .app-shell {
@@ -66,7 +132,7 @@ body {
   align-items: center;
   gap: var(--space-3);
   padding: var(--space-4);
-  background: linear-gradient(145deg, rgba(255, 255, 255, 0.9), rgba(241, 246, 255, 0.92));
+  background: var(--topbar-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-soft);
@@ -74,6 +140,14 @@ body {
   top: 16px;
   z-index: 10;
   backdrop-filter: blur(10px);
+}
+
+.brand-area {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
 }
 
 .brand {
@@ -87,7 +161,7 @@ body {
   height: 16px;
   border-radius: 50%;
   background: conic-gradient(from 120deg, var(--accent), var(--accent-strong));
-  box-shadow: 0 0 0 8px rgba(14, 165, 233, 0.12);
+  box-shadow: 0 0 0 8px var(--brand-glow);
 }
 
 .eyebrow {
@@ -114,8 +188,8 @@ body {
 }
 
 .title-input:focus {
-  border-color: rgba(14, 165, 233, 0.3);
-  background: rgba(14, 165, 233, 0.06);
+  border-color: var(--accent-ring);
+  background: var(--accent-wash);
 }
 
 .top-actions {
