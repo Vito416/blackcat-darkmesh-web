@@ -17,6 +17,16 @@ export type HealthStatus = {
   lastSuccessAt?: string;
 };
 
+export type HealthStatusSummary = {
+  total: number;
+  ok: number;
+  warn: number;
+  error: number;
+  missing: number;
+  overall: HealthStatus["status"] | "missing";
+  failing: HealthStatus[];
+};
+
 const defaultFetch = (globalThis as any).fetch as Fetcher | undefined;
 
 const nowIso = () => new Date().toISOString();
@@ -315,3 +325,33 @@ export async function runHealthChecks(fetcher?: Fetcher): Promise<HealthStatus[]
     checkAoHealth(resolvedFetch),
   ]);
 }
+
+export const summarizeHealthStatuses = (items: HealthStatus[]): HealthStatusSummary => {
+  const counts = { ok: 0, warn: 0, error: 0, missing: 0 };
+  const failing: HealthStatus[] = [];
+
+  for (const item of items) {
+    if (item.status === "error" || item.status === "missing") {
+      failing.push(item);
+    }
+    counts[item.status] += 1;
+  }
+
+  const overall: HealthStatusSummary["overall"] =
+    failing.length > 0
+      ? counts.error > 0
+        ? "error"
+        : "missing"
+      : counts.warn > 0
+        ? "warn"
+        : items.length > 0
+          ? "ok"
+          : "missing";
+
+  return {
+    ...counts,
+    total: items.length,
+    overall,
+    failing,
+  };
+};

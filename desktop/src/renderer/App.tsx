@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import "./styles.css";
 import { fetchCatalog, catalogItems as seedCatalog } from "./services/catalog";
 import { deployModule, spawnProcess } from "./services/aoDeploy";
-import { runHealthChecks, type HealthStatus } from "./services/health";
+import { runHealthChecks, summarizeHealthStatuses, type HealthStatus, type HealthStatusSummary } from "./services/health";
 import { fetchManifestDocument } from "./services/manifestFetch";
 import {
   clearPipVaultStorage,
@@ -26,6 +26,7 @@ import {
   PropsSchema,
 } from "./types/manifest";
 import ManifestRenderer from "./components/ManifestRenderer";
+import AoLogPanel from "./components/AoLogPanel";
 import {
   deleteDraft,
   exportDraftsToJson,
@@ -168,6 +169,19 @@ const formatHealthRecap = (health: HealthStatus[]): string => {
   return parts.join(" · ");
 };
 
+const averageLatencyMs = (item: Pick<HealthStatus, "latencyHistory" | "latencyMs">) => {
+  if (item.latencyHistory?.length) {
+    const total = item.latencyHistory.reduce((acc, value) => acc + value, 0);
+    return Math.round(total / item.latencyHistory.length);
+  }
+
+  if (typeof item.latencyMs === "number") {
+    return Math.round(item.latencyMs);
+  }
+
+  return null;
+};
+
 const mergeHealthResults = (previous: HealthStatus[], next: HealthStatus[]): HealthStatus[] => {
   const previousById = new Map(previous.map((item) => [item.id, item]));
 
@@ -217,12 +231,14 @@ type Theme = "light" | "cyberpunk";
 type Workspace = "data" | "ao" | "studio" | "preview";
 type WalletMode = "ipc" | "path" | "jwk";
 type TaskState = "idle" | "pending" | "success" | "error";
-type AoMiniLogEntry = {
+export type AoMiniLogEntry = {
   kind: "deploy" | "spawn";
   id: string | null;
   status: string;
   time: string;
   href: string | null;
+  payload?: unknown;
+  raw?: string;
 };
 type PipVaultSnapshot = {
   exists: boolean;
@@ -237,6 +253,7 @@ type PipVaultIssue = {
 };
 
 const THEME_STORAGE_KEY = "darkmesh-theme";
+const HEALTH_AUTO_REFRESH_STORAGE_KEY = "health-auto-refresh";
 const getEnv = (key: string): string | undefined => {
   const fromProcess = typeof process !== "undefined" ? process.env?.[key] : undefined;
   const fromProcessPrefixed = typeof process !== "undefined" ? process.env?.[`VITE_${key}`] : undefined;
@@ -766,6 +783,11 @@ function App() {
   const [health, setHealth] = useState<HealthStatus[]>([]);
   const [healthLoading, setHealthLoading] = useState(false);
   const [healthExpanded, setHealthExpanded] = useState(false);
+  const [healthAutoRefresh, setHealthAutoRefresh] = useState<"off" | "30" | "60">(() => {
+    if (typeof window === "undefined") return "off";
+    const stored = window.localStorage.getItem(HEALTH_AUTO_REFRESH_STORAGE_KEY);
+    return stored === "30" || stored === "60" ? stored : "off";
+  });
   const [walletMode, setWalletMode] = useState<WalletMode>(() => {
     if (getEnv("AO_WALLET_JSON") || getEnv("VITE_AO_WALLET_JSON")) return "jwk";
     if (getEnv("AO_WALLET_PATH") || getEnv("VITE_AO_WALLET_PATH")) return "path";
@@ -985,6 +1007,27 @@ function App() {
   );
 
   const aoMiniLogRows = useMemo(() => aoLog.slice(0, 20), [aoLog]);
+  const healthSummary: HealthStatusSummary = useMemo(
+    () => summarizeHealthStatuses(health),
+    [health],
+  );
+  const healthLatencyAverages = useMemo(
+    () =>
+      health
+        .map((item) => {
+          const avg = averageLatencyMs(item);
+          return avg == null ? null : { id: item.id, label: item.label, value: avg };
+        })
+        .filter(Boolean) as { id: string; label: string; value: number }[],
+    [health],
+  );
+  const healthAlertCopy = useMemo(
+    () =>
+      healthSummary.failing
+        .map((item) => `${item.label}: ${healthStatusLabel(item.status)}`)
+        .join(" · "),
+    [healthSummary],
+  );
 
   const refreshHealth = useCallback(async () => {
     setHealthLoading(true);
@@ -1057,8 +1100,25 @@ function App() {
   }, [theme]);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(HEALTH_AUTO_REFRESH_STORAGE_KEY, healthAutoRefresh);
+  }, [healthAutoRefresh]);
+
+  useEffect(() => {
     refreshHealth();
   }, [refreshHealth]);
+
+  useEffect(() => {
+    if (healthAutoRefresh === "off") return;
+    const intervalMs = Number(healthAutoRefresh) * 1000;
+    const id = window.setInterval(() => {
+      void refreshHealth();
+    }, intervalMs);
+
+    return () => {
+      window.clearInterval(id);
+    };
+  }, [healthAutoRefresh, refreshHealth]);
 
   useEffect(() => {
     if (selectedNode) {
@@ -1747,7 +1807,7 @@ function App() {
     try {
       setDeployStep("Creating signer");
       const response = await deployModule(walletSource, moduleSource);
-      recordAoLog("deploy", response.txId, response.placeholder ? "Placeholder" : "Success");
+      recordAoLog("deploy", response.txId, response.placeholder ? "Placeholder" : "Success", response.raw ?? response);
 
       if (response.txId) {
         setDeployedModuleTx(response.txId);
@@ -1770,7 +1830,12 @@ function App() {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Module deploy failed";
-      recordAoLog("deploy", null, "Error");
+      recordAoLog(
+        "deploy",
+        null,
+        "Error",
+        err instanceof Error ? { message: err.message } : { error: String(err) },
+      );
       setDeployOutcome(message);
       setDeployState("error");
       setDeployStep("Failed");
@@ -1826,7 +1891,7 @@ function App() {
         moduleTx,
         walletSource,
       );
-      recordAoLog("spawn", response.processId, response.placeholder ? "Placeholder" : "Success");
+      recordAoLog("spawn", response.processId, response.placeholder ? "Placeholder" : "Success", response.raw ?? response);
 
       if (response.moduleTx) {
         setModuleTxInput(response.moduleTx);
@@ -1850,7 +1915,12 @@ function App() {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Spawn failed";
-      recordAoLog("spawn", null, "Error");
+      recordAoLog(
+        "spawn",
+        null,
+        "Error",
+        err instanceof Error ? { message: err.message } : { error: String(err) },
+      );
       setSpawnOutcome(message);
       setSpawnState("error");
       setSpawnStep("Failed");
@@ -2152,19 +2222,31 @@ function App() {
     openExternal(url);
   };
 
-  const recordAoLog = (kind: "deploy" | "spawn", id: string | null, status: string) => {
+  const recordAoLog = (kind: "deploy" | "spawn", id: string | null, status: string, payload?: unknown) => {
     const entry: AoMiniLogEntry = {
       kind,
       id,
       status,
       time: new Date().toISOString(),
       href: buildAoExplorerUrl(id),
+      ...(payload !== undefined ? { payload } : {}),
     };
 
-    setAoLog((current) => {
-      const next = [entry, ...current].slice(0, 20);
-      return next;
-    });
+    const rawValue =
+      typeof payload === "string"
+        ? payload
+        : payload &&
+          typeof payload === "object" &&
+          "raw" in (payload as Record<string, unknown>) &&
+          typeof (payload as Record<string, unknown>).raw === "string"
+          ? ((payload as Record<string, unknown>).raw as string)
+          : undefined;
+
+    if (rawValue) {
+      entry.raw = rawValue;
+    }
+
+    setAoLog((current) => [entry, ...current].slice(0, 20));
   };
 
   const closePalette = useCallback(() => {
@@ -2503,6 +2585,8 @@ function App() {
     paletteActions,
   ]);
 
+  const hasHealthAlert = healthSummary.failing.length > 0;
+
   return (
     <div className="app-shell">
       <header className="top-bar">
@@ -2563,108 +2647,149 @@ function App() {
         <div className="top-actions">
           {workspace === "ao" && (
             <div className={`health-card ${healthExpanded ? "is-open" : "is-collapsed"}`}>
-            <div className="health-header">
-              <div>
-                <p className="eyebrow">Health</p>
-                <h4>Diagnostics</h4>
+              <div className="health-header">
+                <div>
+                  <p className="eyebrow">Health</p>
+                  <h4>Diagnostics</h4>
+                </div>
+                <div className="health-actions">
+                  <div className="health-auto-refresh">
+                    <label htmlFor="health-auto-refresh">Auto</label>
+                    <select
+                      id="health-auto-refresh"
+                      value={healthAutoRefresh}
+                      onChange={(e) => setHealthAutoRefresh(e.target.value as "off" | "30" | "60")}
+                      aria-label="Health auto refresh cadence"
+                    >
+                      <option value="off">Off</option>
+                      <option value="30">30s</option>
+                      <option value="60">60s</option>
+                    </select>
+                  </div>
+                  <button className="ghost small" onClick={refreshHealth} disabled={healthLoading}>
+                    {healthLoading ? "Checking…" : "Refresh"}
+                  </button>
+                  <button
+                    className="ghost small"
+                    onClick={() => setHealthExpanded((open) => !open)}
+                    aria-expanded={healthExpanded}
+                    aria-controls="health-panel"
+                  >
+                    {healthExpanded ? "Collapse" : "Expand"}
+                  </button>
+                </div>
               </div>
-              <div className="health-actions">
-                <button className="ghost small" onClick={refreshHealth} disabled={healthLoading}>
-                  {healthLoading ? "Checking…" : "Refresh"}
-                </button>
-                <button
-                  className="ghost small"
-                  onClick={() => setHealthExpanded((open) => !open)}
-                  aria-expanded={healthExpanded}
-                  aria-controls="health-panel"
-                >
-                  {healthExpanded ? "Collapse" : "Expand"}
-                </button>
-              </div>
-            </div>
-            {!healthExpanded && (
-              <div className="health-summary" aria-hidden>
-                {health.length === 0 ? (
-                  <span className="health-summary-empty">Run checks to see status</span>
-                ) : (
-                  <>
-                    <div className="health-summary-pills">
-                      {health.map((item) => (
-                        <span key={item.id} className={`summary-pill ${item.status}`}>
-                          <span className={`status-dot ${item.status}`} aria-hidden /> {item.label}
-                          <span className="summary-status">{healthStatusLabel(item.status)}</span>
-                        </span>
-                      ))}
+              {hasHealthAlert && health.length > 0 && (
+                <div className="health-alert" role="alert">
+                  <div className="health-alert-copy">
+                    <span className={`status-dot ${healthSummary.overall}`} aria-hidden />
+                    <div>
+                      <strong>{healthSummary.error > 0 ? "Issues detected" : "Checks need attention"}</strong>
+                      <span>{healthAlertCopy || "Some health checks are failing or missing."}</span>
                     </div>
-                    <div className="health-summary-recap">{formatHealthRecap(health)}</div>
-                  </>
-                )}
-              </div>
-            )}
-            <div className="health-collapse" id="health-panel" aria-hidden={!healthExpanded}>
-              <div className="health-list">
-                {health.length === 0 ? (
-                  <p className="health-empty">No checks yet</p>
-                ) : (
-                  health.map((item) => (
-                    <div key={item.id} className={`health-row ${item.status}`}>
-                      <span className={`status-dot ${item.status}`} aria-hidden />
-                      <div className="health-row-content">
-                        <div className="health-row-top">
-                          <span className="health-label">{item.label}</span>
-                          <span className={`health-status ${item.status}`}>{healthStatusLabel(item.status)}</span>
-                        </div>
-                        <div className="health-detail">
-                        {item.detail ?? (item.status === "missing" ? "Not configured" : "No detail")}
+                  </div>
+                  <button className="ghost small" onClick={refreshHealth} disabled={healthLoading}>
+                    {healthLoading ? "Checking…" : "Retry"}
+                  </button>
+                </div>
+              )}
+              {!healthExpanded && (
+                <div className="health-summary" aria-hidden>
+                  {health.length === 0 ? (
+                    <span className="health-summary-empty">Run checks to see status</span>
+                  ) : (
+                    <>
+                      <div className="health-summary-pills">
+                        {health.map((item) => (
+                          <span key={item.id} className={`summary-pill ${item.status}`}>
+                            <span className={`status-dot ${item.status}`} aria-hidden /> {item.label}
+                            <span className="summary-status">{healthStatusLabel(item.status)}</span>
+                          </span>
+                        ))}
                       </div>
-                      {item.lastError && (
-                        <div className="health-last-error">Last error: {item.lastError}</div>
-                      )}
-                      {item.latencyHistory?.length ? (
-                        <div className="health-latency">
-                          <div className="health-latency-bars">
-                            {item.latencyHistory.map((value, idx, arr) => {
-                              const max = Math.max(...arr, 1);
-                              const height = Math.max(12, Math.min(64, Math.round((value / max) * 64)));
-                              return (
-                                <span
-                                  key={`${item.id}-lat-${idx}`}
-                                  style={{ height: `${height}px` }}
-                                  title={`${value} ms`}
-                                />
-                              );
-                            })}
-                          </div>
-                          <div className="health-latency-meta">
-                            <span className="mono">{item.latencyHistory[item.latencyHistory.length - 1]} ms</span>
-                            <span className="mono subtle">
-                              avg{" "}
-                              {Math.round(
-                                item.latencyHistory.reduce((acc, v) => acc + v, 0) /
-                                  (item.latencyHistory.length || 1),
-                              )}{" "}
-                              ms
+                      <div className="health-summary-recap">{formatHealthRecap(health)}</div>
+                      {healthLatencyAverages.length ? (
+                        <div className="health-summary-note">
+                          <strong>Avg latency</strong>
+                          {healthLatencyAverages.map((item) => (
+                            <span key={item.id} className="mono">
+                              {item.label}: {item.value} ms
                             </span>
-                          </div>
+                          ))}
                         </div>
                       ) : null}
-                      <div className="health-meta">
-                        {typeof item.latencyMs === "number" && <span>{item.latencyMs} ms</span>}
-                        <span>
-                          {item.lastSuccessAt
-                            ? `Last success ${formatTime(item.lastSuccessAt)}`
-                              : item.status === "missing"
-                                ? "Set env to enable"
-                                : `Checked ${formatTime(item.checkedAt)}`}
-                          </span>
-                          {item.url && <span className="health-url">{formatHost(item.url)}</span>}
+                    </>
+                  )}
+                </div>
+              )}
+              <div className="health-collapse" id="health-panel" aria-hidden={!healthExpanded}>
+                <div className="health-list">
+                  {health.length === 0 ? (
+                    <p className="health-empty">No checks yet</p>
+                  ) : (
+                    health.map((item) => {
+                      const averageLatency = averageLatencyMs(item);
+
+                      return (
+                        <div key={item.id} className={`health-row ${item.status}`}>
+                          <span className={`status-dot ${item.status}`} aria-hidden />
+                          <div className="health-row-content">
+                            <div className="health-row-top">
+                              <span className="health-label">{item.label}</span>
+                              <span className={`health-status ${item.status}`}>{healthStatusLabel(item.status)}</span>
+                            </div>
+                            <div className="health-detail">
+                              {item.detail ?? (item.status === "missing" ? "Not configured" : "No detail")}
+                            </div>
+                            {item.lastError && <div className="health-last-error">Last error: {item.lastError}</div>}
+                            {item.latencyHistory?.length ? (
+                              <div className="health-latency">
+                                <div className="health-latency-bars">
+                                  {item.latencyHistory.map((value, idx, arr) => {
+                                    const max = Math.max(...arr, 1);
+                                    const height = Math.max(12, Math.min(64, Math.round((value / max) * 64)));
+                                    return (
+                                      <span
+                                        key={`${item.id}-lat-${idx}`}
+                                        style={{ height: `${height}px` }}
+                                        title={`${value} ms`}
+                                      />
+                                    );
+                                  })}
+                                </div>
+                                <div className="health-latency-meta">
+                                  <span className="mono">{item.latencyHistory[item.latencyHistory.length - 1]} ms</span>
+                                  {averageLatency != null && (
+                                    <span className="mono subtle">avg {averageLatency} ms</span>
+                                  )}
+                                </div>
+                              </div>
+                            ) : averageLatency != null ? (
+                              <div className="health-latency-meta">
+                                <span className="mono subtle">avg {averageLatency} ms</span>
+                              </div>
+                            ) : null}
+                            <div className="health-meta">
+                              {typeof item.latencyMs === "number" && <span>{item.latencyMs} ms</span>}
+                              {averageLatency != null && !item.latencyHistory?.length && (
+                                <span className="mono subtle">avg {averageLatency} ms</span>
+                              )}
+                              <span>
+                                {item.lastSuccessAt
+                                  ? `Last success ${formatTime(item.lastSuccessAt)}`
+                                  : item.status === "missing"
+                                    ? "Set env to enable"
+                                    : `Checked ${formatTime(item.checkedAt)}`}
+                              </span>
+                              {item.url && <span className="health-url">{formatHost(item.url)}</span>}
+                            </div>
+                          </div>
                         </div>
-                      </div>
-                    </div>
-                  ))
-                )}
+                      );
+                    })
+                  )}
+                </div>
               </div>
-            </div>
             </div>
           )}
           {workspace === "studio" && (
@@ -3746,6 +3871,7 @@ function App() {
             </table>
           </div>
         </div>
+        <AoLogPanel aoLog={aoLog} onCopy={handleCopyAoId} onOpen={handleOpenAoId} />
       </div>
 
       {status && <div className="status-bar toast">{status}</div>}
