@@ -256,11 +256,51 @@ body {
   font-family: var(--font-display);
 }
 
+.health-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 6px 4px 2px;
+}
+
+.summary-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--ink-strong);
+}
+
+.summary-pill.error {
+  border-color: rgba(239, 68, 68, 0.25);
+}
+
+.summary-pill.ok {
+  border-color: rgba(34, 197, 94, 0.25);
+}
+
+.summary-pill.missing {
+  opacity: 0.8;
+}
+
+.health-summary-empty {
+  color: var(--ink-muted);
+  font-weight: 700;
+}
+
 .health-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
   margin-top: 10px;
+  max-height: 240px;
+  overflow: auto;
+  padding-right: 4px;
 }
 
 .health-row {
@@ -346,6 +386,10 @@ body {
   margin: 4px 0 2px;
   color: var(--ink-muted);
   font-weight: 700;
+}
+
+.health-card.is-collapsed .health-collapse {
+  display: none;
 }
 
 button,

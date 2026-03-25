@@ -182,7 +182,7 @@ function App() {
   const [loadingManifest, setLoadingManifest] = useState(false);
   const [health, setHealth] = useState<HealthStatus[]>([]);
   const [healthLoading, setHealthLoading] = useState(false);
-  const [healthExpanded, setHealthExpanded] = useState(true);
+  const [healthExpanded, setHealthExpanded] = useState(false);
   const [walletPath, setWalletPath] = useState<string | null>(null);
   const [walletJwk, setWalletJwk] = useState<Record<string, unknown> | null>(null);
   const [walletNote, setWalletNote] = useState<string | null>(null);
@@ -756,6 +756,19 @@ function App() {
                 </button>
               </div>
             </div>
+            {!healthExpanded && (
+              <div className="health-summary" aria-hidden>
+                {health.length === 0 ? (
+                  <span className="health-summary-empty">Run checks to see status</span>
+                ) : (
+                  health.map((item) => (
+                    <span key={item.id} className={`summary-pill ${item.status}`}>
+                      <span className="status-dot" aria-hidden /> {item.label}
+                    </span>
+                  ))
+                )}
+              </div>
+            )}
             <div className="health-collapse" id="health-panel" aria-hidden={!healthExpanded}>
               <div className="health-list">
                 {health.length === 0 ? (
