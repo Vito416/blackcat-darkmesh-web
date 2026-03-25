@@ -28,9 +28,9 @@ export type SpawnResponse = {
 
 const baseConnect = () => {
   const modeEnv = getEnv("AO_MODE");
-  const MODE = modeEnv === "mainnet" ? "mainnet" : "legacy";
-  return connect({
-    MODE,
+  const mode: "legacy" | "mainnet" = modeEnv === "mainnet" ? "mainnet" : "legacy";
+
+  const common = {
     GATEWAY_URL: getEnv("GATEWAY_URL"),
     GRAPHQL_URL: getEnv("GRAPHQL_URL"),
     GRAPHQL_MAX_RETRIES: getEnv("GRAPHQL_MAX_RETRIES") ? Number(getEnv("GRAPHQL_MAX_RETRIES")) : undefined,
@@ -38,7 +38,11 @@ const baseConnect = () => {
     MU_URL: getEnv("MU_URL"),
     CU_URL: getEnv("CU_URL"),
     SCHEDULER: getEnv("SCHEDULER"),
-  });
+  };
+
+  return mode === "mainnet"
+    ? connect({ MODE: "mainnet", ...common })
+    : connect({ MODE: "legacy", ...common });
 };
 
 export async function deployModule(walletOrPath: WalletSource, moduleSrc: string, tags: Tag[] = []): Promise<DeployResponse> {
