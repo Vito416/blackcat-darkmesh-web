@@ -10,7 +10,17 @@ type PipVaultRecord = {
   tenant?: string;
   site?: string;
 };
-type PipVaultDescribeResult = { exists: boolean; updatedAt?: string; encrypted: boolean; path: string };
+type PipVaultDescribeResult = {
+  exists: boolean;
+  updatedAt?: string;
+  encrypted: boolean;
+  path: string;
+  mode: "safeStorage" | "plain" | "password";
+  iterations?: number;
+  salt?: string;
+  locked: boolean;
+  recordCount: number;
+};
 
 const walletApi = {
   readWallet: async (walletPath: string): Promise<WalletResponse> => {
@@ -34,6 +44,10 @@ contextBridge.exposeInMainWorld("pipVault", {
   list: (): Promise<{ exists: boolean; records: PipVaultRecord[] }> => ipcRenderer.invoke("pipVault:list"),
   loadRecord: (id: string): Promise<PipVaultReadResult> => ipcRenderer.invoke("pipVault:readRecord", id),
   deleteRecord: (id: string): Promise<{ ok: true; removed: boolean }> => ipcRenderer.invoke("pipVault:deleteRecord", id),
+  enablePasswordMode: (password: string) => ipcRenderer.invoke("pipVault:enablePassword", password),
+  disablePasswordMode: () => ipcRenderer.invoke("pipVault:disablePassword"),
+  exportVault: () => ipcRenderer.invoke("pipVault:export"),
+  importVault: (bundle: unknown, password?: string) => ipcRenderer.invoke("pipVault:import", bundle, password),
 });
 
 export {};

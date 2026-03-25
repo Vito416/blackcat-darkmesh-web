@@ -1,13 +1,23 @@
 import type { ManifestDocument } from "../types/manifest";
 import { fetchWalletFromPath, parseWalletJson } from "./wallet";
 
+type AoClient = Pick<
+  typeof import("@permaweb/aoconnect/browser"),
+  "connect" | "createDataItemSigner"
+>;
+
+let aoClientPromise: Promise<AoClient> | null = null;
+
 // Lazy-load aoconnect to avoid initializing it on app start (and to keep env assumptions isolated)
-async function loadAo() {
-  const mod = await import("@permaweb/aoconnect/browser");
-  return {
-    connect: mod.connect,
-    createDataItemSigner: mod.createDataItemSigner,
-  };
+async function loadAo(): Promise<AoClient> {
+  if (!aoClientPromise) {
+    aoClientPromise = import("@permaweb/aoconnect/browser").then((mod) => ({
+      connect: mod.connect,
+      createDataItemSigner: mod.createDataItemSigner,
+    }));
+  }
+
+  return aoClientPromise;
 }
 
 type Tag = { name: string; value: string };

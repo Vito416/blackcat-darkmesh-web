@@ -2,7 +2,19 @@ import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import fs from "fs/promises";
 import path from "path";
 import net from "net";
-import { clearPipVault, deletePipVaultRecord, describePipVault, listPipVaultRecords, readPipVault, readPipVaultRecord, writePipVault } from "./main/pipVault";
+import {
+  clearPipVault,
+  deletePipVaultRecord,
+  describePipVault,
+  disableVaultPassword,
+  enableVaultPassword,
+  exportPipVault,
+  importPipVault,
+  listPipVaultRecords,
+  readPipVault,
+  readPipVaultRecord,
+  writePipVault,
+} from "./main/pipVault";
 
 const isDev = process.env.NODE_ENV !== "production";
 
@@ -127,6 +139,27 @@ app.whenReady().then(() => {
     }
 
     return deletePipVaultRecord(id);
+  });
+
+  ipcMain.handle("pipVault:enablePassword", async (_event, password: unknown) => {
+    if (typeof password !== "string") {
+      throw new Error("Password must be a string");
+    }
+
+    return enableVaultPassword(password);
+  });
+
+  ipcMain.handle("pipVault:disablePassword", async () => {
+    return disableVaultPassword();
+  });
+
+  ipcMain.handle("pipVault:export", async () => {
+    return exportPipVault();
+  });
+
+  ipcMain.handle("pipVault:import", async (_event, bundle: unknown, password?: unknown) => {
+    const pwd = typeof password === "string" ? password : undefined;
+    return importPipVault(bundle, pwd);
   });
 
   ipcMain.handle("wallet:read", async (_event, walletPath: unknown) => {

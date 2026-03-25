@@ -19,6 +19,8 @@ export interface PipVaultRecord {
   site?: string;
 }
 
+export type VaultKeyMode = "safeStorage" | "plain" | "password";
+
 interface VaultEnvelope {
   id: string;
   createdAt: string;
@@ -41,14 +43,39 @@ interface LegacyVaultEnvelope {
   payload: string;
 }
 
-interface KeyEnvelope {
+interface KeyEnvelopeV1 {
   mode: "safeStorage" | "plain";
   value: string;
+}
+
+interface KeyEnvelopeV2 {
+  version: 2;
+  mode: VaultKeyMode;
+  value?: string;
+  kdf?: {
+    salt: string;
+    iterations: number;
+    digest: "sha256";
+  };
+}
+
+type AnyKeyEnvelope = KeyEnvelopeV1 | KeyEnvelopeV2;
+
+interface VaultBackupBundle {
+  format: "pip-vault-bundle";
+  version: 1;
+  createdAt: string;
+  mode: VaultKeyMode;
+  key: KeyEnvelopeV2;
+  vault: VaultStoreV2;
 }
 
 const VAULT_FILENAME = "pip-vault.json";
 const KEY_FILENAME = "pip-vault.key.json";
 const KEY_SIZE = 32;
+const KDF_ITERATIONS = 100_000;
+const KDF_DIGEST = "sha256";
+const KDF_SALT_BYTES = 16;
 
 const vaultPath = () => path.join(app.getPath("userData"), VAULT_FILENAME);
 const keyPath = () => path.join(app.getPath("userData"), KEY_FILENAME);
@@ -89,34 +116,120 @@ const buildRecordKey = (pip: PipDocument): string =>
   [normalizeText(pip.tenant).toLowerCase(), normalizeText(pip.site).toLowerCase(), normalizeText(pip.manifestTx).toLowerCase()]
     .join("|");
 
-async function loadMasterKey(): Promise<Buffer> {
-  const existing = await readJsonFile<KeyEnvelope>(keyPath());
-  if (existing) {
-    if (existing.mode === "safeStorage") {
-      if (!safeStorage.isEncryptionAvailable()) {
-        throw new Error("System encryption is unavailable for the PIP vault");
-      }
+let cachedMasterKey: Buffer | null = null;
+let cachedEnvelope: KeyEnvelopeV2 | null = null;
 
-      const plain = safeStorage.decryptString(decode(existing.value));
-      return decode(plain);
-    }
+const normalizeKeyEnvelope = (raw: AnyKeyEnvelope | null): KeyEnvelopeV2 | null => {
+  if (!raw) return null;
 
-    return decode(existing.value);
+  if ("version" in raw && raw.version === 2) {
+    return raw as KeyEnvelopeV2;
   }
 
+  if ("mode" in raw && "value" in raw) {
+    const legacy = raw as KeyEnvelopeV1;
+    return { version: 2, mode: legacy.mode, value: legacy.value } as KeyEnvelopeV2;
+  }
+
+  return null;
+};
+
+const normalizeLegacyEnvelope = (envelope: LegacyVaultEnvelope): VaultEnvelope => ({
+  id: "legacy",
+  createdAt: envelope.updatedAt,
+  updatedAt: envelope.updatedAt,
+  iv: envelope.iv,
+  authTag: envelope.authTag,
+  payload: envelope.payload,
+});
+
+const normalizeVaultStore = (loaded: VaultStoreV2 | LegacyVaultEnvelope | null): VaultStoreV2 => {
+  if (!loaded) return { version: 2, records: [] };
+  if ("version" in loaded && loaded.version === 2) {
+    return { version: 2, records: loaded.records ?? [] };
+  }
+
+  return { version: 2, records: [normalizeLegacyEnvelope(loaded as LegacyVaultEnvelope)] };
+};
+
+const derivePasswordKey = (password: string, salt: Buffer, iterations: number): Buffer =>
+  crypto.pbkdf2Sync(password, salt, iterations, KEY_SIZE, KDF_DIGEST);
+
+const cacheMasterKey = (key: Buffer, envelope: KeyEnvelopeV2) => {
+  cachedMasterKey = key;
+  cachedEnvelope = envelope;
+};
+
+const loadMasterKeyFromEnvelope = async (envelope: KeyEnvelopeV2, password?: string): Promise<Buffer> => {
+  if (envelope.mode === "safeStorage") {
+    if (!envelope.value) {
+      throw new Error("Vault key payload missing for safeStorage mode");
+    }
+    if (!safeStorage.isEncryptionAvailable()) {
+      throw new Error("System encryption is unavailable for the PIP vault");
+    }
+
+    const plain = safeStorage.decryptString(decode(envelope.value));
+    return decode(plain);
+  }
+
+  if (envelope.mode === "plain") {
+    if (!envelope.value) {
+      throw new Error("Vault key payload missing for plain mode");
+    }
+
+    return decode(envelope.value);
+  }
+
+  if (envelope.mode === "password") {
+    if (!envelope.kdf?.salt) {
+      throw new Error("Vault key metadata is missing the KDF salt");
+    }
+
+    if (!password || !password.trim()) {
+      throw new Error("Vault password required");
+    }
+
+    const salt = decode(envelope.kdf.salt);
+    const iterations = envelope.kdf.iterations ?? KDF_ITERATIONS;
+    return derivePasswordKey(password, salt, iterations);
+  }
+
+  throw new Error(`Unsupported vault key mode: ${String((envelope as KeyEnvelopeV2).mode)}`);
+};
+
+const ensureKeyEnvelope = async (): Promise<KeyEnvelopeV2> => {
+  const existingRaw = await readJsonFile<AnyKeyEnvelope>(keyPath());
+  const normalized = normalizeKeyEnvelope(existingRaw);
+  if (normalized) return normalized;
+
   const masterKey = crypto.randomBytes(KEY_SIZE);
-  const envelope: KeyEnvelope = safeStorage.isEncryptionAvailable()
+  const envelope: KeyEnvelopeV2 = safeStorage.isEncryptionAvailable()
     ? {
+        version: 2,
         mode: "safeStorage",
         value: encode(safeStorage.encryptString(encode(masterKey))),
       }
     : {
+        version: 2,
         mode: "plain",
         value: encode(masterKey),
       };
 
   await writeJsonFile(keyPath(), envelope);
-  return masterKey;
+  cacheMasterKey(masterKey, envelope);
+  return envelope;
+};
+
+async function loadMasterKey(password?: string): Promise<{ key: Buffer; envelope: KeyEnvelopeV2 }> {
+  if (cachedMasterKey && cachedEnvelope) {
+    return { key: cachedMasterKey, envelope: cachedEnvelope };
+  }
+
+  const envelope = await ensureKeyEnvelope();
+  const key = await loadMasterKeyFromEnvelope(envelope, password);
+  cacheMasterKey(key, envelope);
+  return { key, envelope };
 }
 
 const encrypt = (masterKey: Buffer, id: string, pip: PipDocument, createdAt: string, updatedAt: string): VaultEnvelope => {
@@ -153,15 +266,6 @@ const decrypt = (masterKey: Buffer, envelope: VaultEnvelope | LegacyVaultEnvelop
   return pip;
 };
 
-const normalizeLegacyEnvelope = (envelope: LegacyVaultEnvelope): VaultEnvelope => ({
-  id: "legacy",
-  createdAt: envelope.updatedAt,
-  updatedAt: envelope.updatedAt,
-  iv: envelope.iv,
-  authTag: envelope.authTag,
-  payload: envelope.payload,
-});
-
 const readVaultStore = async (): Promise<VaultStoreV2 | LegacyVaultEnvelope | null> => {
   return readJsonFile<VaultStoreV2 | LegacyVaultEnvelope>(vaultPath());
 };
@@ -170,26 +274,23 @@ const writeVaultStore = async (store: VaultStoreV2): Promise<void> => {
   await writeJsonFile(vaultPath(), store);
 };
 
-const listRecordEntries = async (): Promise<{ store: VaultStoreV2; records: Array<VaultEnvelope & { pip: PipDocument }> }> => {
-  const loaded = await readVaultStore();
+const listRecordEntries = async (masterKeyOverride?: Buffer): Promise<{ store: VaultStoreV2; records: Array<VaultEnvelope & { pip: PipDocument }> }> => {
+  const store = normalizeVaultStore(await readVaultStore());
 
-  if (!loaded) {
-    return { store: { version: 2, records: [] }, records: [] };
+  if (!store.records.length) {
+    return { store, records: [] };
   }
 
-  const masterKey = await loadMasterKey();
-  const rawRecords = "version" in loaded && loaded.version === 2 ? loaded.records : [normalizeLegacyEnvelope(loaded)];
-  const records = rawRecords
+  const { key: masterKey } = masterKeyOverride ? { key: masterKeyOverride } : await loadMasterKey();
+
+  const records = store.records
     .map((record) => ({
       ...record,
       pip: decrypt(masterKey, record),
     }))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 
-  return {
-    store: { version: 2, records: rawRecords },
-    records,
-  };
+  return { store, records };
 };
 
 const toMeta = (record: VaultEnvelope & { pip: PipDocument }): PipVaultRecord => ({
@@ -211,8 +312,9 @@ export async function listPipVaultRecords(): Promise<{ exists: boolean; records:
   return { exists: records.length > 0, records: records.map(toMeta) };
 }
 
-export async function readPipVault(): Promise<{ exists: boolean; updatedAt?: string; pip?: PipDocument }> {
-  const { records } = await listRecordEntries();
+export async function readPipVault(password?: string): Promise<{ exists: boolean; updatedAt?: string; pip?: PipDocument }> {
+  const { key } = await loadMasterKey(password);
+  const { records } = await listRecordEntries(key);
   const latest = records[0];
 
   if (!latest) {
@@ -222,8 +324,9 @@ export async function readPipVault(): Promise<{ exists: boolean; updatedAt?: str
   return { exists: true, updatedAt: latest.updatedAt, pip: latest.pip };
 }
 
-export async function readPipVaultRecord(id: string): Promise<{ exists: boolean; updatedAt?: string; pip?: PipDocument }> {
-  const { records } = await listRecordEntries();
+export async function readPipVaultRecord(id: string, password?: string): Promise<{ exists: boolean; updatedAt?: string; pip?: PipDocument }> {
+  const { key } = await loadMasterKey(password);
+  const { records } = await listRecordEntries(key);
   const record = records.find((entry) => entry.id === id);
 
   if (!record) {
@@ -242,9 +345,9 @@ export async function writePipVault(pip: PipDocument): Promise<{ updatedAt: stri
     throw new Error("PIP vault requires a manifestTx");
   }
 
-  const masterKey = await loadMasterKey();
+  const { key: masterKey } = await loadMasterKey();
   const loaded = await readVaultStore();
-  const existingRecords = "version" in (loaded ?? {}) && loaded?.version === 2 ? loaded.records : loaded ? [normalizeLegacyEnvelope(loaded as LegacyVaultEnvelope)] : [];
+  const existingRecords = normalizeVaultStore(loaded).records;
   const now = nowIso();
   const key = buildRecordKey(pip);
   const decrypted = await Promise.all(existingRecords.map(async (record) => ({ record, pip: decrypt(masterKey, record) })));
@@ -273,8 +376,8 @@ export async function deletePipVaultRecord(id: string): Promise<{ ok: true; remo
     return { ok: true, removed: false };
   }
 
-  const masterKey = await loadMasterKey();
-  const existingRecords = "version" in loaded && loaded.version === 2 ? loaded.records : [normalizeLegacyEnvelope(loaded)];
+  const { key: masterKey } = await loadMasterKey();
+  const existingRecords = normalizeVaultStore(loaded).records;
   const decrypted = await Promise.all(existingRecords.map(async (record) => ({ record, pip: decrypt(masterKey, record) })));
   const nextRecords = decrypted.filter(({ record }) => record.id !== id).map(({ record }) => record);
   const removed = nextRecords.length !== existingRecords.length;
@@ -301,13 +404,191 @@ export async function describePipVault(): Promise<{
   updatedAt?: string;
   encrypted: boolean;
   path: string;
+  mode: VaultKeyMode;
+  iterations?: number;
+  salt?: string;
+  locked: boolean;
+  recordCount: number;
 }> {
-  const { records } = await listRecordEntries();
-  const latest = records[0];
+  const envelope = normalizeKeyEnvelope(await readJsonFile<AnyKeyEnvelope>(keyPath()));
+  const store = normalizeVaultStore(await readVaultStore());
+  const latest = store.records.reduce<string | undefined>((latestUpdated, record) => {
+    if (!latestUpdated) return record.updatedAt;
+    return record.updatedAt > latestUpdated ? record.updatedAt : latestUpdated;
+  }, undefined);
+
+  const mode: VaultKeyMode = envelope?.mode ?? (safeStorage.isEncryptionAvailable() ? "safeStorage" : "plain");
+  const locked = mode === "password" && !cachedMasterKey;
+
   return {
-    exists: records.length > 0,
-    updatedAt: latest?.updatedAt,
+    exists: store.records.length > 0,
+    updatedAt: latest,
     encrypted: true,
     path: vaultPath(),
+    mode,
+    iterations: envelope?.kdf?.iterations,
+    salt: envelope?.kdf?.salt,
+    locked,
+    recordCount: store.records.length,
   };
+}
+
+export async function enableVaultPassword(password: string): Promise<{ ok: true; mode: VaultKeyMode; iterations: number; salt: string; records: number }> {
+  const trimmed = (password ?? "").trim();
+  if (!trimmed) {
+    throw new Error("Password is required to enable password mode");
+  }
+
+  const currentEnvelope = await ensureKeyEnvelope();
+
+  // If already password protected, treat this as an unlock/validation without rewriting the vault.
+  if (currentEnvelope.mode === "password") {
+    const masterKey = await loadMasterKeyFromEnvelope(currentEnvelope, trimmed);
+    const store = normalizeVaultStore(await readVaultStore());
+
+    if (store.records.length) {
+      // Validate password correctness against the first record without mutating disk.
+      try {
+        decrypt(masterKey, store.records[0]);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Invalid vault password";
+        throw new Error(message === "Unsupported state or unable to authenticate data" ? "Invalid vault password" : message);
+      }
+    }
+
+    cacheMasterKey(masterKey, currentEnvelope);
+
+    return {
+      ok: true,
+      mode: currentEnvelope.mode,
+      iterations: currentEnvelope.kdf?.iterations ?? KDF_ITERATIONS,
+      salt: currentEnvelope.kdf?.salt ?? "",
+      records: store.records.length,
+    };
+  }
+
+  const { key: currentMasterKey } = await loadMasterKey();
+  const store = normalizeVaultStore(await readVaultStore());
+  const salt = crypto.randomBytes(KDF_SALT_BYTES);
+  const derivedKey = derivePasswordKey(trimmed, salt, KDF_ITERATIONS);
+
+  const reencryptedRecords = store.records.map((record) => {
+    const pip = decrypt(currentMasterKey, record);
+    return encrypt(derivedKey, record.id, pip, record.createdAt, record.updatedAt);
+  });
+
+  const nextEnvelope: KeyEnvelopeV2 = {
+    version: 2,
+    mode: "password",
+    kdf: {
+      salt: encode(salt),
+      iterations: KDF_ITERATIONS,
+      digest: KDF_DIGEST,
+    },
+  };
+
+  await writeVaultStore({ version: 2, records: reencryptedRecords });
+  await writeJsonFile(keyPath(), nextEnvelope);
+  cacheMasterKey(derivedKey, nextEnvelope);
+
+  const kdf = nextEnvelope.kdf!;
+
+  return {
+    ok: true,
+    mode: nextEnvelope.mode,
+    iterations: kdf.iterations,
+    salt: kdf.salt,
+    records: reencryptedRecords.length,
+  };
+}
+
+export async function disableVaultPassword(): Promise<{ ok: true; mode: VaultKeyMode }> {
+  const { key: masterKey } = await loadMasterKey();
+
+  const envelope: KeyEnvelopeV2 = safeStorage.isEncryptionAvailable()
+    ? {
+        version: 2,
+        mode: "safeStorage",
+        value: encode(safeStorage.encryptString(encode(masterKey))),
+      }
+    : {
+        version: 2,
+        mode: "plain",
+        value: encode(masterKey),
+      };
+
+  await writeJsonFile(keyPath(), envelope);
+  cacheMasterKey(masterKey, envelope);
+
+  return { ok: true, mode: envelope.mode };
+}
+
+export async function exportPipVault(): Promise<{ ok: true; bundle: string }> {
+  const envelope = await ensureKeyEnvelope();
+  const store = normalizeVaultStore(await readVaultStore());
+
+  const bundle: VaultBackupBundle = {
+    format: "pip-vault-bundle",
+    version: 1,
+    createdAt: nowIso(),
+    mode: envelope.mode,
+    key: envelope,
+    vault: store,
+  };
+
+  return { ok: true, bundle: JSON.stringify(bundle, null, 2) };
+}
+
+const parseBundleInput = (bundleInput: unknown): VaultBackupBundle => {
+  if (bundleInput == null) {
+    throw new Error("No vault bundle provided");
+  }
+
+  let text: string;
+  if (typeof bundleInput === "string") {
+    text = bundleInput;
+  } else if (Buffer.isBuffer(bundleInput)) {
+    text = bundleInput.toString("utf-8");
+  } else if (bundleInput instanceof ArrayBuffer) {
+    text = Buffer.from(bundleInput).toString("utf-8");
+  } else if (bundleInput instanceof Uint8Array) {
+    text = Buffer.from(bundleInput).toString("utf-8");
+  } else {
+    throw new Error("Unsupported vault bundle type; expected string or Buffer");
+  }
+
+  const parsed = JSON.parse(text) as VaultBackupBundle;
+  if (!parsed || parsed.format !== "pip-vault-bundle" || parsed.version !== 1) {
+    throw new Error("Invalid vault bundle format");
+  }
+
+  return parsed;
+};
+
+export async function importPipVault(bundleInput: unknown, password?: string): Promise<{ ok: true; mode: VaultKeyMode; records: number }> {
+  const bundle = parseBundleInput(bundleInput);
+  const envelope = normalizeKeyEnvelope(bundle.key);
+
+  if (!envelope) {
+    throw new Error("Vault bundle is missing key metadata");
+  }
+
+  const store = normalizeVaultStore(bundle.vault);
+  const masterKey = await loadMasterKeyFromEnvelope(envelope, envelope.mode === "password" ? password : undefined);
+
+  if (store.records.length) {
+    // Validate we can decrypt with the supplied credentials before touching disk.
+    try {
+      decrypt(masterKey, store.records[0]);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Invalid vault password";
+      throw new Error(message === "Unsupported state or unable to authenticate data" ? "Invalid vault password" : message);
+    }
+  }
+
+  await writeVaultStore(store);
+  await writeJsonFile(keyPath(), envelope);
+  cacheMasterKey(masterKey, envelope);
+
+  return { ok: true, mode: envelope.mode, records: store.records.length };
 }

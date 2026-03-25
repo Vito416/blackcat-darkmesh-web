@@ -36,6 +36,17 @@ export interface DraftRevision {
   document: ManifestDocument;
 }
 
+export type DraftSourceRef = { kind: "draft"; id: number } | { kind: "revision"; id: number };
+
+export interface DraftSource {
+  ref: DraftSourceRef;
+  draftId: number;
+  name: string;
+  savedAt: string;
+  mode?: DraftSaveMode;
+  document: ManifestDocument;
+}
+
 interface DraftExportFile {
   format: "darkmesh-drafts";
   formatVersion: number;
@@ -214,6 +225,32 @@ export async function listDraftRevisions(draftId: number, limit = REVISION_LIMIT
 export async function getDraftRevision(id: number): Promise<DraftRevision | undefined> {
   const revision = await db.revisions.get(id);
   return revision ? stripRevisionSchema(revision) : undefined;
+}
+
+export async function loadDraftSource(ref: DraftSourceRef): Promise<DraftSource | null> {
+  if (ref.kind === "draft") {
+    const draft = await getDraft(ref.id);
+    if (!draft?.id) return null;
+    return {
+      ref,
+      draftId: draft.id,
+      name: draft.name,
+      savedAt: draft.updatedAt,
+      document: draft.document,
+    };
+  }
+
+  const revision = await getDraftRevision(ref.id);
+  if (!revision) return null;
+
+  return {
+    ref,
+    draftId: revision.draftId,
+    name: revision.name,
+    savedAt: revision.savedAt,
+    mode: revision.mode,
+    document: revision.document,
+  };
 }
 
 export async function exportDraftsToJson(): Promise<string> {

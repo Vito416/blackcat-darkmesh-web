@@ -27,6 +27,13 @@ export type HealthStatusSummary = {
   failing: HealthStatus[];
 };
 
+export type HealthSnapshot = {
+  recordedAt: string;
+  summary: HealthStatusSummary;
+  averageLatencyMs: number | null;
+  checks: HealthStatus[];
+};
+
 const defaultFetch = (globalThis as any).fetch as Fetcher | undefined;
 
 const nowIso = () => new Date().toISOString();
@@ -353,5 +360,36 @@ export const summarizeHealthStatuses = (items: HealthStatus[]): HealthStatusSumm
     total: items.length,
     overall,
     failing,
+  };
+};
+
+const averageLatencyForChecks = (items: HealthStatus[]): number | null => {
+  const values: number[] = [];
+
+  for (const item of items) {
+    if (typeof item.latencyMs === "number") {
+      values.push(item.latencyMs);
+    } else if (item.latencyHistory?.length) {
+      const last = item.latencyHistory[item.latencyHistory.length - 1];
+      if (typeof last === "number") {
+        values.push(last);
+      }
+    }
+  }
+
+  if (!values.length) return null;
+  const total = values.reduce((acc, value) => acc + value, 0);
+  return Math.round(total / values.length);
+};
+
+export const serializeHealthSnapshot = (items: HealthStatus[]): HealthSnapshot => {
+  const summary = summarizeHealthStatuses(items);
+  const recordedAt = nowIso();
+
+  return {
+    recordedAt,
+    summary,
+    averageLatencyMs: averageLatencyForChecks(items),
+    checks: items.map((item) => ({ ...item })),
   };
 };

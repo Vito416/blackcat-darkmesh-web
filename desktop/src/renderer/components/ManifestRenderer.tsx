@@ -1,6 +1,7 @@
 import React, { useMemo } from "react";
 
 import { ManifestDocument, ManifestNode, ManifestShape, ManifestValue } from "../types/manifest";
+import type { DraftDiffKind } from "../utils/draftDiff";
 
 type NodeWithRefs = ManifestNode & { children?: Array<ManifestNode | string> };
 type RenderNode = ManifestNode & { children?: RenderNode[] };
@@ -12,6 +13,7 @@ interface ManifestRendererProps {
   dropTargetId?: string | null;
   onDropTargetChange?: (nodeId: string | null) => void;
   onDropCatalogItem?: (targetId: string, itemId: string) => void;
+  diffHighlight?: Record<string, DraftDiffKind>;
 }
 
 const formatValue = (value: ManifestValue): string => {
@@ -94,10 +96,21 @@ const RenderBranch: React.FC<{
   dropTargetId?: string | null;
   onDropTargetChange?: (nodeId: string | null) => void;
   onDropCatalogItem?: (targetId: string, itemId: string) => void;
-}> = ({ node, entryId, selectedId, onSelect, dropTargetId, onDropTargetChange, onDropCatalogItem }) => {
+  diffHighlight?: Record<string, DraftDiffKind>;
+}> = ({
+  node,
+  entryId,
+  selectedId,
+  onSelect,
+  dropTargetId,
+  onDropTargetChange,
+  onDropCatalogItem,
+  diffHighlight,
+}) => {
   const isSelected = node.id === selectedId;
   const isEntry = node.id === entryId;
   const isDropTarget = node.id === dropTargetId;
+  const highlightKind = diffHighlight?.[node.id];
 
   const hasCatalogDrag = (event: React.DragEvent<HTMLElement>) =>
     Array.from(event.dataTransfer.types ?? []).includes("application/x-blackcat-block");
@@ -105,7 +118,7 @@ const RenderBranch: React.FC<{
   return (
     <div className="tree-branch">
       <article
-        className={`tree-card ${isSelected ? "selected" : ""} ${isDropTarget ? "drop-target" : ""}`}
+        className={`tree-card ${isSelected ? "selected" : ""} ${isDropTarget ? "drop-target" : ""} ${highlightKind ? `diff-${highlightKind}` : ""}`}
         onClick={() => onSelect?.(node.id)}
         role="button"
         tabIndex={0}
@@ -152,6 +165,7 @@ const RenderBranch: React.FC<{
           <div className="node-tags">
             <span className="pill ghost">{node.type || "node"}</span>
             {isEntry && <span className="pill accent">entry</span>}
+            {highlightKind && <span className={`pill ${highlightKind}`}>{highlightKind}</span>}
           </div>
           <span className="node-id">{node.id}</span>
         </div>
@@ -178,6 +192,7 @@ const RenderBranch: React.FC<{
               dropTargetId={dropTargetId}
               onDropTargetChange={onDropTargetChange}
               onDropCatalogItem={onDropCatalogItem}
+              diffHighlight={diffHighlight}
             />
           ))}
         </div>
@@ -193,6 +208,7 @@ const ManifestRenderer: React.FC<ManifestRendererProps> = ({
   dropTargetId,
   onDropTargetChange,
   onDropCatalogItem,
+  diffHighlight,
 }) => {
   const { roots, orphans } = useMemo(() => {
     const index = new Map((manifest.nodes as NodeWithRefs[]).map((node) => [node.id, node]));
@@ -243,6 +259,7 @@ const ManifestRenderer: React.FC<ManifestRendererProps> = ({
           dropTargetId={dropTargetId}
           onDropTargetChange={onDropTargetChange}
           onDropCatalogItem={onDropCatalogItem}
+          diffHighlight={diffHighlight}
         />
       ))}
 

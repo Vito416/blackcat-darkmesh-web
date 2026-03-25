@@ -12,9 +12,11 @@ export default defineConfig({
     chunkSizeWarningLimit: 8000,
     rollupOptions: {
       output: {
-        manualChunks: {
-          react: ["react", "react-dom"],
-          aoconnect: ["@permaweb/aoconnect"],
+        manualChunks(id) {
+          if (id.includes("node_modules")) {
+            if (id.includes("@permaweb/aoconnect")) return "aoconnect";
+            if (id.includes("react")) return "react";
+          }
         },
       },
     },

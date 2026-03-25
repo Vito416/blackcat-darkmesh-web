@@ -15,6 +15,21 @@ export type PipVaultReadResult =
   | { ok: true; pip: PipDocument; updatedAt?: string; exists: true }
   | { ok: false; error: string; exists?: false };
 
+export type PipVaultDescribeResult =
+  | {
+      ok: true;
+      exists: boolean;
+      updatedAt?: string;
+      encrypted: boolean;
+      path: string;
+      mode: "safeStorage" | "plain" | "password";
+      iterations?: number;
+      salt?: string;
+      locked: boolean;
+      recordCount: number;
+    }
+  | { ok: false; error: string };
+
 const bridge = (): PipVaultBridge | undefined => {
   if (typeof window === "undefined") return undefined;
   return window.pipVault;
@@ -130,10 +145,7 @@ export async function clearPipVault(): Promise<{ ok: true } | { ok: false; error
   }
 }
 
-export async function describePipVault(): Promise<
-  | { ok: true; exists: boolean; updatedAt?: string; encrypted: boolean; path: string }
-  | { ok: false; error: string }
-> {
+export async function describePipVault(): Promise<PipVaultDescribeResult> {
   const api = bridge();
   if (!api?.describe) {
     return { ok: false, error: "PIP vault IPC bridge is unavailable" };
@@ -145,6 +157,79 @@ export async function describePipVault(): Promise<
     return {
       ok: false,
       error: err instanceof Error ? err.message : "Unable to inspect PIP vault",
+    };
+  }
+}
+
+export async function enableVaultPassword(
+  password: string,
+): Promise<{ ok: true; mode: string; iterations?: number; salt?: string; records?: number } | { ok: false; error: string }> {
+  const api = bridge();
+  if (!api?.enablePasswordMode) {
+    return { ok: false, error: "PIP vault IPC bridge is unavailable" };
+  }
+
+  try {
+    const result = await api.enablePasswordMode(password);
+    return result as { ok: true; mode: string; iterations?: number; salt?: string; records?: number };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Unable to enable password mode",
+    };
+  }
+}
+
+export async function disableVaultPassword(): Promise<{ ok: true; mode: string } | { ok: false; error: string }> {
+  const api = bridge();
+  if (!api?.disablePasswordMode) {
+    return { ok: false, error: "PIP vault IPC bridge is unavailable" };
+  }
+
+  try {
+    const result = await api.disablePasswordMode();
+    return result as { ok: true; mode: string };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Unable to disable password mode",
+    };
+  }
+}
+
+export async function exportPipVaultBundle(): Promise<{ ok: true; bundle: string } | { ok: false; error: string }> {
+  const api = bridge();
+  if (!api?.exportVault) {
+    return { ok: false, error: "PIP vault IPC bridge is unavailable" };
+  }
+
+  try {
+    const result = await api.exportVault();
+    return { ok: true, bundle: result.bundle };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Unable to export PIP vault",
+    };
+  }
+}
+
+export async function importPipVaultBundle(
+  bundle: string | ArrayBuffer,
+  password?: string,
+): Promise<{ ok: true; mode: string; records: number } | { ok: false; error: string }> {
+  const api = bridge();
+  if (!api?.importVault) {
+    return { ok: false, error: "PIP vault IPC bridge is unavailable" };
+  }
+
+  try {
+    const result = await api.importVault(bundle, password);
+    return result as { ok: true; mode: string; records: number };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Unable to import PIP vault",
     };
   }
 }

@@ -1,9 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import "./styles.css";
+import DraftDiffPanel, { type DraftDiffOption } from "./components/DraftDiffPanel";
 import { fetchCatalog, catalogItems as seedCatalog } from "./services/catalog";
-import { deployModule, spawnProcess } from "./services/aoDeploy";
-import { runHealthChecks, summarizeHealthStatuses, type HealthStatus, type HealthStatusSummary } from "./services/health";
+import {
+  runHealthChecks,
+  serializeHealthSnapshot,
+  summarizeHealthStatuses,
+  type HealthSnapshot,
+  type HealthStatus,
+  type HealthStatusSummary,
+} from "./services/health";
 import { fetchManifestDocument } from "./services/manifestFetch";
 import {
   clearPipVaultStorage,
@@ -15,7 +22,14 @@ import {
   listPipVaultRecords,
   savePipToVault,
 } from "./services/pipWorkflow";
-import { describePipVault, type PipVaultRecord } from "./services/pipVault";
+import {
+  describePipVault,
+  disableVaultPassword,
+  enableVaultPassword,
+  exportPipVaultBundle,
+  importPipVaultBundle,
+  type PipVaultRecord,
+} from "./services/pipVault";
 import type { PipDocument } from "./services/pipValidation";
 import {
   CatalogItem,
@@ -35,10 +49,14 @@ import {
   importDraftsFromJson,
   listDrafts,
   listDraftRevisions,
+  loadDraftSource,
   saveDraft,
   type DraftRevision,
   type DraftSaveMode,
+  type DraftSource,
+  type DraftSourceRef,
 } from "./storage/drafts";
+import { addHealthEvent, getRecentHealthEvents, type HealthEvent } from "./storage/healthStore";
 import { fetchWalletFromPath, parseWalletJson } from "./services/wallet";
 import CommandPalette, { type CommandPaletteAction } from "./components/CommandPalette";
 import {
@@ -51,8 +69,21 @@ import {
   type PropsDiffEntry,
   type PropsValidationIssue,
 } from "./utils/propsInspector";
+import { diffManifests, type DraftDiffEntry, type DraftDiffKind } from "./utils/draftDiff";
 import HotkeyOverlay, { type HotkeyOverlaySection } from "./components/HotkeyOverlay";
 import { validatePipDocument } from "./services/pipValidation";
+
+type AoDeployModule = typeof import("./services/aoDeploy");
+
+const loadAoDeployModule = (() => {
+  let modPromise: Promise<AoDeployModule> | null = null;
+  return () => {
+    if (!modPromise) {
+      modPromise = import("./services/aoDeploy");
+    }
+    return modPromise;
+  };
+})();
 
 const randomId = () => crypto.randomUUID?.() ?? Math.random().toString(36).slice(2, 10);
 
@@ -97,6 +128,11 @@ const formatTime = (iso?: string) =>
     : "—";
 const abbreviateTx = (value?: string | null) =>
   value ? (value.length > 18 ? `${value.slice(0, 10)}…${value.slice(-6)}` : value) : "—";
+const formatVaultMode = (mode?: string) => {
+  if (mode === "password") return "Password";
+  if (mode === "plain") return "Local key";
+  return "Safe storage";
+};
 const normalizeText = (value: unknown) => (typeof value === "string" ? value.trim() : "");
 
 const formatTimeShort = (iso?: string) =>
@@ -122,6 +158,23 @@ const openExternal = (url: string) => {
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+
+const cloneValue = <T,>(value: T): T => {
+  const structured = (globalThis as { structuredClone?: <V>(input: V) => V }).structuredClone;
+  if (typeof structured === "function") {
+    try {
+      return structured(value);
+    } catch {
+      // Fallback to JSON clone below.
+    }
+  }
+
+  try {
+    return JSON.parse(JSON.stringify(value)) as T;
+  } catch {
+    return value;
+  }
+};
 
 const healthStatusLabel = (status: HealthStatus["status"]) => {
   switch (status) {
@@ -213,6 +266,16 @@ const mergeHealthResults = (previous: HealthStatus[], next: HealthStatus[]): Hea
   });
 };
 
+const snapshotToEvent = (snapshot: HealthSnapshot, id: number): HealthEvent => ({
+  ...snapshot,
+  id,
+  overall: snapshot.summary.overall,
+  ok: snapshot.summary.ok,
+  warn: snapshot.summary.warn,
+  error: snapshot.summary.error,
+  missing: snapshot.summary.missing,
+});
+
 type WalletBridgeResult = {
   path?: string;
   jwk?: Record<string, unknown>;
@@ -245,6 +308,11 @@ type PipVaultSnapshot = {
   updatedAt?: string;
   encrypted: boolean;
   path: string;
+  mode: "safeStorage" | "plain" | "password";
+  iterations?: number;
+  salt?: string;
+  locked: boolean;
+  recordCount: number;
 };
 type PipVaultIssue = {
   field: string;
@@ -259,6 +327,14 @@ const getEnv = (key: string): string | undefined => {
   const fromProcessPrefixed = typeof process !== "undefined" ? process.env?.[`VITE_${key}`] : undefined;
   return fromProcess ?? fromProcessPrefixed;
 };
+const parsePositiveNumber = (value: string | undefined, fallback: number): number => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : fallback;
+};
+const HEALTH_HISTORY_STORE_LIMIT = parsePositiveNumber(getEnv("HEALTH_HISTORY_LIMIT"), 200);
+const HEALTH_EVENT_DISPLAY_LIMIT = 10;
+const SLA_FAILURE_THRESHOLD = parsePositiveNumber(getEnv("HEALTH_SLA_FAILURE_THRESHOLD"), 3);
+const SLA_LATENCY_THRESHOLD_MS = parsePositiveNumber(getEnv("HEALTH_SLA_LATENCY_MS"), 1500);
 
 declare global {
   interface Window {
@@ -271,10 +347,34 @@ declare global {
       read: () => Promise<{ exists: boolean; updatedAt?: string; pip?: Record<string, unknown> }>;
       write: (pip: Record<string, unknown>) => Promise<{ updatedAt: string }>;
       clear: () => Promise<{ ok: true }>;
-      describe: () => Promise<{ exists: boolean; updatedAt?: string; encrypted: boolean; path: string }>;
+      describe: () => Promise<{
+        exists: boolean;
+        updatedAt?: string;
+        encrypted: boolean;
+        path: string;
+        mode: "safeStorage" | "plain" | "password";
+        iterations?: number;
+        salt?: string;
+        locked: boolean;
+        recordCount: number;
+      }>;
       list: () => Promise<{ exists: boolean; records: PipVaultRecord[] }>;
       loadRecord: (id: string) => Promise<{ exists: boolean; updatedAt?: string; pip?: Record<string, unknown> }>;
       deleteRecord: (id: string) => Promise<{ ok: true; removed: boolean }>;
+      enablePasswordMode: (password: string) => Promise<{
+        ok: true;
+        mode: "safeStorage" | "plain" | "password";
+        iterations?: number;
+        salt?: string;
+        records?: number;
+      }>;
+      disablePasswordMode: () => Promise<{ ok: true; mode: "safeStorage" | "plain" | "password" }>;
+      exportVault: () => Promise<{ ok: true; bundle: string }>;
+      importVault: (bundle: string | ArrayBuffer, password?: string) => Promise<{
+        ok: true;
+        mode: "safeStorage" | "plain" | "password";
+        records: number;
+      }>;
     };
   }
 }
@@ -366,6 +466,75 @@ const appendNodeToTree = (nodes: ManifestNode[], targetId: string, child: Manife
   });
 
   return changed ? updated : nodes;
+};
+
+const cloneNode = (node: ManifestNode): ManifestNode => JSON.parse(JSON.stringify(node));
+
+const removeNodeFromTree = (nodes: ManifestNode[], targetId: string): { nodes: ManifestNode[]; removed: boolean } => {
+  let removed = false;
+
+  const walk = (list: ManifestNode[]): ManifestNode[] =>
+    list
+      .map((node) => {
+        if (node.id === targetId) {
+          removed = true;
+          return null;
+        }
+        if (node.children?.length) {
+          const nextChildren = walk(node.children);
+          if (nextChildren !== node.children) {
+            return { ...node, children: nextChildren };
+          }
+        }
+        return node;
+      })
+      .filter(Boolean) as ManifestNode[];
+
+  const pruned = walk(nodes);
+  return { nodes: removed ? pruned : nodes, removed };
+};
+
+const insertNodeIntoTree = (
+  nodes: ManifestNode[],
+  parentId: string | null,
+  node: ManifestNode,
+  position?: number,
+): ManifestNode[] => {
+  if (!parentId) {
+    const next = [...nodes];
+    const index = position != null ? Math.max(0, Math.min(position, next.length)) : next.length;
+    next.splice(index, 0, node);
+    return next;
+  }
+
+  let inserted = false;
+  const updated = nodes.map((entry) => {
+    if (entry.id === parentId) {
+      const children = [...(entry.children ?? [])];
+      const index = position != null ? Math.max(0, Math.min(position, children.length)) : children.length;
+      children.splice(index, 0, node);
+      inserted = true;
+      return { ...entry, children };
+    }
+
+    if (entry.children?.length) {
+      const nextChildren = insertNodeIntoTree(entry.children, parentId, node, position);
+      if (nextChildren !== entry.children) {
+        inserted = true;
+        return { ...entry, children: nextChildren };
+      }
+    }
+
+    return entry;
+  });
+
+  if (inserted) return updated;
+  return [...nodes, node];
+};
+
+const ensureEntry = (entry: string | undefined, nodes: ManifestNode[]): string | undefined => {
+  if (entry && findNodeById(nodes, entry)) return entry;
+  return nodes[0]?.id;
 };
 
 const countNodes = (nodes: ManifestNode[]): number =>
@@ -539,6 +708,28 @@ const PropsSchemaField: React.FC<{
   const type = schema?.type ?? (Array.isArray(value) ? "array" : isPlainObject(value) ? "object" : undefined);
   const label = schema?.title ?? path[path.length - 1]?.toString() ?? "Root";
   const description = schema?.description;
+  const [helpOpen, setHelpOpen] = useState(false);
+
+  const hasHelp = Boolean(description);
+  const helpButton = hasHelp ? (
+    <button
+      type="button"
+      className={`schema-help-button ${helpOpen ? "active" : ""}`}
+      onClick={() => setHelpOpen((current) => !current)}
+      aria-label={helpOpen ? "Hide help" : "Show help"}
+      aria-pressed={helpOpen}
+      title={description}
+    >
+      ?
+    </button>
+  ) : null;
+  const helpContent = hasHelp && helpOpen ? <p className="schema-description">{description}</p> : null;
+  const labelRow = (
+    <div className="schema-label-row">
+      <span className="schema-label">{label}</span>
+      {helpButton}
+    </div>
+  );
 
   if (type === "object" || (!type && isPlainObject(value))) {
     const record = isPlainObject(value) ? value : {};
@@ -550,11 +741,13 @@ const PropsSchemaField: React.FC<{
     return (
       <fieldset className="schema-fieldset">
         <div className="schema-fieldset-head">
-          <div>
-            <span className="schema-label">{label}</span>
-            {description ? <p className="schema-description">{description}</p> : null}
+          <div className="schema-head-column">
+            {labelRow}
+            {helpContent}
           </div>
-          <span className="badge ghost">{getSchemaTypeLabel(schema, value)}</span>
+          <div className="schema-inline-actions">
+            <span className="badge ghost">{getSchemaTypeLabel(schema, value)}</span>
+          </div>
         </div>
         <div className="schema-grid">
           {allKeys.length ? (
@@ -582,31 +775,97 @@ const PropsSchemaField: React.FC<{
 
   if (type === "array") {
     const items = Array.isArray(value) ? value : [];
+    const addItem = (index?: number) => {
+      const nextItem = buildFormValue(schema?.items, undefined);
+      const next = [...items];
+      if (typeof index === "number" && index >= 0 && index <= next.length) {
+        next.splice(index, 0, nextItem);
+      } else {
+        next.push(nextItem);
+      }
+      onChange(path, next);
+    };
+    const removeItem = (index: number) => onChange(path, removeDraftValue(items, [index]));
+    const moveItem = (index: number, direction: "up" | "down") => {
+      const target = direction === "up" ? index - 1 : index + 1;
+      if (target < 0 || target >= items.length) return;
+      const next = [...items];
+      const [entry] = next.splice(index, 1);
+      next.splice(target, 0, entry);
+      onChange(path, next);
+    };
+    const cloneItem = (index: number) => {
+      const entry = items[index];
+      const next = [...items];
+      next.splice(index + 1, 0, cloneValue(entry));
+      onChange(path, next);
+    };
 
     return (
       <fieldset className="schema-fieldset">
         <div className="schema-fieldset-head">
-          <div>
-            <span className="schema-label">{label}</span>
-            {description ? <p className="schema-description">{description}</p> : null}
+          <div className="schema-head-column">
+            {labelRow}
+            {helpContent}
           </div>
-          <button
-            className="ghost small"
-            type="button"
-            onClick={() => onChange(path, [...items, buildFormValue(schema?.items, undefined)])}
-          >
-            Add item
-          </button>
+          <div className="schema-inline-actions">
+            <span className="badge ghost">{getSchemaTypeLabel(schema, value)}</span>
+            <button className="ghost small" type="button" onClick={() => addItem()}>+ Add item</button>
+          </div>
         </div>
         <div className="schema-list">
           {items.length ? (
             items.map((entry, index) => (
               <div key={`${path.join(".")}[${index}]`} className="schema-list-item">
                 <div className="schema-list-item-head">
-                  <span className="schema-label">{schema?.items?.title ?? `${label} ${index + 1}`}</span>
-                  <button className="ghost small" type="button" onClick={() => onChange(path, removeDraftValue(items, [index]))}>
-                    Remove
-                  </button>
+                  <div className="schema-label-row">
+                    <span className="schema-label">{schema?.items?.title ?? `${label} ${index + 1}`}</span>
+                    <span className="schema-item-index">#{index + 1}</span>
+                  </div>
+                  <div className="schema-inline-actions compact">
+                    <button
+                      className="icon-button ghost"
+                      type="button"
+                      onClick={() => moveItem(index, "up")}
+                      disabled={index === 0}
+                      aria-label="Move item up"
+                    >
+                      ↑
+                    </button>
+                    <button
+                      className="icon-button ghost"
+                      type="button"
+                      onClick={() => moveItem(index, "down")}
+                      disabled={index === items.length - 1}
+                      aria-label="Move item down"
+                    >
+                      ↓
+                    </button>
+                    <button
+                      className="icon-button ghost"
+                      type="button"
+                      onClick={() => cloneItem(index)}
+                      aria-label="Duplicate item"
+                    >
+                      ⧉
+                    </button>
+                    <button
+                      className="icon-button ghost"
+                      type="button"
+                      onClick={() => addItem(index + 1)}
+                      aria-label="Add item below"
+                    >
+                      ＋
+                    </button>
+                    <button
+                      className="icon-button danger"
+                      type="button"
+                      onClick={() => removeItem(index)}
+                      aria-label="Remove item"
+                    >
+                      ✕
+                    </button>
+                  </div>
                 </div>
                 <PropsSchemaField
                   schema={schema?.items}
@@ -617,8 +876,20 @@ const PropsSchemaField: React.FC<{
               </div>
             ))
           ) : (
-            <p className="hint">No items yet.</p>
+            <div className="schema-empty">
+              <p className="hint">No items yet.</p>
+              <button className="ghost small" type="button" onClick={() => addItem()}>
+                Add first item
+              </button>
+            </div>
           )}
+          {items.length ? (
+            <div className="schema-list-footer">
+              <button className="ghost small" type="button" onClick={() => addItem()}>
+                + Add item
+              </button>
+            </div>
+          ) : null}
         </div>
       </fieldset>
     );
@@ -627,8 +898,8 @@ const PropsSchemaField: React.FC<{
   if (type === "boolean") {
     return (
       <div className="schema-control">
-        <span className="schema-label">{label}</span>
-        {description ? <p className="schema-description">{description}</p> : null}
+        {labelRow}
+        {helpContent}
         <label className="toggle schema-toggle">
           <input
             type="checkbox"
@@ -644,8 +915,8 @@ const PropsSchemaField: React.FC<{
   if (type === "number") {
     return (
       <div className="schema-control">
-        <span className="schema-label">{label}</span>
-        {description ? <p className="schema-description">{description}</p> : null}
+        {labelRow}
+        {helpContent}
         <input
           type="number"
           value={typeof value === "number" ? value : ""}
@@ -659,17 +930,28 @@ const PropsSchemaField: React.FC<{
   }
 
   if (type === "string" && schema?.enum?.length) {
+    const options = schema.enum.map((entry) => String(entry));
+    const current = typeof value === "string" ? value : options[0] ?? "";
     return (
       <div className="schema-control">
-        <span className="schema-label">{label}</span>
-        {description ? <p className="schema-description">{description}</p> : null}
-        <select value={typeof value === "string" ? value : String(schema.enum[0] ?? "")} onChange={(e) => onChange(path, e.target.value)}>
-          {schema.enum.map((entry) => (
-            <option key={String(entry)} value={String(entry)}>
-              {String(entry)}
-            </option>
-          ))}
-        </select>
+        {labelRow}
+        {helpContent}
+        <div className="enum-options">
+          {options.map((option) => {
+            const active = current === option;
+            return (
+              <button
+                key={option}
+                type="button"
+                className={`enum-badge ${active ? "active" : ""}`}
+                aria-pressed={active}
+                onClick={() => onChange(path, option)}
+              >
+                {option}
+              </button>
+            );
+          })}
+        </div>
       </div>
     );
   }
@@ -677,8 +959,8 @@ const PropsSchemaField: React.FC<{
   if (type === "null") {
     return (
       <div className="schema-control">
-        <span className="schema-label">{label}</span>
-        {description ? <p className="schema-description">{description}</p> : null}
+        {labelRow}
+        {helpContent}
         <input value="null" disabled readOnly />
       </div>
     );
@@ -686,8 +968,8 @@ const PropsSchemaField: React.FC<{
 
   return (
     <div className="schema-control">
-      <span className="schema-label">{label}</span>
-      {description ? <p className="schema-description">{description}</p> : null}
+      {labelRow}
+      {helpContent}
       <input
         type="text"
         value={typeof value === "string" ? value : value == null ? "" : String(value)}
@@ -771,6 +1053,12 @@ function App() {
   const [saving, setSaving] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [revertTargetId, setRevertTargetId] = useState<number | null>(null);
+  const [draftDiffOpen, setDraftDiffOpen] = useState(false);
+  const [draftDiffLoading, setDraftDiffLoading] = useState(false);
+  const [draftDiffRightRef, setDraftDiffRightRef] = useState<DraftSourceRef | null>(null);
+  const [draftDiffRight, setDraftDiffRight] = useState<DraftSource | null>(null);
+  const [draftDiffEntries, setDraftDiffEntries] = useState<DraftDiffEntry[]>([]);
+  const [draftDiffHighlight, setDraftDiffHighlight] = useState<Record<string, DraftDiffKind>>({});
   const [pip, setPip] = useState<PipDocument | null>(null);
   const [remoteError, setRemoteError] = useState<string | null>(null);
   const [loadingManifest, setLoadingManifest] = useState(false);
@@ -780,9 +1068,11 @@ function App() {
   const [pipVaultRecords, setPipVaultRecords] = useState<PipVaultRecord[]>([]);
   const [pipVaultFilter, setPipVaultFilter] = useState("");
   const [pipVaultRecordsLoading, setPipVaultRecordsLoading] = useState(false);
+  const [pipVaultPassword, setPipVaultPassword] = useState("");
   const [health, setHealth] = useState<HealthStatus[]>([]);
   const [healthLoading, setHealthLoading] = useState(false);
   const [healthExpanded, setHealthExpanded] = useState(false);
+  const [healthEvents, setHealthEvents] = useState<HealthEvent[]>([]);
   const [healthAutoRefresh, setHealthAutoRefresh] = useState<"off" | "30" | "60">(() => {
     if (typeof window === "undefined") return "off";
     const stored = window.localStorage.getItem(HEALTH_AUTO_REFRESH_STORAGE_KEY);
@@ -894,11 +1184,17 @@ function App() {
   const saveStatusLabel = saving ? "Saving…" : isDirty ? "Unsaved changes" : "Draft saved";
   const saveStatusTime = lastSavedAt ? formatTime(lastSavedAt) : "Never saved";
   const pipVaultValidationIssues = useMemo<PipVaultIssue[]>(() => {
-    if (!pip) {
-      return [{ field: "vault", message: "Load or fetch a PIP to inspect vault validation", severity: "warn" }];
+    const issues: PipVaultIssue[] = [];
+
+    if (pipVaultSnapshot?.mode === "password" && pipVaultSnapshot.locked) {
+      issues.push({ field: "vault", message: "Vault locked; enter password to unlock", severity: "error" });
     }
 
-    const issues: PipVaultIssue[] = [];
+    if (!pip) {
+      issues.push({ field: "vault", message: "Load or fetch a PIP to inspect vault validation", severity: "warn" });
+      return issues;
+    }
+
     const manifestTx = normalizeText(pip.manifestTx);
 
     if (!manifestTx) {
@@ -918,8 +1214,9 @@ function App() {
     }
 
     return issues;
-  }, [pip]);
+  }, [pip, pipVaultSnapshot]);
   const pipVaultBlockingIssues = pipVaultValidationIssues.filter((issue) => issue.severity === "error");
+  const pipVaultLocked = pipVaultSnapshot?.mode === "password" && pipVaultSnapshot.locked;
   const filteredPipVaultRecords = useMemo(() => {
     const query = pipVaultFilter.trim().toLowerCase();
     if (!query) return pipVaultRecords;
@@ -1028,12 +1325,100 @@ function App() {
         .join(" · "),
     [healthSummary],
   );
+  const draftDiffPicker = useMemo(() => {
+    const options: DraftDiffOption[] = [];
+    const lookup = new Map<string, DraftSourceRef>();
+    const pushOption = (ref: DraftSourceRef, label: string, description: string) => {
+      const value = `${ref.kind}:${ref.id}`;
+      if (lookup.has(value)) return;
+      options.push({ value, label, description });
+      lookup.set(value, ref);
+    };
+
+    draftHistory.forEach((revision) =>
+      pushOption(
+        { kind: "revision", id: revision.id },
+        `${formatDraftSaveMode(revision.mode)} • ${formatDate(revision.savedAt)}`,
+        revision.name,
+      ),
+    );
+
+    drafts.forEach((draft) => {
+      if (draft.id == null) return;
+      pushOption(
+        { kind: "draft", id: draft.id },
+        `${draft.name}`,
+        `Draft • ${formatDate(draft.updatedAt)}`,
+      );
+    });
+
+    return { options, lookup };
+  }, [draftHistory, drafts]);
+  const draftDiffOptions = draftDiffPicker.options;
+  const draftDiffLookup = draftDiffPicker.lookup;
+  const draftDiffRightValue = useMemo(
+    () => (draftDiffRightRef ? `${draftDiffRightRef.kind}:${draftDiffRightRef.id}` : null),
+    [draftDiffRightRef],
+  );
+
+  const healthEventLog = useMemo(() => healthEvents.slice(0, HEALTH_EVENT_DISPLAY_LIMIT), [healthEvents]);
+
+  const healthSla = useMemo(() => {
+    const recent = healthEvents.slice(0, HEALTH_EVENT_DISPLAY_LIMIT);
+    let failureStreak = 0;
+    for (const event of recent) {
+      const overall = event.overall ?? event.summary?.overall ?? "missing";
+      if (overall === "error" || overall === "missing") {
+        failureStreak += 1;
+      } else {
+        break;
+      }
+    }
+
+    const latencies = recent
+      .map((event) => event.averageLatencyMs)
+      .filter((value): value is number => typeof value === "number");
+    const averageLatency = latencies.length
+      ? Math.round(latencies.reduce((acc, value) => acc + value, 0) / latencies.length)
+      : null;
+
+    const latencyBreached = averageLatency != null && averageLatency > SLA_LATENCY_THRESHOLD_MS;
+    const failureBreached = failureStreak >= SLA_FAILURE_THRESHOLD;
+
+    return {
+      averageLatency,
+      failureStreak,
+      latencyBreached,
+      failureBreached,
+      breached: latencyBreached || failureBreached,
+    };
+  }, [healthEvents]);
+
+  const refreshHealthHistory = useCallback(async () => {
+    try {
+      const recent = await getRecentHealthEvents(HEALTH_EVENT_DISPLAY_LIMIT);
+      setHealthEvents(recent);
+      return recent;
+    } catch (err) {
+      console.error("Failed to load health history", err);
+      return [];
+    }
+  }, []);
 
   const refreshHealth = useCallback(async () => {
     setHealthLoading(true);
     try {
       const results = await runHealthChecks();
       setHealth((current) => mergeHealthResults(current, results));
+
+      const snapshot = serializeHealthSnapshot(results);
+      const id = await addHealthEvent(snapshot, HEALTH_HISTORY_STORE_LIMIT);
+      setHealthEvents((current) => {
+        const next = [snapshotToEvent(snapshot, id), ...current];
+        return next.slice(0, HEALTH_EVENT_DISPLAY_LIMIT);
+      });
+    } catch (err) {
+      console.error("Health check failed", err);
     } finally {
       setHealthLoading(false);
     }
@@ -1084,6 +1469,60 @@ function App() {
       setHistoryLoading(false);
     }
   }, []);
+  const getDefaultDraftDiffRef = useCallback((): DraftSourceRef | null => {
+    if (draftHistory.length) return { kind: "revision", id: draftHistory[0].id };
+    if (activeDraftId != null) return { kind: "draft", id: activeDraftId };
+    const firstDraft = drafts.find((draft) => draft.id != null);
+    return firstDraft?.id != null ? { kind: "draft", id: firstDraft.id } : null;
+  }, [activeDraftId, draftHistory, drafts]);
+
+  const loadDraftDiffSource = useCallback(
+    async (ref: DraftSourceRef | null) => {
+      if (!ref) {
+        setDraftDiffRight(null);
+        setDraftDiffEntries([]);
+        setDraftDiffHighlight({});
+        return null;
+      }
+
+      setDraftDiffLoading(true);
+      try {
+        const loaded = await loadDraftSource(ref);
+        setDraftDiffRight(loaded ?? null);
+        if (loaded) {
+          const { entries, highlight } = diffManifests(manifestRef.current, loaded.document);
+          setDraftDiffEntries(entries);
+          setDraftDiffHighlight(highlight);
+        } else {
+          setDraftDiffEntries([]);
+          setDraftDiffHighlight({});
+        }
+        return loaded;
+      } finally {
+        setDraftDiffLoading(false);
+      }
+    },
+    [],
+  );
+
+  const openDraftDiffPanel = useCallback(
+    async (ref?: DraftSourceRef | null) => {
+      setDraftDiffOpen(true);
+      const targetRef = ref ?? draftDiffRightRef ?? getDefaultDraftDiffRef();
+      setDraftDiffRightRef(targetRef ?? null);
+      await loadDraftDiffSource(targetRef ?? null);
+    },
+    [draftDiffRightRef, getDefaultDraftDiffRef, loadDraftDiffSource],
+  );
+
+  const handleSelectDraftDiffOption = useCallback(
+    async (value: string) => {
+      const ref = value ? draftDiffLookup.get(value) ?? null : null;
+      setDraftDiffRightRef(ref);
+      await loadDraftDiffSource(ref);
+    },
+    [draftDiffLookup, loadDraftDiffSource],
+  );
 
   useEffect(() => {
     void refreshDraftHistory(activeDraftId);
@@ -1095,9 +1534,17 @@ function App() {
   }, []);
 
   useEffect(() => {
+    void refreshPipVaultSnapshot();
+  }, [refreshPipVaultSnapshot]);
+
+  useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
     window.localStorage.setItem(THEME_STORAGE_KEY, theme);
   }, [theme]);
+
+  useEffect(() => {
+    void refreshHealthHistory();
+  }, [refreshHealthHistory]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1119,6 +1566,28 @@ function App() {
       window.clearInterval(id);
     };
   }, [healthAutoRefresh, refreshHealth]);
+
+  useEffect(() => {
+    if (!draftDiffOpen) return;
+    const currentKey = draftDiffRightRef ? `${draftDiffRightRef.kind}:${draftDiffRightRef.id}` : null;
+    if (currentKey && draftDiffLookup.has(currentKey)) return;
+    const fallback = getDefaultDraftDiffRef();
+    setDraftDiffRightRef(fallback);
+    void loadDraftDiffSource(fallback);
+  }, [draftDiffLookup, draftDiffOpen, draftDiffRightRef, getDefaultDraftDiffRef, loadDraftDiffSource]);
+
+  useEffect(() => {
+    if (!draftDiffOpen || !draftDiffRight) return;
+    const { entries, highlight } = diffManifests(manifest, draftDiffRight.document);
+    setDraftDiffEntries(entries);
+    setDraftDiffHighlight(highlight);
+  }, [draftDiffOpen, draftDiffRight, manifest]);
+
+  useEffect(() => {
+    if (!draftDiffOpen) {
+      setDraftDiffHighlight({});
+    }
+  }, [draftDiffOpen]);
 
   useEffect(() => {
     if (selectedNode) {
@@ -1422,6 +1891,13 @@ function App() {
   };
 
   const handleLoadPipFromVault = async () => {
+    if (pipVaultLocked) {
+      const message = "Unlock the vault with its password first";
+      setPipVaultStatus(message);
+      flashStatus(message);
+      return;
+    }
+
     setPipVaultBusy(true);
     try {
       const loaded = await loadPipFromVault();
@@ -1453,6 +1929,13 @@ function App() {
 
     if (pipVaultBlockingIssues.length > 0) {
       const message = "Fix validation issues before saving to vault";
+      setPipVaultStatus(message);
+      flashStatus(message);
+      return;
+    }
+
+    if (pipVaultLocked) {
+      const message = "Unlock the vault with its password first";
       setPipVaultStatus(message);
       flashStatus(message);
       return;
@@ -1542,6 +2025,13 @@ function App() {
   }
 
   const handleClearPipVault = async () => {
+    if (pipVaultLocked) {
+      const message = "Unlock the vault with its password first";
+      setPipVaultStatus(message);
+      flashStatus(message);
+      return;
+    }
+
     setPipVaultBusy(true);
     try {
       const cleared = await clearPipVaultStorage();
@@ -1561,6 +2051,13 @@ function App() {
   };
 
   const handleLoadVaultRecord = async (recordId: string) => {
+    if (pipVaultLocked) {
+      const message = "Unlock the vault with its password first";
+      setPipVaultStatus(message);
+      flashStatus(message);
+      return;
+    }
+
     setPipVaultBusy(true);
     try {
       const loaded = await loadPipFromVaultRecord(recordId);
@@ -1582,6 +2079,13 @@ function App() {
 
   const handleDeleteVaultRecord = async (recordId: string) => {
     if (!window.confirm("Delete this vault record?")) {
+      return;
+    }
+
+    if (pipVaultLocked) {
+      const message = "Unlock the vault with its password first";
+      setPipVaultStatus(message);
+      flashStatus(message);
       return;
     }
 
@@ -1607,6 +2111,138 @@ function App() {
     } finally {
       setPipVaultBusy(false);
     }
+  };
+
+  const handleEnableVaultPassword = async () => {
+    const password = pipVaultPassword.trim();
+    if (!password) {
+      flashStatus("Enter a vault password first");
+      return;
+    }
+
+    setPipVaultBusy(true);
+    try {
+      const result = await enableVaultPassword(password);
+      if (!result.ok) {
+        setPipVaultStatus(result.error);
+        flashStatus(result.error);
+        return;
+      }
+
+      const message = pipVaultSnapshot?.mode === "password" ? "Vault unlocked" : "Password mode enabled";
+      setPipVaultStatus(message);
+      flashStatus(message);
+      setPipVaultPassword("");
+      await refreshPipVaultSnapshot();
+      await refreshPipVaultRecords();
+    } finally {
+      setPipVaultBusy(false);
+    }
+  };
+
+  const handleDisableVaultPassword = async () => {
+    if (!window.confirm("Switch vault back to system storage?")) return;
+
+    setPipVaultBusy(true);
+    try {
+      const result = await disableVaultPassword();
+      if (!result.ok) {
+        setPipVaultStatus(result.error);
+        flashStatus(result.error);
+        return;
+      }
+
+      const message = result.mode === "plain" ? "Vault using local key" : "Vault using system keychain";
+      setPipVaultStatus(message);
+      flashStatus("Password mode disabled");
+      await refreshPipVaultSnapshot();
+      await refreshPipVaultRecords();
+    } finally {
+      setPipVaultBusy(false);
+    }
+  };
+
+  const handleExportVaultBundle = async () => {
+    setPipVaultBusy(true);
+    try {
+      const result = await exportPipVaultBundle();
+      if (!result.ok) {
+        setPipVaultStatus(result.error);
+        flashStatus(result.error);
+        return;
+      }
+
+      const blob = new Blob([result.bundle], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      const suffix = pipVaultSnapshot?.mode === "password" ? "-pw" : "";
+      link.download = `pip-vault-backup${suffix}-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+      flashStatus("Vault backup exported");
+    } finally {
+      setPipVaultBusy(false);
+    }
+  };
+
+  const handleImportVaultBundle = () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "application/json";
+    input.onchange = async (event) => {
+      const file = (event.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+
+      let text = "";
+      try {
+        text = await file.text();
+      } catch {
+        flashStatus("Unable to read vault bundle");
+        return;
+      }
+
+      let bundleMode: string | undefined;
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed?.format !== "pip-vault-bundle") {
+          flashStatus("Selected file is not a vault backup bundle");
+          return;
+        }
+        bundleMode = parsed?.mode;
+      } catch (err) {
+        flashStatus("Invalid vault bundle JSON");
+        return;
+      }
+
+      if (bundleMode === "password" && !pipVaultPassword.trim()) {
+        flashStatus("Enter the vault password before importing");
+        return;
+      }
+
+      setPipVaultBusy(true);
+      try {
+        const result = await importPipVaultBundle(text, bundleMode === "password" ? pipVaultPassword : undefined);
+        if (!result.ok) {
+          setPipVaultStatus(result.error);
+          flashStatus(result.error);
+          return;
+        }
+
+        const message = `Vault imported (${result.records} record${result.records === 1 ? "" : "s"})`;
+        setPipVaultStatus(message);
+        flashStatus(message);
+        setPipVaultPassword("");
+        await refreshPipVaultSnapshot();
+        await refreshPipVaultRecords();
+      } finally {
+        setPipVaultBusy(false);
+      }
+
+      input.value = "";
+    };
+
+    input.click();
   };
 
   const applyWalletSelection = (
@@ -1806,6 +2442,7 @@ function App() {
 
     try {
       setDeployStep("Creating signer");
+      const { deployModule } = await loadAoDeployModule();
       const response = await deployModule(walletSource, moduleSource);
       recordAoLog("deploy", response.txId, response.placeholder ? "Placeholder" : "Success", response.raw ?? response);
 
@@ -1885,6 +2522,7 @@ function App() {
 
     try {
       setSpawnStep("Creating signer");
+      const { spawnProcess } = await loadAoDeployModule();
       const response = await spawnProcess(
         scheduler.trim() || undefined,
         manifestTx,
@@ -2202,6 +2840,71 @@ function App() {
     window.setTimeout(() => setStatus(null), 1800);
   };
 
+  const handleCherryPick = useCallback(
+    (entry: DraftDiffEntry, action: "add" | "replace" | "remove") => {
+      let message = "";
+      let nextSelected = selectedNodeId;
+
+      setManifest((prev) => {
+        let nextNodes = prev.nodes;
+        let nextEntry = prev.entry;
+
+        if (action === "add") {
+          if (!entry.after) {
+            message = "No comparison node to add";
+            return prev;
+          }
+          if (findNodeById(prev.nodes, entry.id)) {
+            message = "Node already exists; use Replace instead";
+            return prev;
+          }
+
+          nextNodes = insertNodeIntoTree(prev.nodes, entry.parentId ?? null, cloneNode(entry.after), entry.afterIndex);
+          nextEntry = ensureEntry(prev.entry ?? entry.after.id, nextNodes);
+          nextSelected = entry.id;
+          message = "Node added from comparison";
+        } else if (action === "replace") {
+          if (!entry.after) {
+            message = "No comparison node to replace with";
+            return prev;
+          }
+          const without = removeNodeFromTree(prev.nodes, entry.id).nodes;
+          nextNodes = insertNodeIntoTree(without, entry.parentId ?? null, cloneNode(entry.after), entry.afterIndex);
+          nextEntry = ensureEntry(prev.entry, nextNodes);
+          nextSelected = entry.id;
+          message = "Node replaced from comparison";
+        } else if (action === "remove") {
+          const result = removeNodeFromTree(prev.nodes, entry.id);
+          if (!result.removed) {
+            message = "Node not found in current manifest";
+            return prev;
+          }
+          nextNodes = result.nodes;
+          nextEntry = ensureEntry(prev.entry, nextNodes);
+          if (nextSelected === entry.id) {
+            nextSelected = nextEntry ?? null;
+          }
+          message = "Node removed per diff";
+        }
+
+        return touch({
+          ...prev,
+          entry: nextEntry ?? undefined,
+          nodes: nextNodes,
+        });
+      });
+
+      if (nextSelected !== selectedNodeId) {
+        setSelectedNodeId(nextSelected);
+      }
+
+      if (message) {
+        flashStatus(message);
+      }
+    },
+    [flashStatus, selectedNodeId],
+  );
+
   const handleCopyAoId = async (value: string | null, label: string) => {
     if (!value) return;
 
@@ -2344,6 +3047,13 @@ function App() {
       description: "Save a copy of the current draft.",
       shortcut: "Alt+N",
       run: () => void handleDuplicateDraft(),
+    },
+    {
+      id: "open-draft-diff",
+      label: "Open draft diff",
+      description: "Compare current manifest with a saved draft or revision.",
+      shortcut: "D",
+      run: () => void openDraftDiffPanel(),
     },
     {
       id: "save-draft",
@@ -2651,6 +3361,18 @@ function App() {
                 <div>
                   <p className="eyebrow">Health</p>
                   <h4>Diagnostics</h4>
+                  <div className="health-sla">
+                    <span className={`sla-pill ${healthSla.breached ? "breached" : "ok"}`}>
+                      {healthSla.breached ? "SLA breach" : "SLA OK"}
+                    </span>
+                    <span className="health-sla-note">
+                      {healthSla.breached
+                        ? healthSla.failureBreached
+                          ? `Failures ${healthSla.failureStreak}/${SLA_FAILURE_THRESHOLD}`
+                          : `Avg latency ${healthSla.averageLatency ?? "—"} ms > ${SLA_LATENCY_THRESHOLD_MS} ms`
+                        : `Target: < ${SLA_FAILURE_THRESHOLD} failures • ≤ ${SLA_LATENCY_THRESHOLD_MS} ms avg`}
+                    </span>
+                  </div>
                 </div>
                 <div className="health-actions">
                   <div className="health-auto-refresh">
@@ -2723,6 +3445,59 @@ function App() {
                 </div>
               )}
               <div className="health-collapse" id="health-panel" aria-hidden={!healthExpanded}>
+                <div className="health-events">
+                  <div className="health-events-head">
+                    <div>
+                      <p className="eyebrow">Recent checks</p>
+                      <h5>Alert log</h5>
+                    </div>
+                    <span className={`sla-pill ${healthSla.breached ? "breached" : "ok"}`}>
+                      {healthSla.breached ? "SLA breach" : "SLA OK"}
+                    </span>
+                  </div>
+                  <div className="health-events-list">
+                    {healthEventLog.length === 0 ? (
+                      <p className="health-empty">No history yet</p>
+                    ) : (
+                      healthEventLog.map((event) => {
+                        const failing = event.summary?.failing ?? [];
+                        const note = failing.length
+                          ? `${failing.map((item) => item.label).join(", ")}${
+                              failing[0]?.detail || failing[0]?.lastError ? ` — ${failing[0]?.detail ?? failing[0]?.lastError}` : ""
+                            }`
+                          : event.summary.warn > 0
+                            ? "Warnings present"
+                            : "All systems healthy";
+
+                        return (
+                          <div key={event.id} className={`health-event ${event.overall}`}>
+                            <div className="health-event-meta">
+                              <span className={`status-dot ${event.overall}`} aria-hidden />
+                              <div className="health-event-times">
+                                <strong>{formatTimeShort(event.recordedAt)}</strong>
+                                <span className="subtle">{new Date(event.recordedAt).toLocaleDateString()}</span>
+                              </div>
+                              <span className={`health-status ${event.overall}`}>
+                                {healthStatusLabel(event.overall as HealthStatus["status"])}
+                              </span>
+                            </div>
+                            <div className="health-event-body">
+                              <span className="health-event-note">{note}</span>
+                              <div className="health-event-metrics">
+                                {typeof event.averageLatencyMs === "number" && (
+                                  <span className="mono">{event.averageLatencyMs} ms avg</span>
+                                )}
+                                <span className="mono subtle">
+                                  {event.ok} ok • {event.warn} warn • {event.error + event.missing} fail
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
                 <div className="health-list">
                   {health.length === 0 ? (
                     <p className="health-empty">No checks yet</p>
@@ -2812,16 +3587,19 @@ function App() {
                 Remove
               </button>
             )}
+            <button className="ghost" onClick={() => void openDraftDiffPanel()}>
+              Draft diff
+            </button>
             <button className="ghost" onClick={handleLoadPip} disabled={loadingManifest}>
               {loadingManifest ? "Loading manifest…" : "Load PIP"}
             </button>
             <button className="ghost" onClick={handleFetchPipFromWorker} disabled={loadingManifest}>
               {loadingManifest ? "…" : "Fetch PIP (worker)"}
             </button>
-            <button className="ghost" onClick={handleLoadPipFromVault} disabled={pipVaultBusy}>
+            <button className="ghost" onClick={handleLoadPipFromVault} disabled={pipVaultBusy || pipVaultLocked}>
               {pipVaultBusy ? "Vault…" : "Load vault"}
             </button>
-            <button className="ghost" onClick={handleClearPipVault} disabled={pipVaultBusy}>
+            <button className="ghost" onClick={handleClearPipVault} disabled={pipVaultBusy || pipVaultLocked}>
               {pipVaultBusy ? "Vault…" : "Delete vault"}
             </button>
             <button
@@ -2861,13 +3639,18 @@ function App() {
                 <p className="eyebrow">Draft history</p>
                 <h4>Save timeline</h4>
               </div>
-              <span className="pill ghost">
-                {historyLoading
-                  ? "Loading…"
-                  : draftHistory.length
-                    ? `${draftHistory.length} save${draftHistory.length === 1 ? "" : "s"}`
-                    : "No saves yet"}
-              </span>
+              <div className="draft-history-head-actions">
+                <span className="pill ghost">
+                  {historyLoading
+                    ? "Loading…"
+                    : draftHistory.length
+                      ? `${draftHistory.length} save${draftHistory.length === 1 ? "" : "s"}`
+                      : "No saves yet"}
+                </span>
+                <button className="ghost small" type="button" onClick={() => void openDraftDiffPanel()}>
+                  Diff
+                </button>
+              </div>
             </div>
             {activeDraftId ? (
               draftHistory.length ? (
@@ -2930,6 +3713,18 @@ function App() {
             <span className={`pill ${pipVaultSnapshot?.exists ? "accent" : "ghost"}`}>
               {pipVaultSnapshot?.exists ? "Vault present" : "Vault empty"}
             </span>
+            <span className={`pill ${pipVaultSnapshot?.mode === "password" ? "accent" : "ghost"}`}>
+              {pipVaultSnapshot?.mode === "password"
+                ? pipVaultSnapshot.locked
+                  ? "Password locked"
+                  : "Password ready"
+                : pipVaultSnapshot?.mode === "plain"
+                  ? "Local key"
+                  : "Safe storage"}
+            </span>
+            <span className={`pill ${pipVaultLocked ? "issue" : "ghost"}`}>
+              {pipVaultLocked ? "Locked" : "Unlocked"}
+            </span>
             <span className="pill ghost">
               {pipVaultBlockingIssues.length ? `${pipVaultBlockingIssues.length} blocking issue${pipVaultBlockingIssues.length === 1 ? "" : "s"}` : "Ready to save"}
             </span>
@@ -2956,6 +3751,14 @@ function App() {
                 <dd>{pipVaultSnapshot ? (pipVaultSnapshot.exists ? "Stored locally" : "No vault file") : "Inspecting..."}</dd>
               </div>
               <div>
+                <dt>Mode</dt>
+                <dd>{pipVaultSnapshot ? formatVaultMode(pipVaultSnapshot.mode) : "—"}</dd>
+              </div>
+              <div>
+                <dt>Records</dt>
+                <dd>{pipVaultSnapshot ? pipVaultSnapshot.recordCount : "—"}</dd>
+              </div>
+              <div>
                 <dt>Updated</dt>
                 <dd>{pipVaultSnapshot?.updatedAt ? formatDate(pipVaultSnapshot.updatedAt) : "—"}</dd>
               </div>
@@ -2964,6 +3767,70 @@ function App() {
                 <dd>{pip ? `${normalizeText(pip.tenant) || "tenant?"} / ${normalizeText(pip.site) || "site?"}` : "No PIP loaded"}</dd>
               </div>
             </dl>
+          </article>
+
+          <article className="pip-vault-card">
+            <div className="stack-head">
+              <div>
+                <p className="eyebrow">Security</p>
+                <h4>Password & backups</h4>
+              </div>
+              <span className={`pill ${pipVaultSnapshot?.mode === "password" ? "accent" : "ghost"}`}>
+                {pipVaultSnapshot?.mode === "password" ? (pipVaultSnapshot.locked ? "Locked" : "Password") : "Keychain"}
+              </span>
+            </div>
+            <div className="pip-vault-summary pip-vault-security-summary">
+              <div>
+                <span>Mode</span>
+                <strong>{pipVaultSnapshot ? formatVaultMode(pipVaultSnapshot.mode) : "—"}</strong>
+              </div>
+              <div>
+                <span>KDF</span>
+                <strong className="mono">{pipVaultSnapshot?.iterations ? `${pipVaultSnapshot.iterations} · PBKDF2` : "—"}</strong>
+              </div>
+              <div>
+                <span>Salt</span>
+                <strong className="mono">{pipVaultSnapshot?.salt ? `${pipVaultSnapshot.salt.slice(0, 10)}…` : "—"}</strong>
+              </div>
+              <div>
+                <span>Lock</span>
+                <strong>{pipVaultLocked ? "Locked" : "Unlocked"}</strong>
+              </div>
+            </div>
+            <div className="pip-vault-password-row">
+              <input
+                type="password"
+                value={pipVaultPassword}
+                onChange={(e) => setPipVaultPassword(e.target.value)}
+                placeholder={pipVaultSnapshot?.mode === "password" ? "Enter vault password" : "Set a vault password"}
+                aria-label="Vault password"
+              />
+              <button
+                className="primary"
+                onClick={handleEnableVaultPassword}
+                disabled={pipVaultBusy || !pipVaultPassword.trim()}
+              >
+                {pipVaultSnapshot?.mode === "password" ? (pipVaultSnapshot.locked ? "Unlock" : "Rotate password") : "Enable password"}
+              </button>
+              {pipVaultSnapshot?.mode === "password" && (
+                <button className="ghost" onClick={handleDisableVaultPassword} disabled={pipVaultBusy}>
+                  Disable password
+                </button>
+              )}
+            </div>
+            <div className="pip-vault-actions">
+              <button className="ghost" onClick={handleImportVaultBundle} disabled={pipVaultBusy}>
+                Import backup
+              </button>
+              <button
+                className="ghost"
+                onClick={handleExportVaultBundle}
+                disabled={pipVaultBusy || (!pipVaultSnapshot?.exists && !pipVaultRecords.length)}
+              >
+                Export backup
+              </button>
+            </div>
+            <p className="hint">Use password mode for portable backups. Import uses the password field when required.</p>
           </article>
 
           <article className="pip-vault-card">
@@ -2993,7 +3860,7 @@ function App() {
               </div>
             </div>
             <div className="pip-vault-actions">
-              <button className="ghost" onClick={handleLoadPipFromVault} disabled={pipVaultBusy}>
+              <button className="ghost" onClick={handleLoadPipFromVault} disabled={pipVaultBusy || pipVaultLocked}>
                 {pipVaultBusy ? "Vault…" : "Load vault"}
               </button>
               <button
@@ -3004,7 +3871,7 @@ function App() {
               >
                 {pipVaultBusy ? "Saving…" : "Save to vault"}
               </button>
-              <button className="ghost" onClick={handleClearPipVault} disabled={pipVaultBusy}>
+              <button className="ghost" onClick={handleClearPipVault} disabled={pipVaultBusy || pipVaultLocked}>
                 {pipVaultBusy ? "Vault…" : "Delete vault"}
               </button>
               <button className="ghost" onClick={() => void refreshPipVaultSnapshot()} disabled={pipVaultBusy}>
@@ -3036,7 +3903,11 @@ function App() {
                 <span className="pill ghost">
                   {filteredPipVaultRecords.length}/{pipVaultRecords.length || 0}
                 </span>
-                <button className="ghost small" onClick={() => void refreshPipVaultRecords()} disabled={pipVaultRecordsLoading || pipVaultBusy}>
+                <button
+                  className="ghost small"
+                  onClick={() => void refreshPipVaultRecords()}
+                  disabled={pipVaultRecordsLoading || pipVaultBusy || pipVaultLocked}
+                >
                   {pipVaultRecordsLoading ? "Refreshing…" : "Refresh"}
                 </button>
                 {pipVaultFilter && (
@@ -3078,14 +3949,14 @@ function App() {
                             <button
                               className="ghost small"
                               onClick={() => void handleLoadVaultRecord(record.id)}
-                              disabled={pipVaultBusy || pipVaultRecordsLoading}
+                              disabled={pipVaultBusy || pipVaultRecordsLoading || pipVaultLocked}
                             >
                               Load
                             </button>
                             <button
                               className="ghost small danger"
                               onClick={() => void handleDeleteVaultRecord(record.id)}
-                              disabled={pipVaultBusy || pipVaultRecordsLoading}
+                              disabled={pipVaultBusy || pipVaultRecordsLoading || pipVaultLocked}
                             >
                               Delete
                             </button>
@@ -3347,6 +4218,7 @@ function App() {
                 dropTargetId={treeDropTargetId}
                 onDropTargetChange={setTreeDropTargetId}
                 onDropCatalogItem={handleTreeDrop}
+                diffHighlight={draftDiffOpen ? draftDiffHighlight : undefined}
               />
             )}
           </div>
@@ -3873,6 +4745,25 @@ function App() {
         </div>
         <AoLogPanel aoLog={aoLog} onCopy={handleCopyAoId} onOpen={handleOpenAoId} />
       </div>
+
+      <DraftDiffPanel
+        open={draftDiffOpen}
+        loading={draftDiffLoading}
+        entries={draftDiffEntries}
+        options={draftDiffOptions}
+        rightValue={draftDiffRightValue}
+        leftLabel={`${manifest.name} (current)`}
+        leftDetail={`Updated ${formatDate(manifest.metadata.updatedAt)}`}
+        rightLabel={draftDiffRight ? draftDiffRight.name : undefined}
+        rightDetail={
+          draftDiffRight
+            ? `${draftDiffRight.mode ? formatDraftSaveMode(draftDiffRight.mode) : "Draft"} • ${formatDate(draftDiffRight.savedAt)}`
+            : undefined
+        }
+        onClose={() => setDraftDiffOpen(false)}
+        onSelectRight={handleSelectDraftDiffOption}
+        onCherryPick={handleCherryPick}
+      />
 
       {status && <div className="status-bar toast">{status}</div>}
       {(pip?.manifestTx || remoteError) && (
