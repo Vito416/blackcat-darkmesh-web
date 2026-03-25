@@ -3,14 +3,14 @@
     "target": "ES2020",
     "module": "CommonJS",
     "outDir": "dist",
-    "rootDir": ".",
+    "rootDir": "..",
     "strict": true,
     "esModuleInterop": true,
+    "skipLibCheck": true,
     "moduleResolution": "node",
     "resolveJsonModule": true,
     "jsx": "react-jsx",
-    "types": ["node", "react", "react-dom"],
-    "rootDirs": ["./src", "../src"]
+    "types": ["node", "react", "react-dom"]
   },
   "include": ["src/**/*", "../src/manifest/**/*"]
 }

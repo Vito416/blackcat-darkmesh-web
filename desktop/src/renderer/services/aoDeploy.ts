@@ -26,9 +26,11 @@ export type SpawnResponse = {
   moduleTx?: string;
 };
 
-const baseConnect = () =>
-  connect({
-    MODE: (getEnv("AO_MODE") as "legacy" | "mainnet") ?? "legacy",
+const baseConnect = () => {
+  const modeEnv = getEnv("AO_MODE");
+  const MODE = modeEnv === "mainnet" ? "mainnet" : "legacy";
+  return connect({
+    MODE,
     GATEWAY_URL: getEnv("GATEWAY_URL"),
     GRAPHQL_URL: getEnv("GRAPHQL_URL"),
     GRAPHQL_MAX_RETRIES: getEnv("GRAPHQL_MAX_RETRIES") ? Number(getEnv("GRAPHQL_MAX_RETRIES")) : undefined,
@@ -37,6 +39,7 @@ const baseConnect = () =>
     CU_URL: getEnv("CU_URL"),
     SCHEDULER: getEnv("SCHEDULER"),
   });
+};
 
 export async function deployModule(walletOrPath: WalletSource, moduleSrc: string, tags: Tag[] = []): Promise<DeployResponse> {
   const wallet = await resolveWallet(walletOrPath);
@@ -90,7 +93,7 @@ export async function spawnProcess(
   moduleOverride?: string,
 ): Promise<SpawnResponse> {
   const wallet = await resolveWallet();
-  const moduleTx = moduleOverride?.trim() || getEnv("AO_MODULE_TX") ?? getEnv("VITE_AO_MODULE_TX");
+  const moduleTx = moduleOverride?.trim() ?? getEnv("AO_MODULE_TX") ?? getEnv("VITE_AO_MODULE_TX");
   const mergedTags = mergeTags(
     [
       { name: "Type", value: "Process" },
