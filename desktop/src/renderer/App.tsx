@@ -1465,6 +1465,22 @@ function App() {
     input.click();
   };
 
+  const handleExportPipVaultRecords = () => {
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      count: pipVaultRecords.length,
+      records: pipVaultRecords,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `pip-vault-records-${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    flashStatus(`Exported ${pipVaultRecords.length} record${pipVaultRecords.length === 1 ? "" : "s"}`);
+  };
+
   const handleClearPipVault = async () => {
     setPipVaultBusy(true);
     try {
@@ -2903,6 +2919,9 @@ function App() {
                     Clear
                   </button>
                 )}
+                <button className="ghost small" onClick={handleExportPipVaultRecords} disabled={!pipVaultRecords.length}>
+                  Export JSON
+                </button>
               </div>
             </div>
             <div className="pip-vault-table-wrap">
