@@ -41,6 +41,18 @@ const resolveWorkerBase = () =>
 
 const resolveAoBase = () => normalizeBase(readEnv("AO_URL"));
 
+const resolvePingTimeoutMs = () => {
+  const raw =
+    readEnv("HEALTH_PING_TIMEOUT_MS") ??
+    readEnv("HEALTH_TIMEOUT_MS") ??
+    readEnv("PING_TIMEOUT_MS");
+  if (!raw) return 5000;
+
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 5000;
+  return Math.round(parsed);
+};
+
 const buildPingUrl = (base: string, path?: string) => {
   const url = new URL(base);
   const normalizedPath = path?.trim() ? path.trim() : "/health";
@@ -109,6 +121,36 @@ const makeSuccess = (
   ...(lastError ? { lastError } : {}),
 });
 
+const timeoutDetail = (timeoutMs: number) => `Request timed out after ${Math.round(timeoutMs / 1000)}s`;
+
+const isAbortError = (err: unknown) =>
+  err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
+
+const fetchWithTimeout = async (
+  fetcher: Fetcher,
+  url: string,
+  method: "HEAD" | "GET",
+  timeoutMs: number,
+) => {
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timeoutId =
+    controller && timeoutMs > 0
+      ? globalThis.setTimeout(() => controller.abort(), timeoutMs)
+      : null;
+
+  try {
+    return await fetcher(url, {
+      method,
+      headers: { accept: "application/json" },
+      signal: controller?.signal,
+    });
+  } finally {
+    if (timeoutId !== null) {
+      globalThis.clearTimeout(timeoutId);
+    }
+  }
+};
+
 const ping = async (
   id: HealthId,
   label: string,
@@ -128,12 +170,8 @@ const ping = async (
 
   const checkedAt = nowIso();
   const started = nowMs();
-
-  const request = async (method: "HEAD" | "GET") =>
-    fetcher(url, {
-      method,
-      headers: { accept: "application/json" },
-    });
+  const timeoutMs = resolvePingTimeoutMs();
+  const request = async (method: "HEAD" | "GET") => fetchWithTimeout(fetcher, url, method, timeoutMs);
 
   let headFailure: string | undefined;
 
@@ -158,7 +196,11 @@ const ping = async (
 
     headFailure = `HTTP ${headRes.status}`;
   } catch (err) {
-    headFailure = err instanceof Error ? err.message : `${label} HEAD request failed`;
+    headFailure = isAbortError(err)
+      ? timeoutDetail(timeoutMs)
+      : err instanceof Error
+        ? err.message
+        : `${label} HEAD request failed`;
   }
 
   try {
@@ -211,9 +253,13 @@ const ping = async (
       label,
       url,
       checkedAt,
-      message,
+      isAbortError(err) ? timeoutDetail(timeoutMs) : message,
       undefined,
-      headFailure ? `HEAD failed: ${headFailure}; GET failed: ${message}` : message,
+      headFailure
+        ? `HEAD failed: ${headFailure}; GET failed: ${isAbortError(err) ? timeoutDetail(timeoutMs) : message}`
+        : isAbortError(err)
+          ? timeoutDetail(timeoutMs)
+          : message,
     );
   }
 };

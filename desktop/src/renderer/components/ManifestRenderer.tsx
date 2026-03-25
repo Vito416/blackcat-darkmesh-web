@@ -9,6 +9,9 @@ interface ManifestRendererProps {
   manifest: ManifestDocument;
   selectedId?: string | null;
   onSelect?: (nodeId: string) => void;
+  dropTargetId?: string | null;
+  onDropTargetChange?: (nodeId: string | null) => void;
+  onDropCatalogItem?: (targetId: string, itemId: string) => void;
 }
 
 const formatValue = (value: ManifestValue): string => {
@@ -88,17 +91,55 @@ const RenderBranch: React.FC<{
   entryId?: string;
   selectedId?: string | null;
   onSelect?: (id: string) => void;
-}> = ({ node, entryId, selectedId, onSelect }) => {
+  dropTargetId?: string | null;
+  onDropTargetChange?: (nodeId: string | null) => void;
+  onDropCatalogItem?: (targetId: string, itemId: string) => void;
+}> = ({ node, entryId, selectedId, onSelect, dropTargetId, onDropTargetChange, onDropCatalogItem }) => {
   const isSelected = node.id === selectedId;
   const isEntry = node.id === entryId;
+  const isDropTarget = node.id === dropTargetId;
+
+  const hasCatalogDrag = (event: React.DragEvent<HTMLElement>) =>
+    Array.from(event.dataTransfer.types ?? []).includes("application/x-blackcat-block");
 
   return (
     <div className="tree-branch">
       <article
-        className={`tree-card ${isSelected ? "selected" : ""}`}
+        className={`tree-card ${isSelected ? "selected" : ""} ${isDropTarget ? "drop-target" : ""}`}
         onClick={() => onSelect?.(node.id)}
         role="button"
         tabIndex={0}
+        onDragEnter={(event) => {
+          if (!hasCatalogDrag(event)) return;
+          event.preventDefault();
+          event.stopPropagation();
+          onDropTargetChange?.(node.id);
+        }}
+        onDragOver={(event) => {
+          if (!hasCatalogDrag(event)) return;
+          event.preventDefault();
+          event.stopPropagation();
+          event.dataTransfer.dropEffect = "copy";
+          onDropTargetChange?.(node.id);
+        }}
+        onDragLeave={(event) => {
+          if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+          if (isDropTarget) {
+            onDropTargetChange?.(null);
+          }
+        }}
+        onDrop={(event) => {
+          if (!hasCatalogDrag(event)) return;
+          event.preventDefault();
+          event.stopPropagation();
+          const itemId =
+            event.dataTransfer.getData("application/x-blackcat-block") ||
+            event.dataTransfer.getData("text/plain");
+          if (itemId) {
+            onDropCatalogItem?.(node.id, itemId);
+          }
+          onDropTargetChange?.(null);
+        }}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
@@ -106,6 +147,7 @@ const RenderBranch: React.FC<{
           }
         }}
       >
+        {isDropTarget && <div className="tree-drop-hint">Drop as child</div>}
         <div className="card-top">
           <div className="node-tags">
             <span className="pill ghost">{node.type || "node"}</span>
@@ -116,7 +158,9 @@ const RenderBranch: React.FC<{
         <h4>{node.title || "Untitled node"}</h4>
         <PropsPreview props={node.props} />
         {node.children?.length ? (
-          <p className="node-foot">{node.children.length} child{node.children.length > 1 ? "ren" : ""}</p>
+          <p className="node-foot">
+            {node.children.length} child{node.children.length > 1 ? "ren" : ""}
+          </p>
         ) : (
           <p className="node-foot muted">Leaf</p>
         )}
@@ -131,6 +175,9 @@ const RenderBranch: React.FC<{
               entryId={entryId}
               selectedId={selectedId}
               onSelect={onSelect}
+              dropTargetId={dropTargetId}
+              onDropTargetChange={onDropTargetChange}
+              onDropCatalogItem={onDropCatalogItem}
             />
           ))}
         </div>
@@ -139,7 +186,14 @@ const RenderBranch: React.FC<{
   );
 };
 
-const ManifestRenderer: React.FC<ManifestRendererProps> = ({ manifest, selectedId, onSelect }) => {
+const ManifestRenderer: React.FC<ManifestRendererProps> = ({
+  manifest,
+  selectedId,
+  onSelect,
+  dropTargetId,
+  onDropTargetChange,
+  onDropCatalogItem,
+}) => {
   const { roots, orphans } = useMemo(() => {
     const index = new Map((manifest.nodes as NodeWithRefs[]).map((node) => [node.id, node]));
 
@@ -180,7 +234,16 @@ const ManifestRenderer: React.FC<ManifestRendererProps> = ({ manifest, selectedI
   return (
     <div className="manifest-renderer">
       {roots.map((node) => (
-        <RenderBranch key={node.id} node={node} entryId={manifest.entry} selectedId={selectedId} onSelect={onSelect} />
+        <RenderBranch
+          key={node.id}
+          node={node}
+          entryId={manifest.entry}
+          selectedId={selectedId}
+          onSelect={onSelect}
+          dropTargetId={dropTargetId}
+          onDropTargetChange={onDropTargetChange}
+          onDropCatalogItem={onDropCatalogItem}
+        />
       ))}
 
       {orphans.length > 0 && (
@@ -194,6 +257,9 @@ const ManifestRenderer: React.FC<ManifestRendererProps> = ({ manifest, selectedI
                 entryId={manifest.entry}
                 selectedId={selectedId}
                 onSelect={onSelect}
+                dropTargetId={dropTargetId}
+                onDropTargetChange={onDropTargetChange}
+                onDropCatalogItem={onDropCatalogItem}
               />
             ))}
           </div>

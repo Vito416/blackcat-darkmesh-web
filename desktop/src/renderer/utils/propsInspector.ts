@@ -9,6 +9,12 @@ export interface PropsDiffEntry {
   after?: unknown;
 }
 
+export interface PropsDiffGroups {
+  added: PropsDiffEntry[];
+  removed: PropsDiffEntry[];
+  changed: PropsDiffEntry[];
+}
+
 export interface PropsValidationIssue {
   path: string;
   message: string;
@@ -247,6 +253,27 @@ export const validate = (schema: PropsSchema | undefined, value: unknown): Props
     valid: issues.length === 0,
     issues,
   };
+};
+
+export const groupDiffEntries = (entries: PropsDiffEntry[]): PropsDiffGroups =>
+  entries.reduce<PropsDiffGroups>(
+    (acc, entry) => {
+      acc[entry.kind].push(entry);
+      return acc;
+    },
+    { added: [], removed: [], changed: [] },
+  );
+
+export const indexValidationIssues = (issues: PropsValidationIssue[]): Map<string, PropsValidationIssue[]> => {
+  const grouped = new Map<string, PropsValidationIssue[]>();
+
+  for (const issue of issues) {
+    const current = grouped.get(issue.path) ?? [];
+    current.push(issue);
+    grouped.set(issue.path, current);
+  }
+
+  return grouped;
 };
 
 export const diff = (before: unknown, after: unknown, path = ""): PropsDiffEntry[] => {

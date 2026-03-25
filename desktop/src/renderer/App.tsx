@@ -12,6 +12,7 @@ import {
   loadPipFromWorker,
   savePipToVault,
 } from "./services/pipWorkflow";
+import { describePipVault } from "./services/pipVault";
 import type { PipDocument } from "./services/pipValidation";
 import {
   CatalogItem,
@@ -32,7 +33,15 @@ import {
 } from "./storage/drafts";
 import { fetchWalletFromPath, parseWalletJson } from "./services/wallet";
 import CommandPalette, { type CommandPaletteAction } from "./components/CommandPalette";
-import { diff, mergeDefaults, validate } from "./utils/propsInspector";
+import {
+  diff,
+  groupDiffEntries,
+  indexValidationIssues,
+  mergeDefaults,
+  validate,
+  type PropsDiffEntry,
+  type PropsValidationIssue,
+} from "./utils/propsInspector";
 
 const randomId = () => crypto.randomUUID?.() ?? Math.random().toString(36).slice(2, 10);
 
@@ -75,6 +84,12 @@ const formatTime = (iso?: string) =>
   iso
     ? new Date(iso).toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
     : "—";
+const abbreviateTx = (value?: string | null) =>
+  value ? (value.length > 18 ? `${value.slice(0, 10)}…${value.slice(-6)}` : value) : "—";
+const normalizeText = (value: unknown) => (typeof value === "string" ? value.trim() : "");
+
+const formatTimeShort = (iso?: string) =>
+  iso ? new Date(iso).toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit" }) : "—";
 
 const formatHost = (value?: string) => {
   if (!value) return "";
@@ -115,9 +130,23 @@ const getLatestHealthError = (health: HealthStatus[]) =>
     .filter((item) => item.lastError)
     .sort(healthSortByCheckedAtDesc)[0];
 
-const healthSummaryLabel = (item?: HealthStatus) => {
-  if (!item) return "";
-  return `${item.label} ${healthStatusLabel(item.status)}`;
+const formatHealthRecap = (health: HealthStatus[]): string => {
+  const parts: string[] = [];
+  const latestSuccess = getLatestHealthSuccess(health);
+  const latestError = getLatestHealthError(health);
+
+  if (latestSuccess) {
+    parts.push(`Last OK ${latestSuccess.id} ${formatTimeShort(latestSuccess.lastSuccessAt ?? latestSuccess.checkedAt)}`);
+  }
+
+  if (latestError) {
+    const message = latestError.lastError?.trim() || latestError.detail?.trim();
+    parts.push(
+      `Last error ${latestError.id} ${formatTimeShort(latestError.checkedAt)}${message ? ` (${message})` : ""}`,
+    );
+  }
+
+  return parts.join(" · ");
 };
 
 const mergeHealthResults = (previous: HealthStatus[], next: HealthStatus[]): HealthStatus[] => {
@@ -160,6 +189,17 @@ type FileBridgeResult = {
 type Theme = "light" | "cyberpunk";
 type WalletMode = "ipc" | "path" | "jwk";
 type TaskState = "idle" | "pending" | "success" | "error";
+type PipVaultSnapshot = {
+  exists: boolean;
+  updatedAt?: string;
+  encrypted: boolean;
+  path: string;
+};
+type PipVaultIssue = {
+  field: string;
+  message: string;
+  severity: "error" | "warn";
+};
 
 const THEME_STORAGE_KEY = "darkmesh-theme";
 const getEnv = (key: string): string | undefined => {
@@ -247,6 +287,32 @@ const updateNodeInTree = (
   return changed ? updated : nodes;
 };
 
+const appendNodeToTree = (nodes: ManifestNode[], targetId: string, child: ManifestNode): ManifestNode[] => {
+  let changed = false;
+
+  const updated = nodes.map((node) => {
+    const nextChildren = node.children ? appendNodeToTree(node.children, targetId, child) : node.children;
+    const childrenChanged = node.children ? nextChildren !== node.children : false;
+
+    if (node.id === targetId) {
+      changed = true;
+      return {
+        ...node,
+        children: [...(node.children ?? []), child],
+      };
+    }
+
+    if (childrenChanged) {
+      changed = true;
+      return { ...node, children: nextChildren };
+    }
+
+    return node;
+  });
+
+  return changed ? updated : nodes;
+};
+
 const countNodes = (nodes: ManifestNode[]): number =>
   nodes.reduce((total, node) => total + 1 + (node.children ? countNodes(node.children) : 0), 0);
 
@@ -301,6 +367,75 @@ const BlockPlaceholder: React.FC<{ type: string }> = ({ type }) => {
   );
 };
 
+const formatPropsValue = (value: unknown): string => {
+  if (value === undefined) return "undefined";
+  if (value === null) return "null";
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+
+  try {
+    const json = JSON.stringify(value);
+    if (!json) return String(value);
+    return json.length > 96 ? `${json.slice(0, 93)}...` : json;
+  } catch {
+    return String(value);
+  }
+};
+
+const getIssueLabel = (issues: PropsValidationIssue[]): string =>
+  issues.length === 1 ? "1 issue" : `${issues.length} issues`;
+
+const DiffGroup: React.FC<{
+  label: string;
+  kind: PropsDiffEntry["kind"];
+  entries: PropsDiffEntry[];
+  showOverrides: boolean;
+  issuesByPath: Map<string, PropsValidationIssue[]>;
+}> = ({ label, kind, entries, showOverrides, issuesByPath }) => (
+  <section className={`diff-group ${kind}`}>
+    <div className="diff-group-head">
+      <div className="diff-group-title">
+        <span>{label}</span>
+        <span className="badge ghost">{entries.length}</span>
+      </div>
+      <span className={`badge ${kind}`}>{kind}</span>
+    </div>
+    {entries.length ? (
+      <div className="diff-list">
+        {entries.map((entry) => {
+          const issues = issuesByPath.get(entry.path) ?? [];
+          return (
+            <div key={`${entry.kind}-${entry.path}`} className={`diff-row ${entry.kind} ${issues.length ? "has-issues" : ""}`}>
+              <div className="diff-row-head">
+                <span className="diff-path">{entry.path || "root"}</span>
+                {issues.length ? <span className="badge issue">{getIssueLabel(issues)}</span> : null}
+              </div>
+              {showOverrides ? (
+                <div className="diff-values">
+                  {entry.kind !== "added" ? (
+                    <div className="diff-value-block">
+                      <span className="diff-value-label">Before</span>
+                      <code className="diff-value before">{formatPropsValue(entry.before)}</code>
+                    </div>
+                  ) : null}
+                  {entry.kind !== "removed" ? (
+                    <div className="diff-value-block">
+                      <span className="diff-value-label">After</span>
+                      <code className="diff-value after">{formatPropsValue(entry.after)}</code>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    ) : (
+      <p className="hint">No {label.toLowerCase()} fields.</p>
+    )}
+  </section>
+);
+
 function App() {
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
   const [catalog, setCatalog] = useState<CatalogItem[]>(seedCatalog);
@@ -314,6 +449,7 @@ function App() {
   const [drafts, setDrafts] = useState<ManifestDraft[]>([]);
   const [activeDraftId, setActiveDraftId] = useState<number | null>(null);
   const [savedSignature, setSavedSignature] = useState<string>(() => manifestSignature(initialManifest));
+  const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [pip, setPip] = useState<PipDocument | null>(null);
@@ -321,6 +457,7 @@ function App() {
   const [loadingManifest, setLoadingManifest] = useState(false);
   const [pipVaultStatus, setPipVaultStatus] = useState<string | null>(null);
   const [pipVaultBusy, setPipVaultBusy] = useState(false);
+  const [pipVaultSnapshot, setPipVaultSnapshot] = useState<PipVaultSnapshot | null>(null);
   const [health, setHealth] = useState<HealthStatus[]>([]);
   const [healthLoading, setHealthLoading] = useState(false);
   const [healthExpanded, setHealthExpanded] = useState(false);
@@ -339,6 +476,7 @@ function App() {
   const [walletPath, setWalletPath] = useState<string | null>(null);
   const [walletJwk, setWalletJwk] = useState<Record<string, unknown> | null>(null);
   const [walletNote, setWalletNote] = useState<string | null>(null);
+  const [showOverrides, setShowOverrides] = useState(true);
   const [modulePath, setModulePath] = useState("");
   const [moduleSource, setModuleSource] = useState("");
   const [manifestTxInput, setManifestTxInput] = useState("");
@@ -361,6 +499,7 @@ function App() {
   const [paletteQuery, setPaletteQuery] = useState("");
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [compositionDropActive, setCompositionDropActive] = useState(false);
+  const [treeDropTargetId, setTreeDropTargetId] = useState<string | null>(null);
   const [draggedCatalogId, setDraggedCatalogId] = useState<string | null>(null);
 
   const paletteInputRef = useRef<HTMLInputElement>(null);
@@ -418,7 +557,35 @@ function App() {
     () => catalog.filter((item) => matchesCatalogFilters(item, activeTypes, activeTags)),
     [activeTags, activeTypes, catalog],
   );
-  const saveStatusLabel = saving ? "Saving…" : isDirty ? "Unsaved changes" : "Autosaved";
+  const saveStatusLabel = saving ? "Saving…" : isDirty ? "Unsaved changes" : "Draft saved";
+  const saveStatusTime = lastSavedAt ? formatTime(lastSavedAt) : "Never saved";
+  const pipVaultValidationIssues = useMemo<PipVaultIssue[]>(() => {
+    if (!pip) {
+      return [{ field: "vault", message: "Load or fetch a PIP to inspect vault validation", severity: "warn" }];
+    }
+
+    const issues: PipVaultIssue[] = [];
+    const manifestTx = normalizeText(pip.manifestTx);
+
+    if (!manifestTx) {
+      issues.push({ field: "manifestTx", message: "manifestTx is required before saving", severity: "error" });
+    }
+
+    if (pip.tenant != null && typeof pip.tenant !== "string") {
+      issues.push({ field: "tenant", message: "tenant must be a string", severity: "error" });
+    } else if (!normalizeText(pip.tenant)) {
+      issues.push({ field: "tenant", message: "tenant is empty", severity: "warn" });
+    }
+
+    if (pip.site != null && typeof pip.site !== "string") {
+      issues.push({ field: "site", message: "site must be a string", severity: "error" });
+    } else if (!normalizeText(pip.site)) {
+      issues.push({ field: "site", message: "site is empty", severity: "warn" });
+    }
+
+    return issues;
+  }, [pip]);
+  const pipVaultBlockingIssues = pipVaultValidationIssues.filter((issue) => issue.severity === "error");
   const propsInspection = useMemo(() => {
     if (!selectedNode) {
       return null;
@@ -441,6 +608,8 @@ function App() {
     const validation = parseError ? null : validate(selectedCatalogItem?.propsSchema, parsed);
     const diffEntries = parseError || !isPlainObject(parsed) ? [] : diff(defaults, parsed);
     const issues = parseError ? [{ path: "", message: parseError }] : validation?.issues ?? [];
+    const issuesByPath = indexValidationIssues(issues);
+    const diffGroups = groupDiffEntries(diffEntries);
     const diffSummary = diffEntries.reduce(
       (acc, entry) => {
         acc[entry.kind] += 1;
@@ -454,7 +623,10 @@ function App() {
       parsed: isPlainObject(parsed) ? (parsed as ManifestShape) : null,
       validation,
       diffEntries,
+      diffGroups,
       diffSummary,
+      issues,
+      issuesByPath,
       errorMessage: issues[0]?.message ?? null,
       issueCount: issues.length,
       parseError: Boolean(parseError),
@@ -491,6 +663,17 @@ function App() {
     setTheme((current) => (current === "cyberpunk" ? "light" : "cyberpunk"));
   }, []);
 
+  const refreshPipVaultSnapshot = useCallback(async () => {
+    const result = await describePipVault();
+    if (result.ok) {
+      setPipVaultSnapshot(result);
+      return result;
+    }
+
+    setPipVaultStatus(result.error);
+    return null;
+  }, []);
+
   useEffect(() => {
     fetchCatalog().then(setCatalog);
     refreshDrafts(true);
@@ -504,9 +687,6 @@ function App() {
   useEffect(() => {
     refreshHealth();
   }, [refreshHealth]);
-
-  const latestHealthSuccess = getLatestHealthSuccess(health);
-  const latestHealthError = getLatestHealthError(health);
 
   useEffect(() => {
     if (selectedNode) {
@@ -539,6 +719,7 @@ function App() {
         setManifest(normalized);
         setActiveDraftId(null);
         setSavedSignature(manifestSignature(normalized));
+        setLastSavedAt(normalized.metadata.updatedAt);
         setSelectedNodeId(normalized.entry ?? normalized.nodes[0]?.id ?? null);
         flashStatus("Manifest loaded from gateway");
       })
@@ -568,8 +749,12 @@ function App() {
     let cancelled = false;
 
     const hydratePipVault = async () => {
-      const result = await loadPipFromVault();
+      const [vaultDescription, result] = await Promise.all([describePipVault(), loadPipFromVault()]);
       if (cancelled) return;
+
+      if (vaultDescription.ok) {
+        setPipVaultSnapshot(vaultDescription);
+      }
 
       if (result.ok) {
         setPip(result.pip);
@@ -646,6 +831,7 @@ function App() {
       setManifest(latest.document);
       setActiveDraftId(latest.id ?? null);
       setSavedSignature(manifestSignature(latest.document));
+      setLastSavedAt(latest.updatedAt);
       setSelectedNodeId(latest.document.entry ?? latest.document.nodes[0]?.id ?? null);
       flashStatus("Loaded latest draft");
     }
@@ -657,6 +843,7 @@ function App() {
     setActiveDraftId(null);
     setSelectedNodeId(null);
     setSavedSignature(manifestSignature(next));
+    setLastSavedAt(null);
     if (message) {
       flashStatus(message);
     }
@@ -685,6 +872,7 @@ function App() {
         setDrafts((current) => upsertDraftRow(current, saved));
         setActiveDraftId(saved.id ?? null);
         setSavedSignature(manifestSignature(saved.document));
+        setLastSavedAt(saved.updatedAt);
 
         if (mode === "duplicate" || manifestSignature(manifestRef.current) === snapshotSignature) {
           setManifest(saved.document);
@@ -729,16 +917,8 @@ function App() {
 
         setPip(parsed.pip);
         setRemoteError(null);
-        setPipVaultStatus("PIP ready for vault sync");
+        setPipVaultStatus("PIP loaded; save it from the vault panel when ready");
         flashStatus("PIP loaded");
-
-        const saved = await savePipToVault(parsed.pip);
-        if (saved.ok) {
-          setPipVaultStatus(`Vault saved ${formatDate(saved.updatedAt)}`);
-        } else {
-          setPipVaultStatus(saved.error);
-          flashStatus(saved.error);
-        }
       } catch (err) {
         const message = err instanceof Error ? err.message : "Unable to parse PIP";
         setRemoteError(message);
@@ -769,16 +949,8 @@ function App() {
       }
 
       setPip(loaded.pip);
-      setPipVaultStatus("PIP ready for vault sync");
+      setPipVaultStatus("PIP loaded; save it from the vault panel when ready");
       flashStatus(`PIP loaded (${loaded.pip.manifestTx})`);
-
-      const saved = await savePipToVault(loaded.pip);
-      if (saved.ok) {
-        setPipVaultStatus(`Vault saved ${formatDate(saved.updatedAt)}`);
-      } else {
-        setPipVaultStatus(saved.error);
-        flashStatus(saved.error);
-      }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to fetch PIP";
       setRemoteError(message);
@@ -803,6 +975,7 @@ function App() {
       setRemoteError(null);
       setPipVaultStatus("Vault loaded");
       flashStatus("PIP loaded from vault");
+      await refreshPipVaultSnapshot();
     } finally {
       setPipVaultBusy(false);
     }
@@ -816,6 +989,13 @@ function App() {
       return;
     }
 
+    if (pipVaultBlockingIssues.length > 0) {
+      const message = "Fix validation issues before saving to vault";
+      setPipVaultStatus(message);
+      flashStatus(message);
+      return;
+    }
+
     setPipVaultBusy(true);
     try {
       const saved = await savePipToVault(pip);
@@ -823,6 +1003,7 @@ function App() {
         const message = `Vault saved ${formatDate(saved.updatedAt)}`;
         setPipVaultStatus(message);
         flashStatus("PIP saved to vault");
+        await refreshPipVaultSnapshot();
       } else {
         setPipVaultStatus(saved.error);
         flashStatus(saved.error);
@@ -842,8 +1023,9 @@ function App() {
         return;
       }
 
-      setPipVaultStatus("Vault cleared");
-      flashStatus("PIP vault cleared");
+      setPipVaultStatus("Vault deleted");
+      flashStatus("PIP vault deleted");
+      await refreshPipVaultSnapshot();
     } finally {
       setPipVaultBusy(false);
     }
@@ -1187,11 +1369,30 @@ function App() {
     flashStatus(`${item.name} added to manifest`);
   };
 
+  const addChildFromCatalog = (parentId: string, item: CatalogItem) => {
+    const node = fromCatalog(item);
+    setManifest((prev) =>
+      touch({
+        ...prev,
+        nodes: appendNodeToTree(prev.nodes, parentId, node),
+      }),
+    );
+    setSelectedNodeId(node.id);
+    flashStatus(`${item.name} added as child`);
+  };
+
   const handleCatalogDragStart = (item: CatalogItem, event: React.DragEvent<HTMLDivElement>) => {
     event.dataTransfer.effectAllowed = "copy";
     event.dataTransfer.setData("application/x-blackcat-block", item.id);
     event.dataTransfer.setData("text/plain", item.id);
     setDraggedCatalogId(item.id);
+    setTreeDropTargetId(null);
+  };
+
+  const handleCatalogDragEnd = () => {
+    setDraggedCatalogId(null);
+    setCompositionDropActive(false);
+    setTreeDropTargetId(null);
   };
 
   const handleCompositionDragOver = (event: React.DragEvent<HTMLElement>) => {
@@ -1208,6 +1409,7 @@ function App() {
   const handleCompositionDrop = (event: React.DragEvent<HTMLElement>) => {
     event.preventDefault();
     setCompositionDropActive(false);
+    setTreeDropTargetId(null);
     const itemId =
       event.dataTransfer.getData("application/x-blackcat-block") || event.dataTransfer.getData("text/plain");
     if (!itemId) return;
@@ -1219,6 +1421,16 @@ function App() {
     }
 
     addFromCatalog(dropped);
+  };
+
+  const handleTreeDrop = (targetId: string, itemId: string) => {
+    const dropped = catalog.find((entry) => entry.id === itemId) ?? seedCatalog.find((entry) => entry.id === itemId);
+    if (!dropped) {
+      flashStatus("Dropped block not found");
+      return;
+    }
+
+    addChildFromCatalog(targetId, dropped);
   };
 
   const updateNodeTitle = (title: string) => {
@@ -1285,6 +1497,7 @@ function App() {
       setManifest(draft.document);
       setActiveDraftId(id);
       setSavedSignature(manifestSignature(draft.document));
+      setLastSavedAt(draft.updatedAt);
       setSelectedNodeId(draft.document.entry ?? draft.document.nodes[0]?.id ?? null);
       flashStatus("Draft loaded");
     }
@@ -1394,10 +1607,17 @@ function App() {
   const paletteActions: CommandPaletteAction[] = [
     {
       id: "toggle-theme",
-      label: theme === "cyberpunk" ? "Switch to light skin" : "Switch to cyberpunk skin",
-      description: "Flip the active renderer theme.",
-      shortcut: "Cmd/Ctrl+K",
+      label: "Toggle cyberpunk",
+      description: theme === "cyberpunk" ? "Switch back to the light skin." : "Enable the cyberpunk skin.",
+      shortcut: "Alt+C",
       run: toggleTheme,
+    },
+    {
+      id: "toggle-health",
+      label: healthExpanded ? "Collapse health" : "Expand health",
+      description: "Show or hide the diagnostics panel.",
+      shortcut: "Alt+H",
+      run: () => setHealthExpanded((open) => !open),
     },
     {
       id: "new-draft",
@@ -1405,6 +1625,13 @@ function App() {
       description: "Start from a blank manifest.",
       shortcut: "N",
       run: () => startNewDraft("New draft started"),
+    },
+    {
+      id: "duplicate-draft",
+      label: "Duplicate draft",
+      description: "Save a copy of the current draft.",
+      shortcut: "Alt+N",
+      run: () => void handleDuplicateDraft(),
     },
     {
       id: "save-draft",
@@ -1435,6 +1662,13 @@ function App() {
       run: () => void handleSavePipToVault(),
     },
     {
+      id: "export-drafts",
+      label: "Export drafts",
+      description: "Download all saved drafts as JSON.",
+      shortcut: "Shift+E",
+      run: () => void handleExportDrafts(),
+    },
+    {
       id: "export-manifest",
       label: "Export manifest",
       description: "Download the current manifest as JSON.",
@@ -1457,10 +1691,47 @@ function App() {
     const handleKeydown = (event: KeyboardEvent) => {
       const key = event.key?.toLowerCase();
       const isPaletteShortcut = key === "k" && (event.metaKey || event.ctrlKey);
+      const isAltShortcut = event.altKey && !event.metaKey && !event.ctrlKey && !event.shiftKey;
 
       if (isPaletteShortcut) {
         event.preventDefault();
         togglePalette();
+        return;
+      }
+
+      if (isAltShortcut && key === "n") {
+        event.preventDefault();
+        void runPaletteAction({
+          id: "duplicate-draft",
+          label: "Duplicate draft",
+          description: "Save a copy of the current draft.",
+          shortcut: "Alt+N",
+          run: () => void handleDuplicateDraft(),
+        });
+        return;
+      }
+
+      if (isAltShortcut && key === "h") {
+        event.preventDefault();
+        void runPaletteAction({
+          id: "toggle-health",
+          label: healthExpanded ? "Collapse health" : "Expand health",
+          description: "Show or hide the diagnostics panel.",
+          shortcut: "Alt+H",
+          run: () => setHealthExpanded((open) => !open),
+        });
+        return;
+      }
+
+      if (isAltShortcut && key === "c") {
+        event.preventDefault();
+        void runPaletteAction({
+          id: "toggle-theme",
+          label: "Toggle cyberpunk",
+          description: "Flip the active renderer theme.",
+          shortcut: "Alt+C",
+          run: toggleTheme,
+        });
         return;
       }
 
@@ -1501,7 +1772,17 @@ function App() {
 
     window.addEventListener("keydown", handleKeydown);
     return () => window.removeEventListener("keydown", handleKeydown);
-  }, [closePalette, filteredPaletteActions, paletteOpen, runPaletteAction, safePaletteIndex, togglePalette]);
+  }, [
+    closePalette,
+    handleDuplicateDraft,
+    healthExpanded,
+    paletteOpen,
+    runPaletteAction,
+    safePaletteIndex,
+    togglePalette,
+    toggleTheme,
+    filteredPaletteActions,
+  ]);
 
   return (
     <div className="app-shell">
@@ -1569,22 +1850,7 @@ function App() {
                         </span>
                       ))}
                     </div>
-                    <div className="health-summary-notes">
-                      {latestHealthSuccess && (
-                        <span className="health-summary-note success">
-                          <strong>Last success</strong>
-                          <span>{healthSummaryLabel(latestHealthSuccess)}</span>
-                          <span>{formatTime(latestHealthSuccess.lastSuccessAt)}</span>
-                        </span>
-                      )}
-                      {latestHealthError && (
-                        <span className="health-summary-note error">
-                          <strong>Last error</strong>
-                          <span>{healthSummaryLabel(latestHealthError)}</span>
-                          <span>{formatTime(latestHealthError.checkedAt)}</span>
-                        </span>
-                      )}
-                    </div>
+                    <div className="health-summary-recap">{formatHealthRecap(health)}</div>
                   </>
                 )}
               </div>
@@ -1655,7 +1921,7 @@ function App() {
               {pipVaultBusy ? "Vault…" : "Load vault"}
             </button>
             <button className="ghost" onClick={handleClearPipVault} disabled={pipVaultBusy}>
-              {pipVaultBusy ? "Vault…" : "Clear vault"}
+              {pipVaultBusy ? "Vault…" : "Delete vault"}
             </button>
             <button
               className="ghost"
@@ -1675,7 +1941,13 @@ function App() {
             <button className="ghost" onClick={handleDuplicateDraft} disabled={saving}>
               Duplicate draft
             </button>
-            <span className={`pill save-status ${saving ? "busy" : "ghost"}`}>{saveStatusLabel}</span>
+            <span
+              className={`pill save-status ${saving ? "busy" : isDirty ? "dirty" : "saved"}`}
+              title={lastSavedAt ? `Last saved ${formatDate(lastSavedAt)}` : "This draft has not been saved yet"}
+            >
+              <span className="save-status-label">{saveStatusLabel}</span>
+              <span className="save-status-time">{saveStatusTime}</span>
+            </span>
             <button className="primary" onClick={handleSaveDraft} disabled={saving}>
               {saving ? "Saving…" : "Save draft"}
             </button>
@@ -1683,6 +1955,129 @@ function App() {
           </div>
         </div>
       </header>
+
+      <section className="panel pip-vault-panel">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">PIP vault</p>
+            <h3>Local vault panel</h3>
+          </div>
+          <div className="pip-vault-header-actions">
+            <span className={`pill ${pipVaultSnapshot?.exists ? "accent" : "ghost"}`}>
+              {pipVaultSnapshot?.exists ? "Vault present" : "Vault empty"}
+            </span>
+            <span className="pill ghost">
+              {pipVaultBlockingIssues.length ? `${pipVaultBlockingIssues.length} blocking issue${pipVaultBlockingIssues.length === 1 ? "" : "s"}` : "Ready to save"}
+            </span>
+          </div>
+        </div>
+        <div className="pip-vault-grid">
+          <article className="pip-vault-card">
+            <div className="stack-head">
+              <div>
+                <p className="eyebrow">Snapshot</p>
+                <h4>Vault metadata</h4>
+              </div>
+              <span className={`pill ${pipVaultSnapshot?.encrypted ? "accent" : "ghost"}`}>
+                {pipVaultSnapshot?.encrypted ? "Encrypted" : "Unknown"}
+              </span>
+            </div>
+            <dl className="pip-vault-list">
+              <div>
+                <dt>Path</dt>
+                <dd className="mono">{pipVaultSnapshot?.path ?? "Loading..."}</dd>
+              </div>
+              <div>
+                <dt>Status</dt>
+                <dd>{pipVaultSnapshot ? (pipVaultSnapshot.exists ? "Stored locally" : "No vault file") : "Inspecting..."}</dd>
+              </div>
+              <div>
+                <dt>Updated</dt>
+                <dd>{pipVaultSnapshot?.updatedAt ? formatDate(pipVaultSnapshot.updatedAt) : "—"}</dd>
+              </div>
+              <div>
+                <dt>Current PIP</dt>
+                <dd>{pip ? `${normalizeText(pip.tenant) || "tenant?"} / ${normalizeText(pip.site) || "site?"}` : "No PIP loaded"}</dd>
+              </div>
+            </dl>
+          </article>
+
+          <article className="pip-vault-card">
+            <div className="stack-head">
+              <div>
+                <p className="eyebrow">Active document</p>
+                <h4>Current PIP</h4>
+              </div>
+              <span className={`pill ${pip ? "accent" : "ghost"}`}>{pip ? "Loaded" : "Empty"}</span>
+            </div>
+            <div className="pip-vault-summary">
+              <div>
+                <span>manifestTx</span>
+                <strong className="mono">{abbreviateTx(pip?.manifestTx)}</strong>
+              </div>
+              <div>
+                <span>tenant</span>
+                <strong>{normalizeText(pip?.tenant) || "—"}</strong>
+              </div>
+              <div>
+                <span>site</span>
+                <strong>{normalizeText(pip?.site) || "—"}</strong>
+              </div>
+              <div>
+                <span>Validation</span>
+                <strong>{pipVaultValidationIssues.length ? `${pipVaultValidationIssues.length} issue${pipVaultValidationIssues.length === 1 ? "" : "s"}` : "No issues"}</strong>
+              </div>
+            </div>
+            <div className="pip-vault-actions">
+              <button className="ghost" onClick={handleLoadPipFromVault} disabled={pipVaultBusy}>
+                {pipVaultBusy ? "Vault…" : "Load vault"}
+              </button>
+              <button
+                className="primary"
+                onClick={handleSavePipToVault}
+                disabled={pipVaultBusy || !pip || pipVaultBlockingIssues.length > 0}
+                title={pipVaultBlockingIssues.length ? "Fix blocking validation issues first" : "Save current PIP to the vault"}
+              >
+                {pipVaultBusy ? "Saving…" : "Save to vault"}
+              </button>
+              <button className="ghost" onClick={handleClearPipVault} disabled={pipVaultBusy}>
+                {pipVaultBusy ? "Vault…" : "Delete vault"}
+              </button>
+              <button className="ghost" onClick={() => void refreshPipVaultSnapshot()} disabled={pipVaultBusy}>
+                Refresh
+              </button>
+            </div>
+          </article>
+
+          <article className="pip-vault-card">
+            <div className="stack-head">
+              <div>
+                <p className="eyebrow">Validation</p>
+                <h4>Issues</h4>
+              </div>
+              <span className={`pill ${pipVaultValidationIssues.length ? "issue" : "ghost"}`}>
+                {pipVaultValidationIssues.length ? `${pipVaultValidationIssues.length}` : "Clear"}
+              </span>
+            </div>
+            {pipVaultValidationIssues.length ? (
+              <div className="pip-vault-issues">
+                {pipVaultValidationIssues.map((issue) => (
+                  <div key={`${issue.field}-${issue.message}`} className={`pip-vault-issue ${issue.severity}`}>
+                    <span className={`issue-dot ${issue.severity}`} aria-hidden />
+                    <div>
+                      <strong>{issue.field}</strong>
+                      <p>{issue.message}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="hint">No validation issues on the current PIP.</p>
+            )}
+          </article>
+        </div>
+        {pipVaultStatus && <div className="pip-vault-footer"><span className="pill ghost pip-vault-pill">{pipVaultStatus}</span></div>}
+      </section>
 
       <div className="panels">
         <aside className="panel catalog">
@@ -1749,7 +2144,7 @@ function App() {
                 className={`catalog-item ${draggedCatalogId === item.id ? "is-dragging" : ""}`}
                 draggable
                 onDragStart={(event) => handleCatalogDragStart(item, event)}
-                onDragEnd={() => setDraggedCatalogId(null)}
+                onDragEnd={handleCatalogDragEnd}
                 role="button"
                 tabIndex={0}
                 onKeyDown={(e) => {
@@ -1822,6 +2217,9 @@ function App() {
                 manifest={manifest}
                 selectedId={selectedNodeId}
                 onSelect={(id) => setSelectedNodeId(id)}
+                dropTargetId={treeDropTargetId}
+                onDropTargetChange={setTreeDropTargetId}
+                onDropCatalogItem={handleTreeDrop}
               />
             )}
           </div>
@@ -1850,6 +2248,10 @@ function App() {
                   {propsInspection?.diffEntries.length ?? 0} diff
                   {(propsInspection?.diffEntries.length ?? 0) === 1 ? "" : "s"}
                 </span>
+                <span className="badge ghost">
+                  {propsInspection?.issueCount ?? 0} issue
+                  {(propsInspection?.issueCount ?? 0) === 1 ? "" : "s"}
+                </span>
               </div>
               <label className="field">
                 <span>Title</span>
@@ -1864,8 +2266,19 @@ function App() {
                     onChange={(e) => setPropsDraft(e.target.value)}
                     className={propsInspection && !propsInspection.valid ? "invalid" : ""}
                   />
-                  {propsInspection?.errorMessage ? (
-                    <p className="error">{propsInspection.errorMessage}</p>
+                  {propsInspection?.issues.length ? (
+                    <div className="validation-list">
+                      <div className="validation-list-head">
+                        <span className="eyebrow">Validation</span>
+                        <span className="badge ghost">{propsInspection.issueCount}</span>
+                      </div>
+                      {propsInspection.issues.map((issue) => (
+                        <div key={`${issue.path}:${issue.message}`} className="validation-row">
+                          <span className="badge issue">{issue.path || "root"}</span>
+                          <span className="validation-message">{issue.message}</span>
+                        </div>
+                      ))}
+                    </div>
                   ) : (
                     <p className="hint">Edit as JSON</p>
                   )}
@@ -1873,27 +2286,52 @@ function App() {
                 <div className="diff-summary">
                   <div className="diff-summary-head">
                     <span className="eyebrow">Diff vs defaults</span>
-                    <span className="badge ghost">
-                      +{propsInspection?.diffSummary.added ?? 0} / -{propsInspection?.diffSummary.removed ?? 0} / ~
-                      {propsInspection?.diffSummary.changed ?? 0}
-                    </span>
+                    <label className="toggle">
+                      <input
+                        type="checkbox"
+                        checked={showOverrides}
+                        onChange={(e) => setShowOverrides(e.target.checked)}
+                      />
+                      <span>Show overrides</span>
+                    </label>
                   </div>
                   {propsInspection?.parseError ? (
                     <p className="hint">Fix the JSON above to preview the diff.</p>
-                  ) : propsInspection?.diffEntries.length ? (
-                    <div className="diff-list">
-                      {propsInspection.diffEntries.slice(0, 6).map((entry) => (
-                        <div key={`${entry.kind}-${entry.path}`} className={`diff-row ${entry.kind}`}>
-                          <span className={`diff-kind ${entry.kind}`}>{entry.kind}</span>
-                          <span className="diff-path">{entry.path || "root"}</span>
-                        </div>
-                      ))}
-                      {propsInspection.diffEntries.length > 6 && (
-                        <p className="hint">+{propsInspection.diffEntries.length - 6} more changes</p>
-                      )}
-                    </div>
                   ) : (
-                    <p className="hint">Matches the selected block defaults.</p>
+                    <>
+                      <div className="diff-summary-totals">
+                        <span className="badge added">+{propsInspection?.diffSummary.added ?? 0}</span>
+                        <span className="badge changed">~{propsInspection?.diffSummary.changed ?? 0}</span>
+                        <span className="badge removed">-{propsInspection?.diffSummary.removed ?? 0}</span>
+                      </div>
+                      {propsInspection?.diffEntries.length ? (
+                        <div className="diff-groups">
+                          <DiffGroup
+                            label="Added"
+                            kind="added"
+                            entries={propsInspection.diffGroups.added}
+                            showOverrides={showOverrides}
+                            issuesByPath={propsInspection.issuesByPath}
+                          />
+                          <DiffGroup
+                            label="Changed"
+                            kind="changed"
+                            entries={propsInspection.diffGroups.changed}
+                            showOverrides={showOverrides}
+                            issuesByPath={propsInspection.issuesByPath}
+                          />
+                          <DiffGroup
+                            label="Removed"
+                            kind="removed"
+                            entries={propsInspection.diffGroups.removed}
+                            showOverrides={showOverrides}
+                            issuesByPath={propsInspection.issuesByPath}
+                          />
+                        </div>
+                      ) : (
+                        <p className="hint">Matches the selected block defaults.</p>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
