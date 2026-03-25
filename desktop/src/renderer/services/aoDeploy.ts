@@ -1,8 +1,14 @@
-// Use browser build to avoid Node-only expectations in renderer
-import { connect, createDataItemSigner } from "@permaweb/aoconnect/browser";
-
 import type { ManifestDocument } from "../types/manifest";
 import { fetchWalletFromPath } from "./wallet";
+
+// Lazy-load aoconnect to avoid initializing it on app start (and to keep env assumptions isolated)
+async function loadAo() {
+  const mod = await import("@permaweb/aoconnect/browser");
+  return {
+    connect: mod.connect,
+    createDataItemSigner: mod.createDataItemSigner,
+  };
+}
 
 type Tag = { name: string; value: string };
 
@@ -27,7 +33,7 @@ export type SpawnResponse = {
   moduleTx?: string;
 };
 
-const baseConnect = () => {
+const baseConnect = async () => {
   const modeEnv = getEnv("AO_MODE");
   const mode: "legacy" | "mainnet" = modeEnv === "mainnet" ? "mainnet" : "legacy";
 
@@ -41,6 +47,7 @@ const baseConnect = () => {
     SCHEDULER: getEnv("SCHEDULER"),
   };
 
+  const { connect } = await loadAo();
   return mode === "mainnet"
     ? connect({ MODE: "mainnet", ...common })
     : connect({ MODE: "legacy", ...common });
@@ -69,8 +76,9 @@ export async function deployModule(walletOrPath: WalletSource, moduleSrc: string
     };
   }
 
+  const { createDataItemSigner } = await loadAo();
   const signer = createDataItemSigner(wallet.wallet as Record<string, unknown>);
-  const client = baseConnect();
+  const client = await baseConnect();
   const deploy = (client as unknown as { deploy?: Function }).deploy;
 
   if (!deploy) {
@@ -132,8 +140,9 @@ export async function spawnProcess(
     };
   }
 
+  const { createDataItemSigner } = await loadAo();
   const signer = createDataItemSigner(wallet.wallet as Record<string, unknown>);
-  const client = baseConnect();
+  const client = await baseConnect();
   const spawn = (client as unknown as { spawn?: Function }).spawn;
 
   if (!spawn) {
