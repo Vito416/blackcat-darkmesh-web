@@ -9,6 +9,7 @@
   "devDependencies": {
     "commander": "^11.1.0",
     "node-fetch": "^3.3.2",
-    "tsx": "^4.7.0"
+    "tsx": "^4.7.0",
+    "@types/node": "^22.9.3"
   }
 }
