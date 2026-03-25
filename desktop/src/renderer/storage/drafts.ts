@@ -11,6 +11,8 @@ type DraftInput =
   | ManifestDraft
   | (Omit<ManifestDraft, "updatedAt" | "createdAt"> & Partial<Pick<ManifestDraft, "id" | "createdAt" | "updatedAt">>);
 
+type DraftWriteResult = ManifestDraft;
+
 type DraftRow = ManifestDraft & { schemaVersion: number };
 
 interface DraftExportFile {
@@ -122,15 +124,26 @@ export async function getDraft(id: number): Promise<ManifestDraft | undefined> {
 
 export async function saveDraft(
   draft: Omit<ManifestDraft, "updatedAt" | "createdAt"> & Partial<Pick<ManifestDraft, "id" | "createdAt" | "updatedAt">>,
-): Promise<number> {
+): Promise<DraftWriteResult> {
   const payload = toDraftRow(draft);
 
   if (draft.id) {
     await db.drafts.put({ ...payload, id: draft.id });
-    return draft.id;
+    return { ...stripSchema({ ...payload, id: draft.id }) };
   }
 
-  return db.drafts.add(payload);
+  const id = await db.drafts.add(payload);
+  return { ...stripSchema({ ...payload, id }) };
+}
+
+export async function duplicateDraft(
+  draft: Pick<ManifestDraft, "name" | "document">,
+): Promise<DraftWriteResult> {
+  const copyName = draft.name.endsWith(" (copy)") ? `${draft.name} 2` : `${draft.name} (copy)`;
+  return saveDraft({
+    name: copyName,
+    document: draft.document,
+  });
 }
 
 export async function deleteDraft(id: number): Promise<void> {

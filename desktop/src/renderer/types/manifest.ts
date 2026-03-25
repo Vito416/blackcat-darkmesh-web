@@ -6,6 +6,22 @@ export type ManifestShape = {
   [key: string]: ManifestValue;
 };
 
+export type PropsSchemaType = "string" | "number" | "boolean" | "null" | "object" | "array";
+
+export interface PropsSchema {
+  type?: PropsSchemaType;
+  title?: string;
+  description?: string;
+  default?: ManifestValue;
+  enum?: ManifestPrimitive[];
+  properties?: Record<string, PropsSchema>;
+  required?: string[];
+  items?: PropsSchema;
+  additionalProperties?: boolean | PropsSchema;
+  minItems?: number;
+  maxItems?: number;
+}
+
 export interface ManifestNode {
   id: string;
   type: string;
@@ -45,4 +61,5 @@ export interface CatalogItem {
   summary: string;
   tags?: string[];
   defaultProps?: ManifestShape;
+  propsSchema?: PropsSchema;
 }

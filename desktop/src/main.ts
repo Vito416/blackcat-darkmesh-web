@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import fs from "fs/promises";
 import path from "path";
 import net from "net";
+import { clearPipVault, describePipVault, readPipVault, writePipVault } from "./main/pipVault";
 
 const isDev = process.env.NODE_ENV !== "production";
 
@@ -87,6 +88,27 @@ process.on("unhandledRejection", (err) => {
 });
 
 app.whenReady().then(() => {
+  ipcMain.handle("pipVault:read", async () => {
+    return readPipVault();
+  });
+
+  ipcMain.handle("pipVault:write", async (_event, pip: unknown) => {
+    if (!pip || typeof pip !== "object") {
+      throw new Error("PIP payload must be an object");
+    }
+
+    return writePipVault(pip as Parameters<typeof writePipVault>[0]);
+  });
+
+  ipcMain.handle("pipVault:clear", async () => {
+    await clearPipVault();
+    return { ok: true };
+  });
+
+  ipcMain.handle("pipVault:describe", async () => {
+    return describePipVault();
+  });
+
   ipcMain.handle("wallet:read", async (_event, walletPath: unknown) => {
     if (typeof walletPath !== "string" || !walletPath.trim()) {
       throw new Error("Invalid wallet path");

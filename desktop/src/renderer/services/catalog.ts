@@ -14,6 +14,34 @@ const seed: CatalogItem[] = [
       secondaryAction: "Preview",
       background: "dark",
     },
+    propsSchema: {
+      type: "object",
+      required: ["headline", "subhead", "primaryAction", "secondaryAction", "background"],
+      properties: {
+        headline: {
+          type: "string",
+          default: "Launch your Blackcat space",
+        },
+        subhead: {
+          type: "string",
+          default: "Drop your assets, pick a preset, ship to AO in minutes.",
+        },
+        primaryAction: {
+          type: "string",
+          default: "Get started",
+        },
+        secondaryAction: {
+          type: "string",
+          default: "Preview",
+        },
+        background: {
+          type: "string",
+          enum: ["dark", "light", "aurora"],
+          default: "dark",
+        },
+      },
+      additionalProperties: false,
+    },
   },
   {
     id: "feature-grid",
@@ -24,6 +52,22 @@ const seed: CatalogItem[] = [
     defaultProps: {
       columns: 3,
       tone: "neutral",
+    },
+    propsSchema: {
+      type: "object",
+      required: ["columns", "tone"],
+      properties: {
+        columns: {
+          type: "number",
+          default: 3,
+        },
+        tone: {
+          type: "string",
+          enum: ["neutral", "contrast", "glow"],
+          default: "neutral",
+        },
+      },
+      additionalProperties: false,
     },
   },
   {
@@ -36,6 +80,24 @@ const seed: CatalogItem[] = [
       items: ["image-01.jpg", "image-02.jpg", "image-03.jpg"],
       caption: "Swipe to explore",
     },
+    propsSchema: {
+      type: "object",
+      required: ["items", "caption"],
+      properties: {
+        items: {
+          type: "array",
+          items: {
+            type: "string",
+          },
+          default: ["image-01.jpg", "image-02.jpg", "image-03.jpg"],
+        },
+        caption: {
+          type: "string",
+          default: "Swipe to explore",
+        },
+      },
+      additionalProperties: false,
+    },
   },
   {
     id: "pricing",
@@ -47,6 +109,24 @@ const seed: CatalogItem[] = [
       plans: ["Free", "Pro", "Team"],
       highlight: "Pro",
     },
+    propsSchema: {
+      type: "object",
+      required: ["plans", "highlight"],
+      properties: {
+        plans: {
+          type: "array",
+          items: {
+            type: "string",
+          },
+          default: ["Free", "Pro", "Team"],
+        },
+        highlight: {
+          type: "string",
+          default: "Pro",
+        },
+      },
+      additionalProperties: false,
+    },
   },
   {
     id: "footer",
@@ -56,6 +136,17 @@ const seed: CatalogItem[] = [
     tags: ["layout"],
     defaultProps: {
       columns: 4,
+    },
+    propsSchema: {
+      type: "object",
+      required: ["columns"],
+      properties: {
+        columns: {
+          type: "number",
+          default: 4,
+        },
+      },
+      additionalProperties: false,
     },
   },
 ];

@@ -32,15 +32,24 @@ export async function fetchManifestDocument(
   if (!fetcher) throw new Error("Fetch is not available in this runtime");
 
   const url = `${resolveGatewayUrl()}/${encodeURIComponent(tx)}`;
-  const res = await fetcher(url, { method: "GET", headers: { accept: "application/json" } });
+  let res: Response;
+
+  try {
+    res = await fetcher(url, { method: "GET", headers: { accept: "application/json" } });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Network error";
+    throw new Error(`Manifest fetch failed for ${tx} at ${url}: ${message}`);
+  }
 
   if (!res.ok) {
-    throw new Error(`Manifest fetch failed: HTTP ${res.status}`);
+    const detail = await res.text().catch(() => "");
+    const suffix = detail ? ` - ${detail.slice(0, 180)}` : "";
+    throw new Error(`Manifest fetch failed for ${tx}: HTTP ${res.status}${suffix}`);
   }
 
   try {
     return (await res.json()) as ManifestDocument;
   } catch (err) {
-    throw new Error("Gateway response was not valid JSON");
+    throw new Error(`Gateway response for ${tx} was not valid JSON`);
   }
 }
