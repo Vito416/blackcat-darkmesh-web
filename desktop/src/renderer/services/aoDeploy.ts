@@ -1,7 +1,9 @@
-import { connect, createDataItemSigner, type Tag } from "@permaweb/aoconnect";
+import { connect, createDataItemSigner } from "@permaweb/aoconnect";
 
 import type { ManifestDocument } from "../types/manifest";
 import { fetchWalletFromPath } from "./wallet";
+
+type Tag = { name: string; value: string };
 
 type WalletSource = Record<string, unknown> | string | undefined;
 
@@ -26,8 +28,14 @@ export type SpawnResponse = {
 
 const baseConnect = () =>
   connect({
-    MODE: getEnv("AO_MODE"),
-    URL: getEnv("AO_URL"),
+    MODE: (getEnv("AO_MODE") as "legacy" | "mainnet") ?? "legacy",
+    GATEWAY_URL: getEnv("GATEWAY_URL"),
+    GRAPHQL_URL: getEnv("GRAPHQL_URL"),
+    GRAPHQL_MAX_RETRIES: getEnv("GRAPHQL_MAX_RETRIES") ? Number(getEnv("GRAPHQL_MAX_RETRIES")) : undefined,
+    GRAPHQL_RETRY_BACKOFF: getEnv("GRAPHQL_RETRY_BACKOFF") ? Number(getEnv("GRAPHQL_RETRY_BACKOFF")) : undefined,
+    MU_URL: getEnv("MU_URL"),
+    CU_URL: getEnv("CU_URL"),
+    SCHEDULER: getEnv("SCHEDULER"),
   });
 
 export async function deployModule(walletOrPath: WalletSource, moduleSrc: string, tags: Tag[] = []): Promise<DeployResponse> {
@@ -199,11 +207,8 @@ function mergeTags(base: Tag[], user: Tag[]): Tag[] {
 }
 
 function getEnv(key: string): string | undefined {
-  const metaEnv = typeof import.meta !== "undefined" ? (import.meta as unknown as { env?: Record<string, string> }).env : undefined;
-  const fromMeta = metaEnv?.[key];
-  const fromMetaPrefixed = metaEnv?.[`VITE_${key}`];
   const fromProcess = typeof process !== "undefined" ? process.env?.[key] : undefined;
   const fromProcessPrefixed = typeof process !== "undefined" ? process.env?.[`VITE_${key}`] : undefined;
 
-  return fromMeta ?? fromMetaPrefixed ?? fromProcess ?? fromProcessPrefixed;
+  return fromProcess ?? fromProcessPrefixed;
 }

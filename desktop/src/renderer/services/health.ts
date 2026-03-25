@@ -9,13 +9,10 @@ export type HealthStatus = {
 };
 
 const readEnv = (key: string): string | undefined => {
-  const metaEnv = typeof import.meta !== "undefined" ? (import.meta as unknown as { env?: Record<string, string> }).env : undefined;
-  const fromMeta = metaEnv?.[key];
-  const fromMetaPrefixed = metaEnv?.[`VITE_${key}`];
-  const fromProcess = typeof process !== "undefined" ? process.env?.[key] : undefined;
-  const fromProcessPrefixed = typeof process !== "undefined" ? process.env?.[`VITE_${key}`] : undefined;
-
-  return fromMeta ?? fromMetaPrefixed ?? fromProcess ?? fromProcessPrefixed;
+  if (typeof process !== "undefined" && process.env) {
+    return process.env[key] ?? process.env[`VITE_${key}`];
+  }
+  return undefined;
 };
 
 const cleanHost = (value?: string) => {

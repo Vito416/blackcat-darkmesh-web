@@ -3,15 +3,9 @@ import { ManifestDocument } from "../types/manifest";
 const DEFAULT_GATEWAY = "https://arweave.net";
 
 const getEnv = (key: string): string | undefined => {
-  const metaEnv = (typeof import.meta !== "undefined" ? (import.meta as any).env : undefined) as
-    | Record<string, string | undefined>
-    | undefined;
-  if (metaEnv && key in metaEnv) return metaEnv[key];
-
   if (typeof process !== "undefined" && process.env) {
-    return process.env[key];
+    return process.env[key] ?? process.env[`VITE_${key}`];
   }
-
   return undefined;
 };
 
