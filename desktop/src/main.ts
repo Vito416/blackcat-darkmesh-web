@@ -62,17 +62,29 @@ async function createWindow() {
     const devUrl = "http://localhost:5174";
     try {
       await waitForPort("localhost", 5174);
-      await win.loadURL(devUrl);
+      if (!win.isDestroyed()) {
+        await win.loadURL(devUrl);
+      }
     } catch (err) {
       console.error("Dev server not reachable before timeout", err);
-      // attempt anyway to see error page or fallback
-      await win.loadURL(devUrl);
+      if (!win.isDestroyed()) {
+        // attempt anyway to see error page or fallback
+        await win.loadURL(devUrl).catch((loadErr) => {
+          console.error("Load URL failed after timeout", loadErr);
+        });
+      }
     }
     win.webContents.openDevTools({ mode: "detach" });
   } else {
-    win.loadFile(path.join(__dirname, "renderer/index.html"));
+    if (!win.isDestroyed()) {
+      await win.loadFile(path.join(__dirname, "renderer/index.html"));
+    }
   }
 }
+
+process.on("unhandledRejection", (err) => {
+  console.error("Unhandled rejection in main process:", err);
+});
 
 app.whenReady().then(() => {
   ipcMain.handle("wallet:read", async (_event, walletPath: unknown) => {
