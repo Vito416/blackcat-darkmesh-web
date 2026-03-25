@@ -1465,7 +1465,7 @@ function App() {
     input.click();
   };
 
-  const handleExportPipVaultRecords = () => {
+  function handleExportPipVaultRecords() {
     const payload = {
       exportedAt: new Date().toISOString(),
       count: pipVaultRecords.length,
@@ -1479,7 +1479,7 @@ function App() {
     link.click();
     URL.revokeObjectURL(url);
     flashStatus(`Exported ${pipVaultRecords.length} record${pipVaultRecords.length === 1 ? "" : "s"}`);
-  };
+  }
 
   const handleClearPipVault = async () => {
     setPipVaultBusy(true);
