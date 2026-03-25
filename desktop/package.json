@@ -9,7 +9,7 @@
     "predev": "npm run build:main",
     "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:main\"",
     "dev:renderer": "vite",
-    "dev:main": "concurrently -k \"npm:watch:main\" \"cross-env NODE_ENV=development electronmon dist/desktop/src/main.js --watch dist/desktop/src/main.js\"",
+    "dev:main": "concurrently -k \"npm:watch:main\" \"cross-env NODE_ENV=development electronmon dist/desktop/src/main.js\"",
     "watch:main": "tsc -p tsconfig.json --outDir dist --watch",
     "build": "npm run clean && npm run build:renderer && npm run build:main",
     "build:renderer": "vite build",
