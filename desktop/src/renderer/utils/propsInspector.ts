@@ -1,4 +1,4 @@
-import { PropsSchema } from "../types/manifest";
+import { PropsSchema, isManifestExpression } from "../types/manifest";
 
 export type PropsDiffKind = "added" | "removed" | "changed";
 
@@ -76,6 +76,7 @@ const joinPath = (base: string, segment: string): string => {
 
 const inferType = (schema: PropsSchema | undefined, value: unknown): PropsSchema["type"] | undefined => {
   if (schema?.type) return schema.type;
+  if (isManifestExpression(value)) return schema?.type ?? "string";
   if (schema?.properties || schema?.required) return "object";
   if (schema?.items) return "array";
   if (value === null) return "null";
@@ -89,6 +90,14 @@ const inferType = (schema: PropsSchema | undefined, value: unknown): PropsSchema
 export const mergeDefaults = (schema: PropsSchema | undefined, value: unknown): unknown => {
   if (!schema) {
     return cloneValue(value);
+  }
+
+  if (isManifestExpression(value)) {
+    return cloneValue(value);
+  }
+
+  if (isManifestExpression(schema.default)) {
+    return cloneValue(schema.default);
   }
 
   const resolvedType = inferType(schema, value);
@@ -173,6 +182,14 @@ export const buildFormValue = (schema: PropsSchema | undefined, value: unknown):
     return cloneValue(value);
   }
 
+  if (isManifestExpression(value)) {
+    return cloneValue(value);
+  }
+
+  if (isManifestExpression(schema.default)) {
+    return cloneValue(schema.default);
+  }
+
   const resolvedType = inferType(schema, value);
 
   if (resolvedType === "object") {
@@ -223,6 +240,13 @@ export const validate = (schema: PropsSchema | undefined, value: unknown): Props
 
   const walk = (currentSchema: PropsSchema | undefined, currentValue: unknown, path: string) => {
     if (!currentSchema) return;
+
+    if (isManifestExpression(currentValue)) {
+      if (!currentValue.__expr.trim()) {
+        issues.push({ path, message: `${path || "Expression"} cannot be empty` });
+      }
+      return;
+    }
 
     const resolvedType = inferType(currentSchema, currentValue);
 
@@ -356,6 +380,13 @@ export const indexValidationIssues = (issues: PropsValidationIssue[]): Map<strin
 };
 
 export const diff = (before: unknown, after: unknown, path = ""): PropsDiffEntry[] => {
+  if (isManifestExpression(before) || isManifestExpression(after)) {
+    if (isManifestExpression(before) && isManifestExpression(after) && before.__expr === after.__expr) {
+      return [];
+    }
+    return [{ path, kind: "changed", before, after }];
+  }
+
   if (Array.isArray(before) && Array.isArray(after)) {
     const entries: PropsDiffEntry[] = [];
     const maxLength = Math.max(before.length, after.length);

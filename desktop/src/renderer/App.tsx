@@ -1,7 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import "./styles.css";
-import DraftDiffPanel, { type DraftDiffOption } from "./components/DraftDiffPanel";
+import type { DraftDiffOption } from "./components/DraftDiffPanel";
 import { fetchCatalog, catalogItems as seedCatalog } from "./services/catalog";
 import {
   runHealthChecks,
@@ -38,9 +38,11 @@ import {
   ManifestNode,
   ManifestShape,
   PropsSchema,
+  isManifestExpression,
 } from "./types/manifest";
-import ManifestRenderer from "./components/ManifestRenderer";
-import AoLogPanel from "./components/AoLogPanel";
+const DraftDiffPanel = React.lazy(() => import("./components/DraftDiffPanel"));
+const AoLogPanel = React.lazy(() => import("./components/AoLogPanel"));
+const ManifestRenderer = React.lazy(() => import("./components/ManifestRenderer"));
 import {
   deleteDraft,
   exportDraftsToJson,
@@ -56,7 +58,13 @@ import {
   type DraftSource,
   type DraftSourceRef,
 } from "./storage/drafts";
-import { addHealthEvent, getRecentHealthEvents, type HealthEvent } from "./storage/healthStore";
+import {
+  addHealthEvent,
+  getRecentHealthEvents,
+  healthEventsToCsv,
+  listHealthEvents,
+  type HealthEvent,
+} from "./storage/healthStore";
 import { fetchWalletFromPath, parseWalletJson } from "./services/wallet";
 import CommandPalette, { type CommandPaletteAction } from "./components/CommandPalette";
 import {
@@ -174,6 +182,44 @@ const cloneValue = <T,>(value: T): T => {
   } catch {
     return value;
   }
+};
+
+type PasswordStrength = { score: number; label: string; hint: string };
+
+const evaluatePasswordStrength = (value: string): PasswordStrength => {
+  const password = (value ?? "").trim();
+  if (!password) {
+    return { score: 0, label: "Add a password", hint: "Use 12+ chars with symbols." };
+  }
+
+  let score = 0;
+  if (password.length >= 16) {
+    score += 2;
+  } else if (password.length >= 12) {
+    score += 1;
+  }
+
+  const variety = [/[a-z]/, /[A-Z]/, /\d/, /[^A-Za-z0-9]/].filter((regex) => regex.test(password)).length;
+  if (variety >= 3) score += 1;
+  if (variety === 4) score += 1;
+
+  const uniqueRatio = new Set(password.split("")).size / password.length;
+  if (uniqueRatio < 0.45 && score > 0) {
+    score -= 1;
+  }
+
+  const capped = Math.max(0, Math.min(score, 4));
+  const label = ["Very weak", "Weak", "Fair", "Good", "Strong"][capped];
+  const hint =
+    capped <= 1
+      ? "Add length and mix upper/lowercase, numbers, symbols."
+      : capped === 2
+        ? "Add another character type to strengthen it."
+        : capped === 3
+          ? "Looks solid; avoid reusing it elsewhere."
+          : "Strong; store it somewhere safe.";
+
+  return { score: capped, label, hint };
 };
 
 const healthStatusLabel = (status: HealthStatus["status"]) => {
@@ -322,6 +368,11 @@ type PipVaultIssue = {
 
 const THEME_STORAGE_KEY = "darkmesh-theme";
 const HEALTH_AUTO_REFRESH_STORAGE_KEY = "health-auto-refresh";
+const PIP_VAULT_REMEMBER_KEY = "pip-vault-remember";
+const PIP_VAULT_REMEMBER_PASSWORD_KEY = "pip-vault-remember-password";
+const HEALTH_NOTIFY_STORAGE_KEY = "health-sla-notify";
+const HEALTH_SLA_FAILURE_STORAGE_KEY = "health-sla-failure";
+const HEALTH_SLA_LATENCY_STORAGE_KEY = "health-sla-latency";
 const getEnv = (key: string): string | undefined => {
   const fromProcess = typeof process !== "undefined" ? process.env?.[key] : undefined;
   const fromProcessPrefixed = typeof process !== "undefined" ? process.env?.[`VITE_${key}`] : undefined;
@@ -333,8 +384,9 @@ const parsePositiveNumber = (value: string | undefined, fallback: number): numbe
 };
 const HEALTH_HISTORY_STORE_LIMIT = parsePositiveNumber(getEnv("HEALTH_HISTORY_LIMIT"), 200);
 const HEALTH_EVENT_DISPLAY_LIMIT = 10;
-const SLA_FAILURE_THRESHOLD = parsePositiveNumber(getEnv("HEALTH_SLA_FAILURE_THRESHOLD"), 3);
-const SLA_LATENCY_THRESHOLD_MS = parsePositiveNumber(getEnv("HEALTH_SLA_LATENCY_MS"), 1500);
+const DEFAULT_SLA_FAILURE_THRESHOLD = parsePositiveNumber(getEnv("HEALTH_SLA_FAILURE_THRESHOLD"), 3);
+const DEFAULT_SLA_LATENCY_THRESHOLD_MS = parsePositiveNumber(getEnv("HEALTH_SLA_LATENCY_MS"), 1500);
+const MANIFEST_HISTORY_LIMIT = 20;
 
 declare global {
   interface Window {
@@ -540,6 +592,104 @@ const ensureEntry = (entry: string | undefined, nodes: ManifestNode[]): string |
 const countNodes = (nodes: ManifestNode[]): number =>
   nodes.reduce((total, node) => total + 1 + (node.children ? countNodes(node.children) : 0), 0);
 
+const flattenManifestOrder = (manifest: ManifestDocument): string[] => {
+  const order: string[] = [];
+  const visited = new Set<string>();
+  const walk = (node: ManifestNode | undefined) => {
+    if (!node || visited.has(node.id)) return;
+    visited.add(node.id);
+    order.push(node.id);
+    node.children?.forEach((child) => walk(child));
+  };
+
+  const byId = new Map(manifest.nodes.map((node) => [node.id, node]));
+  if (manifest.entry) {
+    walk(byId.get(manifest.entry));
+  }
+  manifest.nodes.forEach((node) => walk(node));
+  return order;
+};
+
+const buildParentIndex = (
+  nodes: ManifestNode[],
+  parentId: string | null = null,
+  map = new Map<string, { parentId: string | null; index: number }>(),
+): Map<string, { parentId: string | null; index: number }> => {
+  nodes.forEach((node, index) => {
+    map.set(node.id, { parentId, index });
+    if (node.children?.length) {
+      buildParentIndex(node.children, node.id, map);
+    }
+  });
+  return map;
+};
+
+const removeNodesById = (nodes: ManifestNode[], ids: Set<string>): ManifestNode[] => {
+  let changed = false;
+
+  const next = nodes
+    .map((node) => {
+      if (ids.has(node.id)) {
+        changed = true;
+        return null;
+      }
+      const nextChildren = node.children ? removeNodesById(node.children, ids) : undefined;
+      if (nextChildren && nextChildren !== node.children) {
+        changed = true;
+        return { ...node, children: nextChildren };
+      }
+      return node;
+    })
+    .filter(Boolean) as ManifestNode[];
+
+  return changed ? next : nodes;
+};
+
+const cloneNodeWithNewIds = (node: ManifestNode, collected: string[]): ManifestNode => {
+  const cloned = cloneNode(node);
+
+  const assignIds = (entry: ManifestNode): ManifestNode => {
+    const nextId = `${entry.id}-${randomId()}`;
+    const nextChildren = entry.children?.map((child) => assignIds(child)) ?? [];
+    const next = { ...entry, id: nextId, children: nextChildren };
+    collected.push(nextId);
+    return next;
+  };
+
+  return assignIds(cloned);
+};
+
+const duplicateNodesInTree = (
+  nodes: ManifestNode[],
+  selected: Set<string>,
+  collected: string[],
+  ancestorSelected = false,
+): ManifestNode[] => {
+  let changed = false;
+
+  const next = nodes.flatMap((node) => {
+    const childSelected = ancestorSelected || selected.has(node.id);
+    const nextChildren = node.children ? duplicateNodesInTree(node.children, selected, collected, childSelected) : node.children;
+    const baseNode = nextChildren !== node.children ? { ...node, children: nextChildren } : node;
+    const result: ManifestNode[] = [baseNode];
+
+    if (selected.has(node.id) && !ancestorSelected) {
+      const clone = cloneNodeWithNewIds(baseNode, collected);
+      result.push(clone);
+      changed = true;
+    } else if (nextChildren !== node.children) {
+      changed = true;
+    }
+
+    return result;
+  });
+
+  return changed ? next : nodes;
+};
+
+const selectionsEqual = (a: string[], b: string[]): boolean =>
+  a.length === b.length && a.every((value, index) => value === b[index]);
+
 const uniqueSorted = (values: Iterable<string>): string[] => Array.from(new Set(values)).sort((a, b) => a.localeCompare(b));
 
 const matchesCatalogFilters = (
@@ -594,6 +744,7 @@ const BlockPlaceholder: React.FC<{ type: string }> = ({ type }) => {
 const formatPropsValue = (value: unknown): string => {
   if (value === undefined) return "undefined";
   if (value === null) return "null";
+  if (isManifestExpression(value)) return `expr(${value.__expr || ""})`;
   if (typeof value === "string") return JSON.stringify(value);
   if (typeof value === "number" || typeof value === "boolean") return String(value);
 
@@ -615,6 +766,7 @@ type PropsMode = "form" | "json";
 const stringifyPropsDraft = (value: unknown): string => JSON.stringify(value, null, 2);
 
 const getSchemaTypeLabel = (schema: PropsSchema | undefined, value: unknown): string => {
+  if (isManifestExpression(value)) return "Expression";
   const type = schema?.type;
   if (type === "array") return "Array";
   if (type === "object") return "Object";
@@ -699,16 +851,44 @@ const removeDraftValue = (value: unknown, path: PropsDraftPath): unknown => {
   };
 };
 
+const draftPathToString = (path: PropsDraftPath): string =>
+  path.reduce<string>((acc, segment) => {
+    if (typeof segment === "number") {
+      return acc ? `${acc}[${segment}]` : `[${segment}]`;
+    }
+    return acc ? `${acc}.${segment}` : String(segment);
+  }, "");
+
+const pathHasDiff = (pathKey: string, diffPaths?: Set<string>): boolean => {
+  if (!diffPaths || diffPaths.size === 0) return false;
+  if (!pathKey) return diffPaths.size > 0;
+
+  for (const entry of diffPaths) {
+    if (entry === pathKey) return true;
+    if (entry.startsWith(`${pathKey}.`) || entry.startsWith(`${pathKey}[`)) return true;
+  }
+
+  return false;
+};
+
 const PropsSchemaField: React.FC<{
   schema: PropsSchema | undefined;
   value: unknown;
   path: PropsDraftPath;
   onChange: (path: PropsDraftPath, value: unknown) => void;
-}> = ({ schema, value, path, onChange }) => {
-  const type = schema?.type ?? (Array.isArray(value) ? "array" : isPlainObject(value) ? "object" : undefined);
+  diffPaths?: Set<string>;
+}> = ({ schema, value, path, onChange, diffPaths }) => {
   const label = schema?.title ?? path[path.length - 1]?.toString() ?? "Root";
   const description = schema?.description;
   const [helpOpen, setHelpOpen] = useState(false);
+  const expressionActive = isManifestExpression(value);
+  const resolvedType =
+    expressionActive ? "expression" : schema?.type ?? (Array.isArray(value) ? "array" : isPlainObject(value) ? "object" : undefined);
+  const pathKey = draftPathToString(path);
+  const hasDiff = pathHasDiff(pathKey, diffPaths);
+  const expressionValue = expressionActive ? value.__expr : "";
+  const expressionError = expressionActive && !expressionValue.trim() ? "Expression cannot be empty" : null;
+  const typeLabel = expressionActive ? "Expression" : getSchemaTypeLabel(schema, value);
 
   const hasHelp = Boolean(description);
   const helpButton = hasHelp ? (
@@ -731,7 +911,68 @@ const PropsSchemaField: React.FC<{
     </div>
   );
 
-  if (type === "object" || (!type && isPlainObject(value))) {
+  const toggleExpression = () => {
+    if (expressionActive) {
+      const fallback = schema ? buildFormValue(schema, undefined) : "";
+      onChange(path, fallback === undefined ? "" : fallback);
+      return;
+    }
+    const seed =
+      typeof value === "string"
+        ? value
+        : value == null
+          ? ""
+          : typeof value === "number" || typeof value === "boolean"
+            ? String(value)
+            : "";
+    onChange(path, { __expr: seed });
+  };
+
+  const renderHeader = (options?: { allowExpressionToggle?: boolean; extraActions?: React.ReactNode }) => (
+    <div className="schema-fieldset-head">
+      <div className="schema-head-column">
+        {labelRow}
+        {helpContent}
+      </div>
+      <div className="schema-inline-actions">
+        <span className="badge ghost">{typeLabel}</span>
+        {hasDiff ? <span className="badge changed">Override</span> : null}
+        {options?.extraActions}
+        {options?.allowExpressionToggle ? (
+          <button
+            type="button"
+            className={`chip ${expressionActive ? "active" : ""}`}
+            onClick={toggleExpression}
+          >
+            {expressionActive ? "Expression" : "Literal"}
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+
+  const expressionControl = (
+    <div className="expression-row">
+      <input
+        type="text"
+        value={expressionValue}
+        onChange={(e) => onChange(path, { __expr: e.target.value })}
+        placeholder="Enter expression…"
+        className={expressionError ? "invalid" : ""}
+      />
+      <span className="badge expression">Expression</span>
+    </div>
+  );
+
+  const renderLeaf = (control: React.ReactNode) => (
+    <div className={`schema-control ${hasDiff ? "schema-diff" : ""}`}>
+      {renderHeader({ allowExpressionToggle: true })}
+      {expressionActive ? expressionControl : control}
+      {expressionError ? <p className="error field-error">{expressionError}</p> : null}
+    </div>
+  );
+
+  if (resolvedType === "object") {
     const record = isPlainObject(value) ? value : {};
     const properties = schema?.properties ?? {};
     const propertyKeys = Object.keys(properties);
@@ -739,16 +980,8 @@ const PropsSchemaField: React.FC<{
     const allKeys = [...propertyKeys, ...extraKeys];
 
     return (
-      <fieldset className="schema-fieldset">
-        <div className="schema-fieldset-head">
-          <div className="schema-head-column">
-            {labelRow}
-            {helpContent}
-          </div>
-          <div className="schema-inline-actions">
-            <span className="badge ghost">{getSchemaTypeLabel(schema, value)}</span>
-          </div>
-        </div>
+      <fieldset className={`schema-fieldset ${hasDiff ? "schema-diff" : ""}`}>
+        {renderHeader({ allowExpressionToggle: false })}
         <div className="schema-grid">
           {allKeys.length ? (
             allKeys.map((key) => {
@@ -757,11 +990,12 @@ const PropsSchemaField: React.FC<{
               const childPath = [...path, key];
               return (
                 <PropsSchemaField
-                  key={childPath.join(".")}
+                  key={draftPathToString(childPath)}
                   schema={childSchema}
                   value={childValue}
                   path={childPath}
                   onChange={onChange}
+                  diffPaths={diffPaths}
                 />
               );
             })
@@ -773,7 +1007,7 @@ const PropsSchemaField: React.FC<{
     );
   }
 
-  if (type === "array") {
+  if (resolvedType === "array") {
     const items = Array.isArray(value) ? value : [];
     const addItem = (index?: number) => {
       const nextItem = buildFormValue(schema?.items, undefined);
@@ -802,21 +1036,19 @@ const PropsSchemaField: React.FC<{
     };
 
     return (
-      <fieldset className="schema-fieldset">
-        <div className="schema-fieldset-head">
-          <div className="schema-head-column">
-            {labelRow}
-            {helpContent}
-          </div>
-          <div className="schema-inline-actions">
-            <span className="badge ghost">{getSchemaTypeLabel(schema, value)}</span>
-            <button className="ghost small" type="button" onClick={() => addItem()}>+ Add item</button>
-          </div>
-        </div>
+      <fieldset className={`schema-fieldset ${hasDiff ? "schema-diff" : ""}`}>
+        {renderHeader({
+          allowExpressionToggle: false,
+          extraActions: (
+            <button className="ghost small" type="button" onClick={() => addItem()}>
+              + Add item
+            </button>
+          ),
+        })}
         <div className="schema-list">
           {items.length ? (
             items.map((entry, index) => (
-              <div key={`${path.join(".")}[${index}]`} className="schema-list-item">
+              <div key={draftPathToString([...path, index])} className="schema-list-item">
                 <div className="schema-list-item-head">
                   <div className="schema-label-row">
                     <span className="schema-label">{schema?.items?.title ?? `${label} ${index + 1}`}</span>
@@ -872,6 +1104,7 @@ const PropsSchemaField: React.FC<{
                   value={entry}
                   path={[...path, index]}
                   onChange={onChange}
+                  diffPaths={diffPaths}
                 />
               </div>
             ))
@@ -895,87 +1128,65 @@ const PropsSchemaField: React.FC<{
     );
   }
 
-  if (type === "boolean") {
-    return (
-      <div className="schema-control">
-        {labelRow}
-        {helpContent}
-        <label className="toggle schema-toggle">
-          <input
-            type="checkbox"
-            checked={Boolean(value)}
-            onChange={(e) => onChange(path, e.target.checked)}
-          />
-          <span>{Boolean(value) ? "True" : "False"}</span>
-        </label>
-      </div>
-    );
-  }
-
-  if (type === "number") {
-    return (
-      <div className="schema-control">
-        {labelRow}
-        {helpContent}
+  if (resolvedType === "boolean") {
+    return renderLeaf(
+      <label className="toggle schema-toggle">
         <input
-          type="number"
-          value={typeof value === "number" ? value : ""}
-          onChange={(e) => {
-            const next = e.target.value.trim();
-            onChange(path, next === "" ? 0 : Number(next));
-          }}
+          type="checkbox"
+          checked={Boolean(value)}
+          onChange={(e) => onChange(path, e.target.checked)}
         />
-      </div>
+        <span>{Boolean(value) ? "True" : "False"}</span>
+      </label>,
     );
   }
 
-  if (type === "string" && schema?.enum?.length) {
+  if (resolvedType === "number") {
+    return renderLeaf(
+      <input
+        type="number"
+        value={typeof value === "number" ? value : ""}
+        onChange={(e) => {
+          const next = e.target.value.trim();
+          onChange(path, next === "" ? 0 : Number(next));
+        }}
+      />,
+    );
+  }
+
+  if (resolvedType === "string" && schema?.enum?.length) {
     const options = schema.enum.map((entry) => String(entry));
     const current = typeof value === "string" ? value : options[0] ?? "";
-    return (
-      <div className="schema-control">
-        {labelRow}
-        {helpContent}
-        <div className="enum-options">
-          {options.map((option) => {
-            const active = current === option;
-            return (
-              <button
-                key={option}
-                type="button"
-                className={`enum-badge ${active ? "active" : ""}`}
-                aria-pressed={active}
-                onClick={() => onChange(path, option)}
-              >
-                {option}
-              </button>
-            );
-          })}
-        </div>
-      </div>
+    return renderLeaf(
+      <div className="enum-options">
+        {options.map((option) => {
+          const active = current === option;
+          return (
+            <button
+              key={option}
+              type="button"
+              className={`enum-badge ${active ? "active" : ""}`}
+              aria-pressed={active}
+              onClick={() => onChange(path, option)}
+            >
+              {option}
+            </button>
+          );
+        })}
+      </div>,
     );
   }
 
-  if (type === "null") {
-    return (
-      <div className="schema-control">
-        {labelRow}
-        {helpContent}
-        <input value="null" disabled readOnly />
-      </div>
-    );
+  if (resolvedType === "null") {
+    return renderLeaf(<input value="null" disabled readOnly />);
   }
 
-  return (
-    <div className="schema-control">
-      {labelRow}
-      {helpContent}
-      <input
-        type="text"
-        value={typeof value === "string" ? value : value == null ? "" : String(value)}
-        onChange={(e) => onChange(path, e.target.value)}
-      />
-    </div>
+  return renderLeaf(
+    <input
+      type="text"
+      value={typeof value === "string" ? value : value == null ? "" : String(value)}
+      onChange={(e) => onChange(path, e.target.value)}
+    />,
   );
 };
 
@@ -1030,6 +1241,139 @@ const DiffGroup: React.FC<{
   </section>
 );
 
+const LazySkeletonLine: React.FC<{ width?: string }> = ({ width = "100%" }) => (
+  <span className="lazy-skeleton-line" style={{ width }} />
+);
+
+const LazySkeletonPill: React.FC<{ width?: string }> = ({ width = "96px" }) => (
+  <span className="lazy-skeleton-pill" style={{ width }} />
+);
+
+const ManifestRendererFallback: React.FC = () => (
+  <div className="manifest-skeleton" role="status" aria-live="polite">
+    {Array.from({ length: 3 }).map((_, index) => (
+      <div key={index} className="manifest-skeleton-card">
+        <div className="manifest-skeleton-head">
+          <LazySkeletonPill width="28%" />
+          <LazySkeletonLine width="58%" />
+        </div>
+        <LazySkeletonLine />
+        <LazySkeletonLine width="76%" />
+        <div className="manifest-skeleton-meta">
+          <LazySkeletonPill width="22%" />
+          <LazySkeletonPill width="32%" />
+          <LazySkeletonPill width="18%" />
+        </div>
+      </div>
+    ))}
+  </div>
+);
+
+const AoLogPanelFallback: React.FC = () => (
+  <div className="ao-log-panel" role="status" aria-live="polite">
+    <div className="ao-log-panel-header">
+      <div>
+        <p className="eyebrow">AO console log</p>
+        <h4>Loading action payloads…</h4>
+      </div>
+      <div className="ao-log-filters">
+        <LazySkeletonPill width="86px" />
+        <LazySkeletonPill width="98px" />
+        <LazySkeletonPill width="86px" />
+      </div>
+    </div>
+    <div className="ao-log-table-wrap">
+      <table className="ao-log-table">
+        <thead>
+          <tr>
+            <th scope="col">Type</th>
+            <th scope="col">tx / processId</th>
+            <th scope="col">Status</th>
+            <th scope="col">Time</th>
+            <th scope="col">Actions</th>
+            <th scope="col">Details</th>
+          </tr>
+        </thead>
+        <tbody className="ao-log-skeleton-body">
+          {Array.from({ length: 4 }).map((_, row) => (
+            <tr key={row}>
+              <td>
+                <LazySkeletonPill width="62px" />
+              </td>
+              <td>
+                <LazySkeletonLine width="86%" />
+              </td>
+              <td>
+                <LazySkeletonPill width="78px" />
+              </td>
+              <td>
+                <LazySkeletonLine width="64%" />
+              </td>
+              <td>
+                <LazySkeletonLine width="72%" />
+              </td>
+              <td>
+                <LazySkeletonLine width="60%" />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  </div>
+);
+
+const DraftDiffPanelFallback: React.FC<{
+  leftLabel: string;
+  leftDetail?: string;
+  onClose: () => void;
+}> = ({ leftLabel, leftDetail, onClose }) => (
+  <div className="draft-diff-backdrop" role="dialog" aria-modal="true" aria-label="Draft diff loading" onClick={onClose}>
+    <div className="draft-diff-shell draft-diff-skeleton" onClick={(event) => event.stopPropagation()}>
+      <header className="draft-diff-head">
+        <div>
+          <p className="eyebrow">Draft diff</p>
+          <h3>Loading comparison…</h3>
+          <p className="hint">Fetching the selected draft and preparing the diff.</p>
+        </div>
+        <LazySkeletonPill width="74px" />
+      </header>
+
+      <div className="draft-diff-sources">
+        <div className="diff-source-card">
+          <span className="eyebrow">Left</span>
+          <strong>{leftLabel}</strong>
+          {leftDetail && <p className="subtle">{leftDetail}</p>}
+        </div>
+        <div className="diff-source-card">
+          <span className="eyebrow">Right</span>
+          <LazySkeletonLine width="92%" />
+          <LazySkeletonLine width="72%" />
+        </div>
+        <div className="diff-summary-chips">
+          <LazySkeletonPill width="86px" />
+          <LazySkeletonPill width="96px" />
+          <LazySkeletonPill width="86px" />
+        </div>
+      </div>
+
+      <div className="draft-diff-body draft-diff-body-skeleton">
+        {Array.from({ length: 3 }).map((_, index) => (
+          <article key={index} className="draft-diff-row">
+            <div className="draft-diff-row-head">
+              <LazySkeletonLine width="84%" />
+            </div>
+            <div className="draft-diff-row-foot">
+              <LazySkeletonLine width="54%" />
+              <LazySkeletonPill width="120px" />
+            </div>
+          </article>
+        ))}
+      </div>
+    </div>
+  </div>
+);
+
 function App() {
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
   const [workspace, setWorkspace] = useState<Workspace>("studio");
@@ -1039,7 +1383,12 @@ function App() {
   const [activeTags, setActiveTags] = useState<string[]>([]);
   const initialManifest = useMemo(() => newManifest(), []);
   const [manifest, setManifest] = useState<ManifestDocument>(() => initialManifest);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
+  const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null);
+  const [historyState, setHistoryState] = useState<{ stack: ManifestDocument[]; pointer: number }>(() => ({
+    stack: [initialManifest],
+    pointer: 0,
+  }));
   const [propsDraft, setPropsDraft] = useState("");
   const [propsFormDraft, setPropsFormDraft] = useState<ManifestShape>({});
   const [propsMode, setPropsMode] = useState<PropsMode>("form");
@@ -1050,6 +1399,10 @@ function App() {
   const [savedSignature, setSavedSignature] = useState<string>(() => manifestSignature(initialManifest));
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const flashStatus = useCallback((message: string) => {
+    setStatus(message);
+    window.setTimeout(() => setStatus(null), 1800);
+  }, []);
   const [saving, setSaving] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [revertTargetId, setRevertTargetId] = useState<number | null>(null);
@@ -1069,6 +1422,17 @@ function App() {
   const [pipVaultFilter, setPipVaultFilter] = useState("");
   const [pipVaultRecordsLoading, setPipVaultRecordsLoading] = useState(false);
   const [pipVaultPassword, setPipVaultPassword] = useState("");
+  const [pipVaultError, setPipVaultError] = useState<string | null>(null);
+  const [pipVaultPasswordError, setPipVaultPasswordError] = useState<string | null>(null);
+  const [pipVaultTask, setPipVaultTask] = useState<{
+    kind: "import" | "export" | "unlock" | "records-export";
+    label: string;
+  } | null>(null);
+  const [pipVaultRememberUnlock, setPipVaultRememberUnlock] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.sessionStorage.getItem(PIP_VAULT_REMEMBER_KEY) === "1";
+  });
+  const [pipVaultModeConfirm, setPipVaultModeConfirm] = useState<{ action: "enable" | "disable"; password?: string } | null>(null);
   const [health, setHealth] = useState<HealthStatus[]>([]);
   const [healthLoading, setHealthLoading] = useState(false);
   const [healthExpanded, setHealthExpanded] = useState(false);
@@ -1077,6 +1441,20 @@ function App() {
     if (typeof window === "undefined") return "off";
     const stored = window.localStorage.getItem(HEALTH_AUTO_REFRESH_STORAGE_KEY);
     return stored === "30" || stored === "60" ? stored : "off";
+  });
+  const [slaFailureThreshold, setSlaFailureThreshold] = useState<number>(() => {
+    if (typeof window === "undefined") return DEFAULT_SLA_FAILURE_THRESHOLD;
+    const stored = Number(window.localStorage.getItem(HEALTH_SLA_FAILURE_STORAGE_KEY));
+    return Number.isFinite(stored) && stored > 0 ? Math.round(stored) : DEFAULT_SLA_FAILURE_THRESHOLD;
+  });
+  const [slaLatencyThresholdMs, setSlaLatencyThresholdMs] = useState<number>(() => {
+    if (typeof window === "undefined") return DEFAULT_SLA_LATENCY_THRESHOLD_MS;
+    const stored = Number(window.localStorage.getItem(HEALTH_SLA_LATENCY_STORAGE_KEY));
+    return Number.isFinite(stored) && stored > 0 ? Math.round(stored) : DEFAULT_SLA_LATENCY_THRESHOLD_MS;
+  });
+  const [healthNotifyEnabled, setHealthNotifyEnabled] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(HEALTH_NOTIFY_STORAGE_KEY) === "true";
   });
   const [walletMode, setWalletMode] = useState<WalletMode>(() => {
     if (getEnv("AO_WALLET_JSON") || getEnv("VITE_AO_WALLET_JSON")) return "jwk";
@@ -1126,6 +1504,9 @@ function App() {
   const activeDraftIdRef = useRef(activeDraftId);
   const saveTimerRef = useRef<number | null>(null);
   const saveInFlightRef = useRef(false);
+  const autoUnlockAttemptRef = useRef(false);
+  const lastHealthNotificationRef = useRef<string | null>(null);
+  const historySuppressedRef = useRef(false);
 
   useEffect(() => {
     manifestRef.current = manifest;
@@ -1135,12 +1516,39 @@ function App() {
     activeDraftIdRef.current = activeDraftId;
   }, [activeDraftId]);
 
+  useEffect(() => {
+    if (historySuppressedRef.current) {
+      historySuppressedRef.current = false;
+      return;
+    }
+
+    setHistoryState((current) => {
+      const currentSnapshot = current.stack[current.pointer];
+      if (manifestSignature(currentSnapshot) === manifestSignature(manifest)) {
+        return current;
+      }
+
+      const nextStack = [...current.stack.slice(0, current.pointer + 1), manifest];
+      const trimmed =
+        nextStack.length > MANIFEST_HISTORY_LIMIT ? nextStack.slice(nextStack.length - MANIFEST_HISTORY_LIMIT) : nextStack;
+      const nextPointer = trimmed.length - 1;
+      return { stack: trimmed, pointer: nextPointer };
+    });
+  }, [manifest]);
+
+  const manifestOrder = useMemo(() => flattenManifestOrder(manifest), [manifest]);
+  const primarySelectedId = selectedNodeIds.length ? selectedNodeIds[0] : null;
+  const selectedNodeSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds]);
+  const selectedNodeId: string | null = primarySelectedId;
   const selectedNode = useMemo(
     () => (selectedNodeId ? findNodeById(manifest.nodes, selectedNodeId) : null),
     [manifest.nodes, selectedNodeId],
   );
   const selectedCatalogItem = useMemo(
-    () => catalog.find((item) => item.type === selectedNode?.type) ?? seedCatalog.find((item) => item.type === selectedNode?.type) ?? null,
+    () =>
+      catalog.find((item) => item.type === selectedNode?.type) ??
+      seedCatalog.find((item) => item.type === selectedNode?.type) ??
+      null,
     [catalog, selectedNode?.type],
   );
   const propsDefaults = useMemo(
@@ -1181,6 +1589,8 @@ function App() {
     () => catalog.filter((item) => matchesCatalogFilters(item, activeTypes, activeTags)),
     [activeTags, activeTypes, catalog],
   );
+  const canUndo = historyState.pointer > 0;
+  const canRedo = historyState.pointer < historyState.stack.length - 1;
   const saveStatusLabel = saving ? "Saving…" : isDirty ? "Unsaved changes" : "Draft saved";
   const saveStatusTime = lastSavedAt ? formatTime(lastSavedAt) : "Never saved";
   const pipVaultValidationIssues = useMemo<PipVaultIssue[]>(() => {
@@ -1217,6 +1627,21 @@ function App() {
   }, [pip, pipVaultSnapshot]);
   const pipVaultBlockingIssues = pipVaultValidationIssues.filter((issue) => issue.severity === "error");
   const pipVaultLocked = pipVaultSnapshot?.mode === "password" && pipVaultSnapshot.locked;
+  const readRememberedPassword = useCallback((): string | null => {
+    if (typeof window === "undefined") return null;
+    const stored = window.sessionStorage.getItem(PIP_VAULT_REMEMBER_PASSWORD_KEY);
+    if (!stored) return null;
+    try {
+      return atob(stored);
+    } catch {
+      return null;
+    }
+  }, []);
+  const pipVaultPasswordStrength = useMemo(() => evaluatePasswordStrength(pipVaultPassword), [pipVaultPassword]);
+  const rememberedVaultPassword = useMemo(
+    () => (pipVaultRememberUnlock ? readRememberedPassword() : null),
+    [pipVaultRememberUnlock, pipVaultPassword, readRememberedPassword],
+  );
   const filteredPipVaultRecords = useMemo(() => {
     const query = pipVaultFilter.trim().toLowerCase();
     if (!query) return pipVaultRecords;
@@ -1273,6 +1698,10 @@ function App() {
       valid: !parseError && (validation?.valid ?? true),
     };
   }, [propsDefaults, propsDraft, selectedCatalogItem?.propsSchema, selectedNode]);
+  const propsDiffPaths = useMemo(
+    () => new Set(propsInspection?.diffEntries.map((entry) => entry.path || "") ?? []),
+    [propsInspection],
+  );
   const hasPropsSchema = Boolean(selectedCatalogItem?.propsSchema);
   const inspectorMode: PropsMode = hasPropsSchema && propsMode === "form" ? "form" : "json";
 
@@ -1382,8 +1811,8 @@ function App() {
       ? Math.round(latencies.reduce((acc, value) => acc + value, 0) / latencies.length)
       : null;
 
-    const latencyBreached = averageLatency != null && averageLatency > SLA_LATENCY_THRESHOLD_MS;
-    const failureBreached = failureStreak >= SLA_FAILURE_THRESHOLD;
+    const latencyBreached = averageLatency != null && averageLatency > slaLatencyThresholdMs;
+    const failureBreached = failureStreak >= slaFailureThreshold;
 
     return {
       averageLatency,
@@ -1391,8 +1820,53 @@ function App() {
       latencyBreached,
       failureBreached,
       breached: latencyBreached || failureBreached,
+      latencyThreshold: slaLatencyThresholdMs,
+      failureThreshold: slaFailureThreshold,
     };
-  }, [healthEvents]);
+  }, [healthEvents, slaFailureThreshold, slaLatencyThresholdMs]);
+
+  const healthSparkline = useMemo(() => {
+    const values = [...healthEvents]
+      .slice(0, HEALTH_EVENT_DISPLAY_LIMIT)
+      .map((event) => event.averageLatencyMs)
+      .filter((value): value is number => typeof value === "number")
+      .reverse();
+
+    if (!values.length) return null;
+
+    const max = Math.max(...values);
+    const min = Math.min(...values);
+    const range = max - min || 1;
+    const width = Math.max(80, values.length * 12);
+    const height = 36;
+    const step = values.length > 1 ? width / (values.length - 1) : width;
+
+    const points = values.map((value, idx) => {
+      const x = idx * step;
+      const normalized = (value - min) / range;
+      const y = height - normalized * height;
+      return { x, y, value };
+    });
+
+    const path = points
+      .map((point, idx) => `${idx === 0 ? "M" : "L"}${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
+      .join(" ");
+
+    const thresholdY = height - ((slaLatencyThresholdMs - min) / range) * height;
+    const latencyLine = Math.max(0, Math.min(height, Number.isFinite(thresholdY) ? thresholdY : 0));
+
+    return {
+      path,
+      points,
+      width,
+      height,
+      min: Math.round(min),
+      max: Math.round(max),
+      latest: Math.round(values[values.length - 1]),
+      latencyLine,
+      showLatencyLine: values.length > 1,
+    };
+  }, [healthEvents, slaLatencyThresholdMs]);
 
   const refreshHealthHistory = useCallback(async () => {
     try {
@@ -1424,18 +1898,76 @@ function App() {
     }
   }, []);
 
+  const handleExportHealthHistory = useCallback(
+    async (format: "json" | "csv") => {
+      try {
+        const events = await listHealthEvents(HEALTH_HISTORY_STORE_LIMIT);
+        if (!events.length) {
+          flashStatus("No health history to export");
+          return;
+        }
+
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const filename = `health-history-${stamp}.${format}`;
+        const content = format === "json" ? JSON.stringify(events, null, 2) : healthEventsToCsv(events);
+        const mime = format === "json" ? "application/json" : "text/csv";
+        const blob = new Blob([content], { type: mime });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        link.click();
+        URL.revokeObjectURL(url);
+        flashStatus(`Exported ${events.length} events to ${format.toUpperCase()}`);
+      } catch (err) {
+        console.error("Failed to export health history", err);
+        flashStatus("Export failed");
+      }
+    },
+    [flashStatus],
+  );
+
   const toggleTheme = useCallback(() => {
     setTheme((current) => (current === "cyberpunk" ? "light" : "cyberpunk"));
   }, []);
+
+  const persistRememberPreference = useCallback((value: boolean) => {
+    if (typeof window === "undefined") return;
+    if (value) {
+      window.sessionStorage.setItem(PIP_VAULT_REMEMBER_KEY, "1");
+    } else {
+      window.sessionStorage.removeItem(PIP_VAULT_REMEMBER_KEY);
+      window.sessionStorage.removeItem(PIP_VAULT_REMEMBER_PASSWORD_KEY);
+    }
+  }, []);
+
+  const rememberPasswordForSession = useCallback(
+    (password: string | null, forceStore?: boolean) => {
+      if (typeof window === "undefined") return;
+      const shouldStore = forceStore ?? pipVaultRememberUnlock;
+      if (shouldStore && password) {
+        try {
+          window.sessionStorage.setItem(PIP_VAULT_REMEMBER_PASSWORD_KEY, btoa(password));
+        } catch {
+          // ignore storage errors in low-entropy environments
+        }
+      } else {
+        window.sessionStorage.removeItem(PIP_VAULT_REMEMBER_PASSWORD_KEY);
+      }
+    },
+    [pipVaultRememberUnlock],
+  );
 
   const refreshPipVaultSnapshot = useCallback(async () => {
     const result = await describePipVault();
     if (result.ok) {
       setPipVaultSnapshot(result);
+      setPipVaultError(null);
       return result;
     }
 
     setPipVaultStatus(result.error);
+    setPipVaultError(result.error);
     return null;
   }, []);
 
@@ -1445,10 +1977,12 @@ function App() {
       const result = await listPipVaultRecords();
       if (result.ok) {
         setPipVaultRecords(result.records);
+        setPipVaultError(null);
         return result.records;
       }
 
       setPipVaultStatus(result.error);
+      setPipVaultError(result.error);
       return [];
     } finally {
       setPipVaultRecordsLoading(false);
@@ -1515,6 +2049,11 @@ function App() {
     [draftDiffRightRef, getDefaultDraftDiffRef, loadDraftDiffSource],
   );
 
+  const closeDraftDiffPanel = useCallback(() => {
+    setDraftDiffOpen(false);
+    setDraftDiffLoading(false);
+  }, []);
+
   const handleSelectDraftDiffOption = useCallback(
     async (value: string) => {
       const ref = value ? draftDiffLookup.get(value) ?? null : null;
@@ -1552,6 +2091,30 @@ function App() {
   }, [healthAutoRefresh]);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(HEALTH_SLA_FAILURE_STORAGE_KEY, String(slaFailureThreshold));
+    window.localStorage.setItem(HEALTH_SLA_LATENCY_STORAGE_KEY, String(slaLatencyThresholdMs));
+  }, [slaFailureThreshold, slaLatencyThresholdMs]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(HEALTH_NOTIFY_STORAGE_KEY, healthNotifyEnabled ? "true" : "false");
+    if (!healthNotifyEnabled) return;
+    if (typeof Notification === "undefined") return;
+    if (Notification.permission === "denied") {
+      setHealthNotifyEnabled(false);
+      return;
+    }
+    if (Notification.permission === "default") {
+      Notification.requestPermission().then((permission) => {
+        if (permission !== "granted") {
+          setHealthNotifyEnabled(false);
+        }
+      });
+    }
+  }, [healthNotifyEnabled]);
+
+  useEffect(() => {
     refreshHealth();
   }, [refreshHealth]);
 
@@ -1566,6 +2129,37 @@ function App() {
       window.clearInterval(id);
     };
   }, [healthAutoRefresh, refreshHealth]);
+
+  useEffect(() => {
+    if (!healthNotifyEnabled) return;
+    if (typeof window === "undefined" || typeof Notification === "undefined") return;
+    if (Notification.permission !== "granted") return;
+    if (!healthSla.breached) {
+      lastHealthNotificationRef.current = null;
+      return;
+    }
+
+    const latestEvent = healthEventLog[0];
+    const notificationKey =
+      latestEvent?.recordedAt ?? `breach-${healthSla.failureStreak}-${healthSla.averageLatency ?? "na"}`;
+    if (lastHealthNotificationRef.current === notificationKey) return;
+
+    const reason = healthSla.failureBreached
+      ? `Failure streak ${healthSla.failureStreak}/${healthSla.failureThreshold}`
+      : healthSla.latencyBreached
+        ? `Avg latency ${healthSla.averageLatency ?? "—"} ms > ${healthSla.latencyThreshold} ms`
+        : "SLA breach";
+
+    const failingLabels =
+      latestEvent?.summary?.failing?.map((item) => item.label).join(", ") || healthAlertCopy || "Checks need attention";
+
+    new Notification("Health SLA breached", {
+      body: `${reason}\n${failingLabels}`,
+      silent: false,
+    });
+
+    lastHealthNotificationRef.current = notificationKey;
+  }, [healthAlertCopy, healthEventLog, healthNotifyEnabled, healthSla]);
 
   useEffect(() => {
     if (!draftDiffOpen) return;
@@ -1614,11 +2208,70 @@ function App() {
     }
   }, [propsDraft, selectedCatalogItem?.propsSchema]);
 
+  const applySelection = useCallback(
+    (ids: string[]) => {
+      const unique = Array.from(new Set(ids.filter(Boolean)));
+      setSelectedNodeIds((current) => (selectionsEqual(current, unique) ? current : unique));
+      setSelectionAnchorId((current) => {
+        const nextAnchor = unique[0] ?? null;
+        return current === nextAnchor ? current : nextAnchor;
+      });
+    },
+    [setSelectedNodeIds, setSelectionAnchorId],
+  );
+
+  const syncSelectionToManifest = useCallback(
+    (doc: ManifestDocument, preferred?: string[]) => {
+      const preferredIds = preferred ?? selectedNodeIds;
+      const valid = preferredIds.filter((id) => findNodeById(doc.nodes, id));
+      const fallback = ensureEntry(doc.entry, doc.nodes);
+      const nextSelection = valid.length ? valid : fallback ? [fallback] : [];
+      applySelection(nextSelection);
+      return nextSelection;
+    },
+    [applySelection, selectedNodeIds],
+  );
+
+  const resetHistory = useCallback(
+    (snapshot: ManifestDocument) => {
+      historySuppressedRef.current = true;
+      setHistoryState({ stack: [snapshot], pointer: 0 });
+    },
+    [],
+  );
+
+  const adoptManifest = useCallback(
+    (next: ManifestDocument, options?: { resetHistory?: boolean; selection?: string[] }) => {
+      if (options?.resetHistory) {
+        resetHistory(next);
+      }
+      setManifest(next);
+      syncSelectionToManifest(next, options?.selection);
+    },
+    [resetHistory, syncSelectionToManifest],
+  );
+
+  const selectSingleNode = useCallback(
+    (id: string | null) => {
+      applySelection(id ? [id] : []);
+    },
+    [applySelection],
+  );
+
   useEffect(() => {
-    if (!selectedNodeId && manifest.nodes.length > 0) {
-      setSelectedNodeId(manifest.entry ?? manifest.nodes[0].id);
+    syncSelectionToManifest(manifest);
+  }, [manifest.entry, manifest.nodes, syncSelectionToManifest]);
+
+  useEffect(() => {
+    if (!selectedNodeIds.length) {
+      setSelectionAnchorId(null);
+      return;
     }
-  }, [manifest.entry, manifest.nodes, selectedNodeId]);
+    setSelectionAnchorId((current) => {
+      if (current && selectedNodeIds.includes(current)) return current;
+      return selectedNodeIds[0];
+    });
+  }, [selectedNodeIds]);
 
   useEffect(() => {
     const tx = pip?.manifestTx?.trim();
@@ -1633,11 +2286,10 @@ function App() {
       .then((doc) => {
         if (cancelled) return;
         const normalized = normalizeManifest(doc);
-        setManifest(normalized);
+        adoptManifest(normalized, { resetHistory: true });
         setActiveDraftId(null);
         setSavedSignature(manifestSignature(normalized));
         setLastSavedAt(normalized.metadata.updatedAt);
-        setSelectedNodeId(normalized.entry ?? normalized.nodes[0]?.id ?? null);
         flashStatus("Manifest loaded from gateway");
       })
       .catch((err) => {
@@ -1653,7 +2305,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [pip]);
+  }, [adoptManifest, flashStatus, pip]);
 
   useEffect(() => {
     if (pip?.manifestTx) {
@@ -1753,11 +2405,10 @@ function App() {
 
     if (loadLatest && all.length) {
       const latest = all[0];
-      setManifest(latest.document);
+      adoptManifest(latest.document, { resetHistory: true });
       setActiveDraftId(latest.id ?? null);
       setSavedSignature(manifestSignature(latest.document));
       setLastSavedAt(latest.updatedAt);
-      setSelectedNodeId(latest.document.entry ?? latest.document.nodes[0]?.id ?? null);
       void refreshDraftHistory(latest.id ?? null);
       flashStatus("Loaded latest draft");
     }
@@ -1765,16 +2416,15 @@ function App() {
 
   const startNewDraft = useCallback((message?: string) => {
     const next = newManifest();
-    setManifest(next);
+    adoptManifest(next, { resetHistory: true });
     setActiveDraftId(null);
     setDraftHistory([]);
-    setSelectedNodeId(null);
     setSavedSignature(manifestSignature(next));
     setLastSavedAt(null);
     if (message) {
       flashStatus(message);
     }
-  }, []);
+  }, [adoptManifest, flashStatus]);
 
   const persistDraft = useCallback(
     async (mode: "manual" | "autosave" | "duplicate") => {
@@ -1805,8 +2455,7 @@ function App() {
         void refreshDraftHistory(saved.id ?? null);
 
         if (mode === "duplicate" || manifestSignature(manifestRef.current) === snapshotSignature) {
-          setManifest(saved.document);
-          setSelectedNodeId(saved.document.entry ?? saved.document.nodes[0]?.id ?? null);
+          adoptManifest(saved.document, { resetHistory: mode === "duplicate" });
         }
 
         if (mode === "manual") {
@@ -1829,7 +2478,7 @@ function App() {
         setSaving(false);
       }
     },
-    [],
+    [adoptManifest, flashStatus, refreshDraftHistory],
   );
 
   const handleLoadPip = () => {
@@ -1894,16 +2543,19 @@ function App() {
     if (pipVaultLocked) {
       const message = "Unlock the vault with its password first";
       setPipVaultStatus(message);
+      setPipVaultError(message);
       flashStatus(message);
       return;
     }
 
+    setPipVaultError(null);
     setPipVaultBusy(true);
     try {
       const loaded = await loadPipFromVault();
       if (!loaded.ok) {
         const message = loaded.error === "No PIP vault found" ? "Vault empty" : loaded.error;
         setPipVaultStatus(message);
+        setPipVaultError(message);
         flashStatus(message);
         return;
       }
@@ -1911,6 +2563,7 @@ function App() {
       setPip(loaded.pip);
       setRemoteError(null);
       setPipVaultStatus("Vault loaded");
+      setPipVaultError(null);
       flashStatus("PIP loaded from vault");
       await refreshPipVaultSnapshot();
       await refreshPipVaultRecords();
@@ -1923,6 +2576,7 @@ function App() {
     if (!pip) {
       const message = "Load a PIP before saving to vault";
       setPipVaultStatus(message);
+      setPipVaultError(message);
       flashStatus(message);
       return;
     }
@@ -1930,6 +2584,7 @@ function App() {
     if (pipVaultBlockingIssues.length > 0) {
       const message = "Fix validation issues before saving to vault";
       setPipVaultStatus(message);
+      setPipVaultError(message);
       flashStatus(message);
       return;
     }
@@ -1937,21 +2592,25 @@ function App() {
     if (pipVaultLocked) {
       const message = "Unlock the vault with its password first";
       setPipVaultStatus(message);
+      setPipVaultError(message);
       flashStatus(message);
       return;
     }
 
+    setPipVaultError(null);
     setPipVaultBusy(true);
     try {
       const saved = await savePipToVault(pip);
       if (saved.ok) {
         const message = `Vault saved ${formatDate(saved.updatedAt)}`;
         setPipVaultStatus(message);
+        setPipVaultError(null);
         flashStatus("PIP saved to vault");
         await refreshPipVaultSnapshot();
         await refreshPipVaultRecords();
       } else {
         setPipVaultStatus(saved.error);
+        setPipVaultError(saved.error);
         flashStatus(saved.error);
       }
     } finally {
@@ -2009,39 +2668,49 @@ function App() {
   };
 
   function handleExportPipVaultRecords() {
-    const payload = {
-      exportedAt: new Date().toISOString(),
-      count: pipVaultRecords.length,
-      records: pipVaultRecords,
-    };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `pip-vault-records-${new Date().toISOString().slice(0, 10)}.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-    flashStatus(`Exported ${pipVaultRecords.length} record${pipVaultRecords.length === 1 ? "" : "s"}`);
+    setPipVaultError(null);
+    setPipVaultTask({ kind: "records-export", label: "Exporting vault records…" });
+    try {
+      const payload = {
+        exportedAt: new Date().toISOString(),
+        count: pipVaultRecords.length,
+        records: pipVaultRecords,
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `pip-vault-records-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+      flashStatus(`Exported ${pipVaultRecords.length} record${pipVaultRecords.length === 1 ? "" : "s"}`);
+    } finally {
+      setPipVaultTask(null);
+    }
   }
 
   const handleClearPipVault = async () => {
     if (pipVaultLocked) {
       const message = "Unlock the vault with its password first";
       setPipVaultStatus(message);
+      setPipVaultError(message);
       flashStatus(message);
       return;
     }
 
+    setPipVaultError(null);
     setPipVaultBusy(true);
     try {
       const cleared = await clearPipVaultStorage();
       if (!cleared.ok) {
         setPipVaultStatus(cleared.error);
+        setPipVaultError(cleared.error);
         flashStatus(cleared.error);
         return;
       }
 
       setPipVaultStatus("Vault deleted");
+      setPipVaultError(null);
       flashStatus("PIP vault deleted");
       await refreshPipVaultSnapshot();
       await refreshPipVaultRecords();
@@ -2054,15 +2723,18 @@ function App() {
     if (pipVaultLocked) {
       const message = "Unlock the vault with its password first";
       setPipVaultStatus(message);
+      setPipVaultError(message);
       flashStatus(message);
       return;
     }
 
+    setPipVaultError(null);
     setPipVaultBusy(true);
     try {
       const loaded = await loadPipFromVaultRecord(recordId);
       if (!loaded.ok) {
         setPipVaultStatus(loaded.error);
+        setPipVaultError(loaded.error);
         flashStatus(loaded.error);
         return;
       }
@@ -2070,6 +2742,7 @@ function App() {
       setPip(loaded.pip);
       setRemoteError(null);
       setPipVaultStatus(`Loaded record ${recordId}`);
+      setPipVaultError(null);
       flashStatus(`Loaded PIP record ${abbreviateTx(loaded.pip.manifestTx)}`);
       await refreshPipVaultSnapshot();
     } finally {
@@ -2085,24 +2758,29 @@ function App() {
     if (pipVaultLocked) {
       const message = "Unlock the vault with its password first";
       setPipVaultStatus(message);
+      setPipVaultError(message);
       flashStatus(message);
       return;
     }
 
+    setPipVaultError(null);
     setPipVaultBusy(true);
     try {
       const result = await deletePipVaultRecordStorage(recordId);
       if (!result.ok) {
         setPipVaultStatus(result.error);
+        setPipVaultError(result.error);
         flashStatus(result.error);
         return;
       }
 
       if (result.removed) {
         setPipVaultStatus("Vault record deleted");
+        setPipVaultError(null);
         flashStatus("PIP vault record deleted");
       } else {
         setPipVaultStatus("Record not found");
+        setPipVaultError("Record not found");
         flashStatus("Record not found");
       }
 
@@ -2113,61 +2791,171 @@ function App() {
     }
   };
 
-  const handleEnableVaultPassword = async () => {
-    const password = pipVaultPassword.trim();
-    if (!password) {
-      flashStatus("Enter a vault password first");
-      return;
-    }
-
-    setPipVaultBusy(true);
-    try {
-      const result = await enableVaultPassword(password);
-      if (!result.ok) {
-        setPipVaultStatus(result.error);
-        flashStatus(result.error);
+  const runEnableVaultPassword = useCallback(
+    async (password: string, options?: { auto?: boolean }) => {
+      const trimmed = password.trim();
+      if (!trimmed) {
+        setPipVaultPasswordError("Enter a vault password first");
+        if (!options?.auto) {
+          flashStatus("Enter a vault password first");
+        }
         return;
       }
 
-      const message = pipVaultSnapshot?.mode === "password" ? "Vault unlocked" : "Password mode enabled";
-      setPipVaultStatus(message);
-      flashStatus(message);
-      setPipVaultPassword("");
-      await refreshPipVaultSnapshot();
-      await refreshPipVaultRecords();
-    } finally {
-      setPipVaultBusy(false);
-    }
-  };
+      setPipVaultPasswordError(null);
+      setPipVaultError(null);
+      setPipVaultBusy(true);
+      setPipVaultTask({
+        kind: "unlock",
+        label:
+          pipVaultSnapshot?.mode === "password"
+            ? pipVaultLocked
+              ? "Unlocking vault…"
+              : "Rotating password…"
+            : "Enabling password mode…",
+      });
 
-  const handleDisableVaultPassword = async () => {
-    if (!window.confirm("Switch vault back to system storage?")) return;
+      try {
+        const result = await enableVaultPassword(trimmed);
+        if (!result.ok) {
+          setPipVaultStatus(result.error);
+          setPipVaultError(result.error);
+          if (!options?.auto) {
+            flashStatus(result.error);
+          }
+          rememberPasswordForSession(null, false);
+          return;
+        }
 
+        const message =
+          pipVaultSnapshot?.mode === "password"
+            ? pipVaultLocked
+              ? "Vault unlocked"
+              : "Password rotated"
+            : "Password mode enabled";
+        const statusMessage = options?.auto ? `${message} (remembered)` : message;
+        setPipVaultStatus(statusMessage);
+        setPipVaultError(null);
+        if (!options?.auto) {
+          flashStatus(message);
+        }
+        rememberPasswordForSession(trimmed);
+        setPipVaultPassword("");
+        await refreshPipVaultSnapshot();
+        await refreshPipVaultRecords();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unable to enable password";
+        setPipVaultStatus(null);
+        setPipVaultError(message);
+        if (!options?.auto) {
+          flashStatus(message);
+        }
+        rememberPasswordForSession(null, false);
+      } finally {
+        setPipVaultBusy(false);
+        setPipVaultTask(null);
+      }
+    },
+    [
+      enableVaultPassword,
+      pipVaultSnapshot?.mode,
+      pipVaultLocked,
+      rememberPasswordForSession,
+      refreshPipVaultSnapshot,
+      refreshPipVaultRecords,
+    ],
+  );
+
+  const runDisableVaultPassword = useCallback(async () => {
+    setPipVaultPasswordError(null);
+    setPipVaultError(null);
     setPipVaultBusy(true);
+    setPipVaultTask({ kind: "unlock", label: "Switching to system keychain…" });
+
     try {
       const result = await disableVaultPassword();
       if (!result.ok) {
         setPipVaultStatus(result.error);
+        setPipVaultError(result.error);
         flashStatus(result.error);
         return;
       }
 
       const message = result.mode === "plain" ? "Vault using local key" : "Vault using system keychain";
       setPipVaultStatus(message);
+      setPipVaultError(null);
       flashStatus("Password mode disabled");
+      rememberPasswordForSession(null, false);
+      setPipVaultPassword("");
       await refreshPipVaultSnapshot();
       await refreshPipVaultRecords();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unable to disable password";
+      setPipVaultStatus(null);
+      setPipVaultError(message);
+      flashStatus(message);
     } finally {
       setPipVaultBusy(false);
+      setPipVaultTask(null);
     }
+  }, [disableVaultPassword, rememberPasswordForSession, refreshPipVaultRecords, refreshPipVaultSnapshot]);
+
+  const handleEnableVaultPassword = async () => {
+    const password = pipVaultPassword.trim();
+    if (!password && pipVaultSnapshot?.mode !== "password") {
+      setPipVaultPasswordError("Enter a vault password first");
+      flashStatus("Enter a vault password first");
+      return;
+    }
+
+    if (pipVaultSnapshot && pipVaultSnapshot.mode !== "password") {
+      setPipVaultModeConfirm({ action: "enable", password });
+      return;
+    }
+
+    await runEnableVaultPassword(password);
   };
 
+  const handleDisableVaultPassword = () => {
+    setPipVaultModeConfirm({ action: "disable" });
+  };
+
+  const handleRememberUnlockToggle = (checked: boolean) => {
+    setPipVaultRememberUnlock(checked);
+    persistRememberPreference(checked);
+    if (!checked) {
+      rememberPasswordForSession(null, false);
+    } else if (pipVaultPassword.trim()) {
+      rememberPasswordForSession(pipVaultPassword.trim(), true);
+    }
+    autoUnlockAttemptRef.current = false;
+  };
+
+  const handleConfirmVaultMode = useCallback(async () => {
+    if (!pipVaultModeConfirm) return;
+    const { action, password } = pipVaultModeConfirm;
+    setPipVaultModeConfirm(null);
+
+    if (action === "enable") {
+      await runEnableVaultPassword(password ?? pipVaultPassword);
+    } else {
+      await runDisableVaultPassword();
+    }
+  }, [pipVaultModeConfirm, pipVaultPassword, runDisableVaultPassword, runEnableVaultPassword]);
+
+  const handleCancelVaultModeConfirm = useCallback(() => {
+    setPipVaultModeConfirm(null);
+  }, []);
+
   const handleExportVaultBundle = async () => {
+    setPipVaultError(null);
+    setPipVaultTask({ kind: "export", label: "Exporting vault backup…" });
     setPipVaultBusy(true);
     try {
       const result = await exportPipVaultBundle();
       if (!result.ok) {
         setPipVaultStatus(result.error);
+        setPipVaultError(result.error);
         flashStatus(result.error);
         return;
       }
@@ -2180,9 +2968,12 @@ function App() {
       link.download = `pip-vault-backup${suffix}-${new Date().toISOString().slice(0, 10)}.json`;
       link.click();
       URL.revokeObjectURL(url);
+      setPipVaultStatus("Vault backup exported");
+      setPipVaultError(null);
       flashStatus("Vault backup exported");
     } finally {
       setPipVaultBusy(false);
+      setPipVaultTask(null);
     }
   };
 
@@ -2198,6 +2989,7 @@ function App() {
       try {
         text = await file.text();
       } catch {
+        setPipVaultError("Unable to read vault bundle");
         flashStatus("Unable to read vault bundle");
         return;
       }
@@ -2206,37 +2998,60 @@ function App() {
       try {
         const parsed = JSON.parse(text);
         if (parsed?.format !== "pip-vault-bundle") {
+          setPipVaultError("Selected file is not a vault backup bundle");
           flashStatus("Selected file is not a vault backup bundle");
           return;
         }
         bundleMode = parsed?.mode;
       } catch (err) {
+        setPipVaultError("Invalid vault bundle JSON");
         flashStatus("Invalid vault bundle JSON");
         return;
       }
 
-      if (bundleMode === "password" && !pipVaultPassword.trim()) {
-        flashStatus("Enter the vault password before importing");
+      const rememberedPassword = readRememberedPassword();
+      const effectivePassword =
+        bundleMode === "password" ? pipVaultPassword.trim() || rememberedPassword || "" : undefined;
+
+      if (bundleMode === "password" && !effectivePassword) {
+        const message = "Enter the vault password before importing";
+        setPipVaultPasswordError(message);
+        setPipVaultError(message);
+        flashStatus(message);
         return;
       }
 
+      setPipVaultPasswordError(null);
+      setPipVaultError(null);
+      setPipVaultTask({ kind: "import", label: "Importing vault backup…" });
       setPipVaultBusy(true);
       try {
-        const result = await importPipVaultBundle(text, bundleMode === "password" ? pipVaultPassword : undefined);
+        const result = await importPipVaultBundle(text, effectivePassword);
         if (!result.ok) {
           setPipVaultStatus(result.error);
+          setPipVaultError(result.error);
           flashStatus(result.error);
           return;
         }
 
         const message = `Vault imported (${result.records} record${result.records === 1 ? "" : "s"})`;
         setPipVaultStatus(message);
+        setPipVaultError(null);
         flashStatus(message);
-        setPipVaultPassword("");
+        rememberPasswordForSession(effectivePassword ?? null);
+        if (!pipVaultRememberUnlock) {
+          setPipVaultPassword("");
+        }
         await refreshPipVaultSnapshot();
         await refreshPipVaultRecords();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Vault import failed";
+        setPipVaultStatus(null);
+        setPipVaultError(message);
+        flashStatus(message);
       } finally {
         setPipVaultBusy(false);
+        setPipVaultTask(null);
       }
 
       input.value = "";
@@ -2244,6 +3059,24 @@ function App() {
 
     input.click();
   };
+
+  useEffect(() => {
+    if (!pipVaultSnapshot || pipVaultBusy) return;
+    if (pipVaultSnapshot.mode !== "password" || !pipVaultSnapshot.locked) {
+      autoUnlockAttemptRef.current = false;
+      return;
+    }
+
+    if (!pipVaultRememberUnlock) return;
+
+    const stored = readRememberedPassword();
+    if (!stored) return;
+    if (autoUnlockAttemptRef.current) return;
+
+    autoUnlockAttemptRef.current = true;
+    setPipVaultPassword(stored);
+    void runEnableVaultPassword(stored, { auto: true });
+  }, [pipVaultBusy, pipVaultRememberUnlock, pipVaultSnapshot, readRememberedPassword, runEnableVaultPassword]);
 
   const applyWalletSelection = (
     source: "ipc" | "path" | "jwk",
@@ -2586,6 +3419,43 @@ function App() {
     );
   };
 
+  const handleSelectNode = useCallback(
+    (id: string, meta?: { shiftKey?: boolean; metaKey?: boolean; ctrlKey?: boolean }) => {
+      const shiftKey = Boolean(meta?.shiftKey);
+      const multiKey = Boolean(meta?.metaKey || meta?.ctrlKey);
+
+      if (shiftKey) {
+        const anchor = selectionAnchorId && manifestOrder.includes(selectionAnchorId) ? selectionAnchorId : selectedNodeIds[0] ?? id;
+        const startIndex = manifestOrder.indexOf(anchor ?? "");
+        const endIndex = manifestOrder.indexOf(id);
+        if (startIndex === -1 || endIndex === -1) {
+          applySelection([id]);
+          return;
+        }
+        const [from, to] = startIndex <= endIndex ? [startIndex, endIndex] : [endIndex, startIndex];
+        const range = manifestOrder.slice(from, to + 1);
+        applySelection(range);
+        setSelectionAnchorId((current) => (current === anchor ? current : anchor));
+        return;
+      }
+
+      if (multiKey) {
+        const nextSet = new Set(selectedNodeIds);
+        if (nextSet.has(id)) {
+          nextSet.delete(id);
+        } else {
+          nextSet.add(id);
+        }
+        const ordered = manifestOrder.filter((nodeId) => nextSet.has(nodeId));
+        applySelection(ordered.length ? ordered : []);
+        return;
+      }
+
+      applySelection([id]);
+    },
+    [applySelection, manifestOrder, selectedNodeIds, selectionAnchorId, setSelectionAnchorId],
+  );
+
   const addFromCatalog = (item: CatalogItem) => {
     const node = fromCatalog(item);
     setManifest((prev) =>
@@ -2595,7 +3465,7 @@ function App() {
         nodes: [...prev.nodes, node],
       }),
     );
-    setSelectedNodeId(node.id);
+    selectSingleNode(node.id);
     flashStatus(`${item.name} added to manifest`);
   };
 
@@ -2607,7 +3477,7 @@ function App() {
         nodes: appendNodeToTree(prev.nodes, parentId, node),
       }),
     );
-    setSelectedNodeId(node.id);
+    selectSingleNode(node.id);
     flashStatus(`${item.name} added as child`);
   };
 
@@ -2662,6 +3532,69 @@ function App() {
 
     addChildFromCatalog(targetId, dropped);
   };
+
+  const handleDeleteSelection = () => {
+    if (!selectedNodeIds.length) {
+      flashStatus("Select at least one node to delete");
+      return;
+    }
+
+    const selection = new Set(selectedNodeIds);
+    const nextNodes = removeNodesById(manifestRef.current.nodes, selection);
+    if (nextNodes === manifestRef.current.nodes) {
+      flashStatus("Nothing to delete");
+      return;
+    }
+
+    const nextEntry = ensureEntry(manifestRef.current.entry, nextNodes);
+    const nextManifest = touch({
+      ...manifestRef.current,
+      entry: nextEntry ?? undefined,
+      nodes: nextNodes,
+    });
+
+    setManifest(nextManifest);
+    syncSelectionToManifest(nextManifest);
+    flashStatus(`Deleted ${selection.size} node${selection.size === 1 ? "" : "s"}`);
+  };
+
+  const handleDuplicateSelection = () => {
+    if (!selectedNodeIds.length) {
+      flashStatus("Select nodes to duplicate");
+      return;
+    }
+
+    const newIds: string[] = [];
+    const nextNodes = duplicateNodesInTree(manifestRef.current.nodes, selectedNodeSet, newIds);
+    if (nextNodes === manifestRef.current.nodes) {
+      flashStatus("Nothing to duplicate");
+      return;
+    }
+
+    const nextManifest = touch({ ...manifestRef.current, nodes: nextNodes });
+    setManifest(nextManifest);
+    applySelection(newIds.length ? newIds : selectedNodeIds);
+    flashStatus(`Duplicated ${newIds.length || selectedNodeIds.length} node${(newIds.length || selectedNodeIds.length) === 1 ? "" : "s"}`);
+  };
+
+  const stepHistory = useCallback(
+    (delta: number) => {
+      setHistoryState((current) => {
+        const target = Math.max(0, Math.min(current.pointer + delta, current.stack.length - 1));
+        if (target === current.pointer) return current;
+
+        const snapshot = current.stack[target];
+        historySuppressedRef.current = true;
+        setManifest(snapshot);
+        syncSelectionToManifest(snapshot);
+        return { ...current, pointer: target };
+      });
+    },
+    [setManifest, syncSelectionToManifest],
+  );
+
+  const handleUndo = useCallback(() => stepHistory(-1), [stepHistory]);
+  const handleRedo = useCallback(() => stepHistory(1), [stepHistory]);
 
   const updateNodeTitle = (title: string) => {
     if (!selectedNodeId) return;
@@ -2741,11 +3674,10 @@ function App() {
     const id = Number(value);
     const draft = await getDraft(id);
     if (draft) {
-      setManifest(draft.document);
+      adoptManifest(draft.document, { resetHistory: true });
       setActiveDraftId(id);
       setSavedSignature(manifestSignature(draft.document));
       setLastSavedAt(draft.updatedAt);
-      setSelectedNodeId(draft.document.entry ?? draft.document.nodes[0]?.id ?? null);
       void refreshDraftHistory(id);
       flashStatus("Draft loaded");
     }
@@ -2765,9 +3697,8 @@ function App() {
 
   const handleRevertToRevision = (revision: DraftRevision) => {
     setRevertTargetId(revision.id);
-    setManifest(revision.document);
+    adoptManifest(revision.document);
     setActiveDraftId(revision.draftId);
-    setSelectedNodeId(revision.document.entry ?? revision.document.nodes[0]?.id ?? null);
     setLastSavedAt(revision.savedAt);
     flashStatus(`Reverted to ${formatDraftSaveMode(revision.mode).toLowerCase()} from ${formatDate(revision.savedAt)}`);
     window.setTimeout(() => {
@@ -2835,15 +3766,10 @@ function App() {
     input.click();
   };
 
-  const flashStatus = (message: string) => {
-    setStatus(message);
-    window.setTimeout(() => setStatus(null), 1800);
-  };
-
   const handleCherryPick = useCallback(
     (entry: DraftDiffEntry, action: "add" | "replace" | "remove") => {
       let message = "";
-      let nextSelected = selectedNodeId;
+      let nextSelected: string | null = primarySelectedId;
 
       setManifest((prev) => {
         let nextNodes = prev.nodes;
@@ -2894,15 +3820,17 @@ function App() {
         });
       });
 
-      if (nextSelected !== selectedNodeId) {
-        setSelectedNodeId(nextSelected);
+      if (nextSelected) {
+        applySelection([nextSelected]);
+      } else {
+        syncSelectionToManifest(manifestRef.current);
       }
 
       if (message) {
         flashStatus(message);
       }
     },
-    [flashStatus, selectedNodeId],
+    [applySelection, flashStatus, primarySelectedId, syncSelectionToManifest],
   );
 
   const handleCopyAoId = async (value: string | null, label: string) => {
@@ -3124,6 +4052,16 @@ function App() {
           description: "Open or close this reference panel.",
         },
         {
+          shortcut: "Cmd/Ctrl+Z",
+          action: "Undo",
+          description: "Step back through manifest changes (history capped at 20).",
+        },
+        {
+          shortcut: "Shift+Cmd/Ctrl+Z",
+          action: "Redo",
+          description: "Reapply the next manifest change.",
+        },
+        {
           shortcut: "Esc",
           action: "Close modal",
           description: "Dismiss the palette or the hotkey overlay.",
@@ -3171,6 +4109,24 @@ function App() {
       const isAltShortcut = event.altKey && !event.metaKey && !event.ctrlKey && !event.shiftKey;
       const isHotkeyShortcut =
         (event.shiftKey && key === "/" && !event.metaKey && !event.ctrlKey && !event.altKey) || key === "?";
+      const isUndoShortcut = key === "z" && (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey;
+      const isRedoShortcut = key === "z" && (event.metaKey || event.ctrlKey) && event.shiftKey && !event.altKey;
+      const target = event.target as HTMLElement | null;
+      const targetIsForm =
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.isContentEditable ||
+        target?.getAttribute("role") === "textbox";
+
+      if ((isUndoShortcut || isRedoShortcut) && !targetIsForm) {
+        event.preventDefault();
+        if (isUndoShortcut) {
+          handleUndo();
+        } else {
+          handleRedo();
+        }
+        return;
+      }
 
       if (isPaletteShortcut) {
         event.preventDefault();
@@ -3293,6 +4249,8 @@ function App() {
     toggleTheme,
     filteredPaletteActions,
     paletteActions,
+    handleUndo,
+    handleRedo,
   ]);
 
   const hasHealthAlert = healthSummary.failing.length > 0;
@@ -3368,9 +4326,9 @@ function App() {
                     <span className="health-sla-note">
                       {healthSla.breached
                         ? healthSla.failureBreached
-                          ? `Failures ${healthSla.failureStreak}/${SLA_FAILURE_THRESHOLD}`
-                          : `Avg latency ${healthSla.averageLatency ?? "—"} ms > ${SLA_LATENCY_THRESHOLD_MS} ms`
-                        : `Target: < ${SLA_FAILURE_THRESHOLD} failures • ≤ ${SLA_LATENCY_THRESHOLD_MS} ms avg`}
+                          ? `Failures ${healthSla.failureStreak}/${slaFailureThreshold}`
+                          : `Avg latency ${healthSla.averageLatency ?? "—"} ms > ${slaLatencyThresholdMs} ms`
+                        : `Target: < ${slaFailureThreshold} failures • ≤ ${slaLatencyThresholdMs} ms avg`}
                     </span>
                   </div>
                 </div>
@@ -3445,15 +4403,104 @@ function App() {
                 </div>
               )}
               <div className="health-collapse" id="health-panel" aria-hidden={!healthExpanded}>
+                <div className="health-config">
+                  <div className="health-config-head">
+                    <div>
+                      <p className="eyebrow">SLA</p>
+                      <h5>Controls</h5>
+                    </div>
+                    <label className="health-notify-toggle">
+                      <input
+                        type="checkbox"
+                        checked={healthNotifyEnabled}
+                        onChange={(e) => setHealthNotifyEnabled(e.target.checked)}
+                      />
+                      <span>Desktop notification on breach</span>
+                    </label>
+                  </div>
+                  <div className="health-config-grid">
+                    <label className="health-input">
+                      <span>Fail streak</span>
+                      <input
+                        type="number"
+                        min={1}
+                        value={slaFailureThreshold}
+                        onChange={(e) => setSlaFailureThreshold(Math.max(1, Math.round(Number(e.target.value) || 1)))}
+                        aria-label="Failure streak threshold"
+                      />
+                    </label>
+                    <label className="health-input">
+                      <span>Avg latency (ms)</span>
+                      <input
+                        type="number"
+                        min={50}
+                        step={50}
+                        value={slaLatencyThresholdMs}
+                        onChange={(e) =>
+                          setSlaLatencyThresholdMs(
+                            Math.max(50, Math.round(Number(e.target.value) || DEFAULT_SLA_LATENCY_THRESHOLD_MS)),
+                          )
+                        }
+                        aria-label="Average latency threshold (ms)"
+                      />
+                    </label>
+                  </div>
+                  {healthSparkline && (
+                    <div className="health-sparkline" aria-label="Latency trend sparkline">
+                      <svg
+                        viewBox={`0 0 ${healthSparkline.width} ${healthSparkline.height}`}
+                        width="100%"
+                        height={healthSparkline.height}
+                        role="presentation"
+                      >
+                        <path d={healthSparkline.path} className="sparkline-path" />
+                        {healthSparkline.showLatencyLine && (
+                          <line
+                            x1={0}
+                            x2={healthSparkline.width}
+                            y1={healthSparkline.latencyLine}
+                            y2={healthSparkline.latencyLine}
+                            className="sparkline-threshold"
+                          />
+                        )}
+                        {healthSparkline.points.map((point, idx) => (
+                          <circle
+                            key={`${point.x}-${idx}`}
+                            cx={point.x}
+                            cy={point.y}
+                            r={idx === healthSparkline.points.length - 1 ? 2.6 : 1.8}
+                            className="sparkline-dot"
+                          />
+                        ))}
+                      </svg>
+                      <div className="health-sparkline-meta">
+                        <span className="mono">Last {healthSparkline.latest} ms</span>
+                        <span className="mono subtle">
+                          min {healthSparkline.min} • max {healthSparkline.max}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
                 <div className="health-events">
                   <div className="health-events-head">
                     <div>
                       <p className="eyebrow">Recent checks</p>
                       <h5>Alert log</h5>
                     </div>
-                    <span className={`sla-pill ${healthSla.breached ? "breached" : "ok"}`}>
-                      {healthSla.breached ? "SLA breach" : "SLA OK"}
-                    </span>
+                    <div className="health-events-actions">
+                      <span className={`sla-pill ${healthSla.breached ? "breached" : "ok"}`}>
+                        {healthSla.breached ? "SLA breach" : "SLA OK"}
+                      </span>
+                      <div className="health-export-buttons">
+                        <button className="ghost small" onClick={() => void handleExportHealthHistory("json")}>
+                          Export JSON
+                        </button>
+                        <button className="ghost small" onClick={() => void handleExportHealthHistory("csv")}>
+                          Export CSV
+                        </button>
+                      </div>
+                    </div>
                   </div>
                   <div className="health-events-list">
                     {healthEventLog.length === 0 ? (
@@ -3569,69 +4616,72 @@ function App() {
           )}
           {workspace === "studio" && (
             <div className="top-buttons">
-            <select
-              className="draft-select"
-              value={activeDraftId ?? ""}
-              onChange={(e) => handleLoadDraft(e.target.value)}
-              aria-label="Saved drafts"
-            >
-              <option value="">Scratch draft</option>
-              {drafts.map((draft) => (
-                <option key={draft.id} value={draft.id ?? ""}>
-                  {draft.name} • {formatDate(draft.updatedAt)}
-                </option>
-              ))}
-            </select>
-            {activeDraftId && (
-              <button className="ghost" onClick={() => handleDeleteDraft(activeDraftId)} title="Delete draft">
-                Remove
+              <button className="ghost" onClick={handleUndo} disabled={!canUndo} title="Cmd/Ctrl+Z">
+                Undo
               </button>
-            )}
-            <button className="ghost" onClick={() => void openDraftDiffPanel()}>
-              Draft diff
-            </button>
-            <button className="ghost" onClick={handleLoadPip} disabled={loadingManifest}>
-              {loadingManifest ? "Loading manifest…" : "Load PIP"}
-            </button>
-            <button className="ghost" onClick={handleFetchPipFromWorker} disabled={loadingManifest}>
-              {loadingManifest ? "…" : "Fetch PIP (worker)"}
-            </button>
-            <button className="ghost" onClick={handleLoadPipFromVault} disabled={pipVaultBusy || pipVaultLocked}>
-              {pipVaultBusy ? "Vault…" : "Load vault"}
-            </button>
-            <button className="ghost" onClick={handleClearPipVault} disabled={pipVaultBusy || pipVaultLocked}>
-              {pipVaultBusy ? "Vault…" : "Delete vault"}
-            </button>
-            <button
-              className="ghost"
-              onClick={() => startNewDraft("New draft started")}
-            >
-              New draft
-            </button>
-            <button className="ghost" onClick={handleImportDrafts}>
-              Import drafts
-            </button>
-            <button className="ghost" onClick={handleExportDrafts}>
-              Export drafts
-            </button>
-            <button className="ghost" onClick={handleExportManifest}>
-              Export manifest
-            </button>
-            <button className="ghost" onClick={handleDuplicateDraft} disabled={saving}>
-              Duplicate draft
-            </button>
-            <span
-              className={`pill save-status ${saving ? "busy" : isDirty ? "dirty" : "saved"}`}
-              title={lastSavedAt ? `Last saved ${formatDate(lastSavedAt)}` : "This draft has not been saved yet"}
-            >
-              <span className="save-status-label">{saveStatusLabel}</span>
-              <span className="save-status-time">{saveStatusTime}</span>
-            </span>
-            <button className="primary" onClick={handleSaveDraft} disabled={saving}>
-              {saving ? "Saving…" : "Save draft"}
-            </button>
-            {pipVaultStatus && <span className="pill ghost pip-vault-pill">{pipVaultStatus}</span>}
-          </div>
+              <button className="ghost" onClick={handleRedo} disabled={!canRedo} title="Shift+Cmd/Ctrl+Z">
+                Redo
+              </button>
+              <select
+                className="draft-select"
+                value={activeDraftId ?? ""}
+                onChange={(e) => handleLoadDraft(e.target.value)}
+                aria-label="Saved drafts"
+              >
+                <option value="">Scratch draft</option>
+                {drafts.map((draft) => (
+                  <option key={draft.id} value={draft.id ?? ""}>
+                    {draft.name} • {formatDate(draft.updatedAt)}
+                  </option>
+                ))}
+              </select>
+              {activeDraftId && (
+                <button className="ghost" onClick={() => handleDeleteDraft(activeDraftId)} title="Delete draft">
+                  Remove
+                </button>
+              )}
+              <button className="ghost" onClick={() => void openDraftDiffPanel()}>
+                Draft diff
+              </button>
+              <button className="ghost" onClick={handleLoadPip} disabled={loadingManifest}>
+                {loadingManifest ? "Loading manifest…" : "Load PIP"}
+              </button>
+              <button className="ghost" onClick={handleFetchPipFromWorker} disabled={loadingManifest}>
+                {loadingManifest ? "…" : "Fetch PIP (worker)"}
+              </button>
+              <button className="ghost" onClick={handleLoadPipFromVault} disabled={pipVaultBusy || pipVaultLocked}>
+                {pipVaultBusy ? "Vault…" : "Load vault"}
+              </button>
+              <button className="ghost" onClick={handleClearPipVault} disabled={pipVaultBusy || pipVaultLocked}>
+                {pipVaultBusy ? "Vault…" : "Delete vault"}
+              </button>
+              <button className="ghost" onClick={() => startNewDraft("New draft started")}>
+                New draft
+              </button>
+              <button className="ghost" onClick={handleImportDrafts}>
+                Import drafts
+              </button>
+              <button className="ghost" onClick={handleExportDrafts}>
+                Export drafts
+              </button>
+              <button className="ghost" onClick={handleExportManifest}>
+                Export manifest
+              </button>
+              <button className="ghost" onClick={handleDuplicateDraft} disabled={saving}>
+                Duplicate draft
+              </button>
+              <span
+                className={`pill save-status ${saving ? "busy" : isDirty ? "dirty" : "saved"}`}
+                title={lastSavedAt ? `Last saved ${formatDate(lastSavedAt)}` : "This draft has not been saved yet"}
+              >
+                <span className="save-status-label">{saveStatusLabel}</span>
+                <span className="save-status-time">{saveStatusTime}</span>
+              </span>
+              <button className="primary" onClick={handleSaveDraft} disabled={saving}>
+                {saving ? "Saving…" : "Save draft"}
+              </button>
+              {pipVaultStatus && <span className="pill ghost pip-vault-pill">{pipVaultStatus}</span>}
+            </div>
           )}
           <section className="draft-history-panel" aria-label="Draft save history">
             <div className="draft-history-head">
@@ -3730,6 +4780,25 @@ function App() {
             </span>
           </div>
         </div>
+        {pipVaultTask && (
+          <div className="pip-vault-progress" role="status">
+            <div className="pip-vault-progress-bar">
+              <span className={`fill ${pipVaultTask.kind}`} />
+            </div>
+            <div className="pip-vault-progress-label">{pipVaultTask.label}</div>
+          </div>
+        )}
+        {pipVaultError && (
+          <div className="pip-vault-alert" role="alert">
+            <div className="pip-vault-alert-copy">
+              <strong>Vault error</strong>
+              <span>{pipVaultError}</span>
+            </div>
+            <button className="ghost small" onClick={() => setPipVaultError(null)}>
+              Dismiss
+            </button>
+          </div>
+        )}
         <div className="pip-vault-grid">
           <article className="pip-vault-card">
             <div className="stack-head">
@@ -3798,36 +4867,80 @@ function App() {
               </div>
             </div>
             <div className="pip-vault-password-row">
-              <input
-                type="password"
-                value={pipVaultPassword}
-                onChange={(e) => setPipVaultPassword(e.target.value)}
-                placeholder={pipVaultSnapshot?.mode === "password" ? "Enter vault password" : "Set a vault password"}
-                aria-label="Vault password"
-              />
+              <div className={`pip-vault-password-input ${pipVaultPasswordError ? "has-error" : ""}`}>
+                <input
+                  type="password"
+                  value={pipVaultPassword}
+                  onChange={(e) => {
+                    setPipVaultPassword(e.target.value);
+                    if (pipVaultPasswordError) setPipVaultPasswordError(null);
+                  }}
+                  placeholder={pipVaultSnapshot?.mode === "password" ? "Enter vault password" : "Set a vault password"}
+                  aria-label="Vault password"
+                />
+                {pipVaultPasswordError ? <p className="field-error">{pipVaultPasswordError}</p> : null}
+              </div>
               <button
                 className="primary"
                 onClick={handleEnableVaultPassword}
-                disabled={pipVaultBusy || !pipVaultPassword.trim()}
+                disabled={
+                  pipVaultBusy ||
+                  (!pipVaultPassword.trim() &&
+                    !(pipVaultSnapshot?.mode === "password" && rememberedVaultPassword))
+                }
               >
-                {pipVaultSnapshot?.mode === "password" ? (pipVaultSnapshot.locked ? "Unlock" : "Rotate password") : "Enable password"}
+                {pipVaultTask?.kind === "unlock"
+                  ? "Working…"
+                  : pipVaultSnapshot?.mode === "password"
+                    ? pipVaultSnapshot.locked
+                      ? "Unlock"
+                      : "Rotate password"
+                    : "Enable password"}
               </button>
               {pipVaultSnapshot?.mode === "password" && (
-                <button className="ghost" onClick={handleDisableVaultPassword} disabled={pipVaultBusy}>
+                <button
+                  className="ghost"
+                  onClick={handleDisableVaultPassword}
+                  disabled={pipVaultBusy || pipVaultTask?.kind === "unlock"}
+                >
                   Disable password
                 </button>
               )}
             </div>
+            <div className="pip-vault-password-meta">
+              <label className="remember-toggle">
+                <input
+                  type="checkbox"
+                  checked={pipVaultRememberUnlock}
+                  onChange={(e) => handleRememberUnlockToggle(e.target.checked)}
+                />
+                Remember unlock for this session
+                {rememberedVaultPassword ? <span className="remember-hint">Stored for this session</span> : null}
+              </label>
+              <div className={`pip-vault-strength ${pipVaultPasswordStrength.score ? "" : "muted"}`}>
+                <div className="strength-meter">
+                  <span style={{ width: `${(pipVaultPasswordStrength.score / 4) * 100}%` }} />
+                </div>
+                <div className="strength-meta">
+                  <strong>
+                    {pipVaultPasswordStrength.score ? pipVaultPasswordStrength.label : "Strength"}
+                  </strong>
+                  <span>
+                    {pipVaultPasswordStrength.score ? pipVaultPasswordStrength.hint : "Use 12+ chars with numbers & symbols."}
+                  </span>
+                </div>
+              </div>
+            </div>
             <div className="pip-vault-actions">
               <button className="ghost" onClick={handleImportVaultBundle} disabled={pipVaultBusy}>
-                Import backup
+                {pipVaultTask?.kind === "import" ? "Importing…" : "Import backup"}
               </button>
               <button
                 className="ghost"
                 onClick={handleExportVaultBundle}
                 disabled={pipVaultBusy || (!pipVaultSnapshot?.exists && !pipVaultRecords.length)}
               >
-                Export backup
+                {pipVaultTask?.kind === "export" ? "Exporting…" : "Export backup"}
               </button>
             </div>
             <p className="hint">Use password mode for portable backups. Import uses the password field when required.</p>
@@ -4189,6 +5302,28 @@ function App() {
               </span>
             </div>
           </section>
+          <div className="composition-toolbar">
+            <div className="selection-readout">
+              <span className="pill ghost selection-pill">
+                {selectedNodeIds.length ? `${selectedNodeIds.length} selected` : "No selection"}
+              </span>
+              <span className="hint">Shift/Ctrl-click in the tree to multi-select. Drag/drop still works.</span>
+            </div>
+            <div className="composition-actions">
+              <button className="ghost small" onClick={handleUndo} disabled={!canUndo} title="Cmd/Ctrl+Z">
+                Undo
+              </button>
+              <button className="ghost small" onClick={handleRedo} disabled={!canRedo} title="Shift+Cmd/Ctrl+Z">
+                Redo
+              </button>
+              <button className="ghost small" onClick={handleDuplicateSelection} disabled={!selectedNodeIds.length}>
+                Duplicate
+              </button>
+              <button className="ghost small danger" onClick={handleDeleteSelection} disabled={!selectedNodeIds.length}>
+                Delete
+              </button>
+            </div>
+          </div>
           <div
             className={`preview-surface ${compositionDropActive ? "drop-active" : ""}`}
             onDragOver={handleCompositionDragOver}
@@ -4211,15 +5346,18 @@ function App() {
               </div>
             )}
             {manifest.nodes.length > 0 && (
-              <ManifestRenderer
-                manifest={manifest}
-                selectedId={selectedNodeId}
-                onSelect={(id) => setSelectedNodeId(id)}
-                dropTargetId={treeDropTargetId}
-                onDropTargetChange={setTreeDropTargetId}
-                onDropCatalogItem={handleTreeDrop}
-                diffHighlight={draftDiffOpen ? draftDiffHighlight : undefined}
-              />
+              <Suspense fallback={<ManifestRendererFallback />}>
+                <ManifestRenderer
+                  manifest={manifest}
+                  selectedIds={selectedNodeIds}
+                  primarySelectedId={selectedNodeId}
+                  onSelect={(id, meta) => handleSelectNode(id, meta)}
+                  dropTargetId={treeDropTargetId}
+                  onDropTargetChange={setTreeDropTargetId}
+                  onDropCatalogItem={handleTreeDrop}
+                  diffHighlight={draftDiffOpen ? draftDiffHighlight : undefined}
+                />
+              </Suspense>
             )}
           </div>
         </main>
@@ -4276,6 +5414,7 @@ function App() {
                   {(propsInspection?.issueCount ?? 0) === 1 ? "" : "s"}
                 </span>
               </div>
+              {selectedNodeIds.length > 1 && <p className="hint multi-select-hint">Inspector is showing the first selected node.</p>}
               <label className="field">
                 <span>Title</span>
                 <input value={selectedNode.title} onChange={(e) => updateNodeTitle(e.target.value)} />
@@ -4287,6 +5426,7 @@ function App() {
                     value={propsFormDraft}
                     path={[]}
                     onChange={handlePropsFormChange}
+                    diffPaths={propsDiffPaths}
                   />
                   <div className="props-json-toggle">
                     <button className="ghost small" type="button" onClick={() => setJsonEditorOpen((current) => !current)}>
@@ -4743,27 +5883,63 @@ function App() {
             </table>
           </div>
         </div>
-        <AoLogPanel aoLog={aoLog} onCopy={handleCopyAoId} onOpen={handleOpenAoId} />
+        <Suspense fallback={<AoLogPanelFallback />}>
+          <AoLogPanel aoLog={aoLog} onCopy={handleCopyAoId} onOpen={handleOpenAoId} />
+        </Suspense>
       </div>
 
-      <DraftDiffPanel
-        open={draftDiffOpen}
-        loading={draftDiffLoading}
-        entries={draftDiffEntries}
-        options={draftDiffOptions}
-        rightValue={draftDiffRightValue}
-        leftLabel={`${manifest.name} (current)`}
-        leftDetail={`Updated ${formatDate(manifest.metadata.updatedAt)}`}
-        rightLabel={draftDiffRight ? draftDiffRight.name : undefined}
-        rightDetail={
-          draftDiffRight
-            ? `${draftDiffRight.mode ? formatDraftSaveMode(draftDiffRight.mode) : "Draft"} • ${formatDate(draftDiffRight.savedAt)}`
-            : undefined
-        }
-        onClose={() => setDraftDiffOpen(false)}
-        onSelectRight={handleSelectDraftDiffOption}
-        onCherryPick={handleCherryPick}
-      />
+      {(draftDiffOpen || draftDiffLoading) && (
+        <Suspense
+          fallback={
+            <DraftDiffPanelFallback
+              leftLabel={`${manifest.name} (current)`}
+              leftDetail={`Updated ${formatDate(manifest.metadata.updatedAt)}`}
+              onClose={closeDraftDiffPanel}
+            />
+          }
+        >
+          <DraftDiffPanel
+            open={draftDiffOpen}
+            loading={draftDiffLoading}
+            entries={draftDiffEntries}
+            options={draftDiffOptions}
+            rightValue={draftDiffRightValue}
+            leftLabel={`${manifest.name} (current)`}
+            leftDetail={`Updated ${formatDate(manifest.metadata.updatedAt)}`}
+            rightLabel={draftDiffRight ? draftDiffRight.name : undefined}
+            rightDetail={
+              draftDiffRight
+                ? `${draftDiffRight.mode ? formatDraftSaveMode(draftDiffRight.mode) : "Draft"} • ${formatDate(draftDiffRight.savedAt)}`
+                : undefined
+            }
+            onClose={closeDraftDiffPanel}
+            onSelectRight={handleSelectDraftDiffOption}
+            onCherryPick={handleCherryPick}
+          />
+        </Suspense>
+      )}
+
+      {pipVaultModeConfirm && (
+        <div className="pip-vault-modal-backdrop">
+          <div className="pip-vault-modal" role="dialog" aria-modal="true" aria-label="Confirm vault mode change">
+            <p className="eyebrow">Vault mode</p>
+            <h4>{pipVaultModeConfirm.action === "enable" ? "Enable password mode?" : "Switch to keychain storage?"}</h4>
+            <p>
+              {pipVaultModeConfirm.action === "enable"
+                ? "Your vault will be re-encrypted with the password you entered. Backups created after this will require that password to open."
+                : "Vault encryption will use the system keychain or local key. Password-protected backups will still need their password to restore."}
+            </p>
+            <div className="pip-vault-modal-actions">
+              <button className="ghost" onClick={handleCancelVaultModeConfirm}>
+                Cancel
+              </button>
+              <button className="primary" onClick={handleConfirmVaultMode}>
+                {pipVaultModeConfirm.action === "enable" ? "Enable password" : "Use keychain"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {status && <div className="status-bar toast">{status}</div>}
       {(pip?.manifestTx || remoteError) && (

@@ -1,6 +1,6 @@
 import React, { useMemo } from "react";
 
-import { ManifestDocument, ManifestNode, ManifestShape, ManifestValue } from "../types/manifest";
+import { ManifestDocument, ManifestNode, ManifestShape, ManifestValue, isManifestExpression } from "../types/manifest";
 import type { DraftDiffKind } from "../utils/draftDiff";
 
 type NodeWithRefs = ManifestNode & { children?: Array<ManifestNode | string> };
@@ -8,8 +8,9 @@ type RenderNode = ManifestNode & { children?: RenderNode[] };
 
 interface ManifestRendererProps {
   manifest: ManifestDocument;
-  selectedId?: string | null;
-  onSelect?: (nodeId: string) => void;
+  selectedIds?: string[];
+  primarySelectedId?: string | null;
+  onSelect?: (nodeId: string, meta?: { shiftKey?: boolean; metaKey?: boolean; ctrlKey?: boolean }) => void;
   dropTargetId?: string | null;
   onDropTargetChange?: (nodeId: string | null) => void;
   onDropCatalogItem?: (targetId: string, itemId: string) => void;
@@ -18,6 +19,10 @@ interface ManifestRendererProps {
 
 const formatValue = (value: ManifestValue): string => {
   if (value === null) return "null";
+
+  if (isManifestExpression(value)) {
+    return `expr(${value.__expr})`;
+  }
 
   if (Array.isArray(value)) {
     const sample = value.slice(0, 3).map((entry) => formatValue(entry));
@@ -91,8 +96,9 @@ const collectIds = (node: RenderNode, bag: Set<string>) => {
 const RenderBranch: React.FC<{
   node: RenderNode;
   entryId?: string;
-  selectedId?: string | null;
-  onSelect?: (id: string) => void;
+  selectedIds?: Set<string>;
+  primarySelectedId?: string | null;
+  onSelect?: (id: string, meta?: { shiftKey?: boolean; metaKey?: boolean; ctrlKey?: boolean }) => void;
   dropTargetId?: string | null;
   onDropTargetChange?: (nodeId: string | null) => void;
   onDropCatalogItem?: (targetId: string, itemId: string) => void;
@@ -100,14 +106,16 @@ const RenderBranch: React.FC<{
 }> = ({
   node,
   entryId,
-  selectedId,
+  selectedIds,
+  primarySelectedId,
   onSelect,
   dropTargetId,
   onDropTargetChange,
   onDropCatalogItem,
   diffHighlight,
 }) => {
-  const isSelected = node.id === selectedId;
+  const isSelected = selectedIds?.has(node.id) ?? false;
+  const isPrimary = primarySelectedId === node.id;
   const isEntry = node.id === entryId;
   const isDropTarget = node.id === dropTargetId;
   const highlightKind = diffHighlight?.[node.id];
@@ -118,8 +126,10 @@ const RenderBranch: React.FC<{
   return (
     <div className="tree-branch">
       <article
-        className={`tree-card ${isSelected ? "selected" : ""} ${isDropTarget ? "drop-target" : ""} ${highlightKind ? `diff-${highlightKind}` : ""}`}
-        onClick={() => onSelect?.(node.id)}
+        className={`tree-card ${isSelected ? "selected" : ""} ${isSelected && !isPrimary ? "selected-secondary" : ""} ${isPrimary ? "primary-selected" : ""} ${isDropTarget ? "drop-target" : ""} ${highlightKind ? `diff-${highlightKind}` : ""}`}
+        onClick={(event) =>
+          onSelect?.(node.id, { shiftKey: event.shiftKey, metaKey: event.metaKey, ctrlKey: event.ctrlKey })
+        }
         role="button"
         tabIndex={0}
         onDragEnter={(event) => {
@@ -187,7 +197,8 @@ const RenderBranch: React.FC<{
               key={child.id}
               node={child}
               entryId={entryId}
-              selectedId={selectedId}
+              selectedIds={selectedIds}
+              primarySelectedId={primarySelectedId}
               onSelect={onSelect}
               dropTargetId={dropTargetId}
               onDropTargetChange={onDropTargetChange}
@@ -203,13 +214,15 @@ const RenderBranch: React.FC<{
 
 const ManifestRenderer: React.FC<ManifestRendererProps> = ({
   manifest,
-  selectedId,
+  selectedIds,
+  primarySelectedId,
   onSelect,
   dropTargetId,
   onDropTargetChange,
   onDropCatalogItem,
   diffHighlight,
 }) => {
+  const selectedIdSet = useMemo(() => new Set(selectedIds ?? []), [selectedIds]);
   const { roots, orphans } = useMemo(() => {
     const index = new Map((manifest.nodes as NodeWithRefs[]).map((node) => [node.id, node]));
 
@@ -254,7 +267,8 @@ const ManifestRenderer: React.FC<ManifestRendererProps> = ({
           key={node.id}
           node={node}
           entryId={manifest.entry}
-          selectedId={selectedId}
+          selectedIds={selectedIdSet}
+          primarySelectedId={primarySelectedId}
           onSelect={onSelect}
           dropTargetId={dropTargetId}
           onDropTargetChange={onDropTargetChange}
@@ -272,7 +286,8 @@ const ManifestRenderer: React.FC<ManifestRendererProps> = ({
                 key={node.id}
                 node={node}
                 entryId={manifest.entry}
-                selectedId={selectedId}
+                selectedIds={selectedIdSet}
+                primarySelectedId={primarySelectedId}
                 onSelect={onSelect}
                 dropTargetId={dropTargetId}
                 onDropTargetChange={onDropTargetChange}

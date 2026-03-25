@@ -1,10 +1,21 @@
 export type ManifestPrimitive = string | number | boolean | null;
 
-export type ManifestValue = ManifestPrimitive | ManifestValue[] | ManifestShape;
+export interface ManifestExpression {
+  __expr: string;
+}
+
+export type ManifestValue = ManifestPrimitive | ManifestExpression | ManifestValue[] | ManifestShape;
 
 export type ManifestShape = {
   [key: string]: ManifestValue;
 };
+
+export const isManifestExpression = (value: unknown): value is ManifestExpression =>
+  typeof value === "object" &&
+  value !== null &&
+  !Array.isArray(value) &&
+  Object.prototype.hasOwnProperty.call(value as Record<string, unknown>, "__expr") &&
+  typeof (value as Record<string, unknown>).__expr === "string";
 
 export type PropsSchemaType = "string" | "number" | "boolean" | "null" | "object" | "array";
 

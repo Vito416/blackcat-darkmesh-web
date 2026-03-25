@@ -75,6 +75,64 @@ export async function getRecentHealthEvents(limit = 20): Promise<HealthEvent[]> 
   return rows.map(stripRow);
 }
 
+export async function listHealthEvents(limit?: number): Promise<HealthEvent[]> {
+  const query = db.events.orderBy("recordedAt").reverse();
+  const rows = typeof limit === "number" && limit > 0 ? await query.limit(limit).toArray() : await query.toArray();
+  return rows.map(stripRow);
+}
+
+const csvEscape = (value: string | number | boolean | null | undefined) => {
+  const str = value == null ? "" : String(value);
+  if (/[",\n]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+};
+
+export const healthEventsToCsv = (events: HealthEvent[]): string => {
+  const headers = [
+    "id",
+    "recordedAt",
+    "overall",
+    "ok",
+    "warn",
+    "error",
+    "missing",
+    "averageLatencyMs",
+    "failing",
+    "checks",
+  ];
+
+  const rows = events.map((event) => {
+    const failing =
+      event.summary?.failing?.map((item) => `${item.id}:${item.status}`).join(" | ") ??
+      event.checks
+        ?.filter((check) => check.status === "error" || check.status === "missing")
+        .map((check) => `${check.id}:${check.status}`)
+        .join(" | ") ??
+      "";
+
+    const checks = event.checks?.map((check) => `${check.id}:${check.status}`).join(" | ") ?? "";
+
+    return [
+      event.id,
+      event.recordedAt,
+      event.overall,
+      event.ok,
+      event.warn,
+      event.error,
+      event.missing,
+      event.averageLatencyMs ?? "",
+      failing,
+      checks,
+    ]
+      .map(csvEscape)
+      .join(",");
+  });
+
+  return [headers.join(","), ...rows].join("\n");
+};
+
 export async function clearHealthEvents(): Promise<void> {
   await db.events.clear();
 }
