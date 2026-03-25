@@ -205,6 +205,7 @@ type FileBridgeResult = {
 };
 
 type Theme = "light" | "cyberpunk";
+type Workspace = "data" | "ao" | "studio" | "preview";
 type WalletMode = "ipc" | "path" | "jwk";
 type TaskState = "idle" | "pending" | "success" | "error";
 type AoMiniLogEntry = {
@@ -723,6 +724,7 @@ const DiffGroup: React.FC<{
 
 function App() {
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
+  const [workspace, setWorkspace] = useState<Workspace>("studio");
   const [catalog, setCatalog] = useState<CatalogItem[]>(seedCatalog);
   const [search, setSearch] = useState("");
   const [activeTypes, setActiveTypes] = useState<string[]>([]);
@@ -2419,8 +2421,26 @@ function App() {
             ?
           </button>
         </div>
+        <div className="workspace-nav">
+          {[
+            { id: "studio", label: "Creator Studio" },
+            { id: "ao", label: "AO Console" },
+            { id: "data", label: "Data Core" },
+            { id: "preview", label: "Preview Hub" },
+          ].map((item) => (
+            <button
+              key={item.id}
+              className={`chip ${workspace === (item.id as Workspace) ? "active" : ""}`}
+              onClick={() => setWorkspace(item.id as Workspace)}
+              type="button"
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
         <div className="top-actions">
-          <div className={`health-card ${healthExpanded ? "is-open" : "is-collapsed"}`}>
+          {workspace === "ao" && (
+            <div className={`health-card ${healthExpanded ? "is-open" : "is-collapsed"}`}>
             <div className="health-header">
               <div>
                 <p className="eyebrow">Health</p>
@@ -2495,8 +2515,10 @@ function App() {
                 )}
               </div>
             </div>
-          </div>
-          <div className="top-buttons">
+            </div>
+          )}
+          {workspace === "studio" && (
+            <div className="top-buttons">
             <select
               className="draft-select"
               value={activeDraftId ?? ""}
@@ -2557,6 +2579,7 @@ function App() {
             </button>
             {pipVaultStatus && <span className="pill ghost pip-vault-pill">{pipVaultStatus}</span>}
           </div>
+          )}
           <section className="draft-history-panel" aria-label="Draft save history">
             <div className="draft-history-head">
               <div>
@@ -2619,7 +2642,10 @@ function App() {
 
       <HotkeyOverlay open={hotkeyOverlayOpen} sections={hotkeySections} onClose={closeHotkeyOverlay} />
 
-      <section className="panel pip-vault-panel">
+      <section
+        className="panel pip-vault-panel"
+        style={{ display: workspace === "data" ? undefined : "none" }}
+      >
         <div className="panel-header">
           <div>
             <p className="eyebrow">PIP vault</p>
@@ -2825,7 +2851,7 @@ function App() {
         {pipVaultStatus && <div className="pip-vault-footer"><span className="pill ghost pip-vault-pill">{pipVaultStatus}</span></div>}
       </section>
 
-      <div className="panels">
+      <div className="panels" style={{ display: workspace === "studio" ? undefined : "none" }}>
         <aside className="panel catalog">
           <div className="panel-header">
             <div>
@@ -2942,7 +2968,11 @@ function App() {
               </div>
             </div>
           </div>
-          <section className="manifest-preview-card" aria-label="Current manifest metadata">
+          <section
+            className="manifest-preview-card"
+            aria-label="Current manifest metadata"
+            style={{ display: workspace === "preview" ? undefined : "none" }}
+          >
             <div className="stack-head">
               <div>
                 <p className="eyebrow">Manifest</p>
@@ -3221,7 +3251,7 @@ function App() {
         </aside>
       </div>
 
-      <div className="panel deploy">
+      <div className="panel deploy" style={{ display: workspace === "ao" ? undefined : "none" }}>
         <div className="panel-header">
           <div>
             <p className="eyebrow">AO deploy</p>
