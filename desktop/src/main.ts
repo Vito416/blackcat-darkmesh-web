@@ -1,10 +1,31 @@
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import fs from "fs/promises";
 import path from "path";
+import net from "net";
 
 const isDev = process.env.NODE_ENV !== "production";
 
-function createWindow() {
+async function waitForPort(host: string, port: number, attempts = 50, intervalMs = 200): Promise<void> {
+  for (let i = 0; i < attempts; i++) {
+    const ok = await new Promise<boolean>((resolve) => {
+      const socket = net.createConnection({ host, port });
+      const cleanup = () => socket.destroy();
+      socket.on("connect", () => {
+        cleanup();
+        resolve(true);
+      });
+      socket.on("error", () => {
+        cleanup();
+        resolve(false);
+      });
+    });
+    if (ok) return;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(`Renderer dev server not reachable at ${host}:${port}`);
+}
+
+async function createWindow() {
   const win = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -16,7 +37,13 @@ function createWindow() {
   });
 
   if (isDev) {
-    win.loadURL("http://localhost:5174");
+    const devUrl = "http://localhost:5174";
+    try {
+      await waitForPort("localhost", 5174);
+      await win.loadURL(devUrl);
+    } catch (err) {
+      await win.loadURL(devUrl); // attempt anyway to see error
+    }
     win.webContents.openDevTools({ mode: "detach" });
   } else {
     win.loadFile(path.join(__dirname, "renderer/index.html"));
