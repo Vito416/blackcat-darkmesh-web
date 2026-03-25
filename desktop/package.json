@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Desktop shell for blackcat write (Electron + Vite + React)",
-  "main": "dist/main.js",
+  "main": "dist/desktop/src/main.js",
   "scripts": {
     "clean": "rimraf dist release",
     "predev": "npm run build:main",
