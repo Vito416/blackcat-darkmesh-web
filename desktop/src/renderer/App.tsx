@@ -102,6 +102,24 @@ const healthStatusLabel = (status: HealthStatus["status"]) => {
   return status;
 };
 
+const healthSortByCheckedAtDesc = (a: HealthStatus, b: HealthStatus) =>
+  new Date(b.checkedAt).getTime() - new Date(a.checkedAt).getTime();
+
+const getLatestHealthSuccess = (health: HealthStatus[]) =>
+  [...health]
+    .filter((item) => item.lastSuccessAt)
+    .sort((a, b) => new Date(b.lastSuccessAt ?? 0).getTime() - new Date(a.lastSuccessAt ?? 0).getTime())[0];
+
+const getLatestHealthError = (health: HealthStatus[]) =>
+  [...health]
+    .filter((item) => item.lastError)
+    .sort(healthSortByCheckedAtDesc)[0];
+
+const healthSummaryLabel = (item?: HealthStatus) => {
+  if (!item) return "";
+  return `${item.label} ${healthStatusLabel(item.status)}`;
+};
+
 const mergeHealthResults = (previous: HealthStatus[], next: HealthStatus[]): HealthStatus[] => {
   const previousById = new Map(previous.map((item) => [item.id, item]));
 
@@ -400,6 +418,7 @@ function App() {
     () => catalog.filter((item) => matchesCatalogFilters(item, activeTypes, activeTags)),
     [activeTags, activeTypes, catalog],
   );
+  const saveStatusLabel = saving ? "Saving…" : isDirty ? "Unsaved changes" : "Autosaved";
   const propsInspection = useMemo(() => {
     if (!selectedNode) {
       return null;
@@ -468,6 +487,10 @@ function App() {
     }
   }, []);
 
+  const toggleTheme = useCallback(() => {
+    setTheme((current) => (current === "cyberpunk" ? "light" : "cyberpunk"));
+  }, []);
+
   useEffect(() => {
     fetchCatalog().then(setCatalog);
     refreshDrafts(true);
@@ -481,6 +504,9 @@ function App() {
   useEffect(() => {
     refreshHealth();
   }, [refreshHealth]);
+
+  const latestHealthSuccess = getLatestHealthSuccess(health);
+  const latestHealthError = getLatestHealthError(health);
 
   useEffect(() => {
     if (selectedNode) {
@@ -777,6 +803,30 @@ function App() {
       setRemoteError(null);
       setPipVaultStatus("Vault loaded");
       flashStatus("PIP loaded from vault");
+    } finally {
+      setPipVaultBusy(false);
+    }
+  };
+
+  const handleSavePipToVault = async () => {
+    if (!pip) {
+      const message = "Load a PIP before saving to vault";
+      setPipVaultStatus(message);
+      flashStatus(message);
+      return;
+    }
+
+    setPipVaultBusy(true);
+    try {
+      const saved = await savePipToVault(pip);
+      if (saved.ok) {
+        const message = `Vault saved ${formatDate(saved.updatedAt)}`;
+        setPipVaultStatus(message);
+        flashStatus("PIP saved to vault");
+      } else {
+        setPipVaultStatus(saved.error);
+        flashStatus(saved.error);
+      }
     } finally {
       setPipVaultBusy(false);
     }
@@ -1347,7 +1397,7 @@ function App() {
       label: theme === "cyberpunk" ? "Switch to light skin" : "Switch to cyberpunk skin",
       description: "Flip the active renderer theme.",
       shortcut: "Cmd/Ctrl+K",
-      run: () => setTheme((current) => (current === "cyberpunk" ? "light" : "cyberpunk")),
+      run: toggleTheme,
     },
     {
       id: "new-draft",
@@ -1362,6 +1412,27 @@ function App() {
       description: "Persist the current manifest to IndexedDB.",
       shortcut: "S",
       run: () => void handleSaveDraft(),
+    },
+    {
+      id: "refresh-health",
+      label: "Refresh health",
+      description: "Run the diagnostics checks again.",
+      shortcut: "R",
+      run: () => void refreshHealth(),
+    },
+    {
+      id: "load-pip-vault",
+      label: "Load PIP from vault",
+      description: "Restore the encrypted PIP document from local vault storage.",
+      shortcut: "L",
+      run: () => void handleLoadPipFromVault(),
+    },
+    {
+      id: "save-pip-vault",
+      label: "Save PIP to vault",
+      description: "Write the current PIP document into vault storage.",
+      shortcut: "V",
+      run: () => void handleSavePipToVault(),
     },
     {
       id: "export-manifest",
@@ -1489,12 +1560,32 @@ function App() {
                 {health.length === 0 ? (
                   <span className="health-summary-empty">Run checks to see status</span>
                 ) : (
-                  health.map((item) => (
-                    <span key={item.id} className={`summary-pill ${item.status}`}>
-                      <span className={`status-dot ${item.status}`} aria-hidden /> {item.label}
-                      <span className="summary-status">{healthStatusLabel(item.status)}</span>
-                    </span>
-                  ))
+                  <>
+                    <div className="health-summary-pills">
+                      {health.map((item) => (
+                        <span key={item.id} className={`summary-pill ${item.status}`}>
+                          <span className={`status-dot ${item.status}`} aria-hidden /> {item.label}
+                          <span className="summary-status">{healthStatusLabel(item.status)}</span>
+                        </span>
+                      ))}
+                    </div>
+                    <div className="health-summary-notes">
+                      {latestHealthSuccess && (
+                        <span className="health-summary-note success">
+                          <strong>Last success</strong>
+                          <span>{healthSummaryLabel(latestHealthSuccess)}</span>
+                          <span>{formatTime(latestHealthSuccess.lastSuccessAt)}</span>
+                        </span>
+                      )}
+                      {latestHealthError && (
+                        <span className="health-summary-note error">
+                          <strong>Last error</strong>
+                          <span>{healthSummaryLabel(latestHealthError)}</span>
+                          <span>{formatTime(latestHealthError.checkedAt)}</span>
+                        </span>
+                      )}
+                    </div>
+                  </>
                 )}
               </div>
             )}
@@ -1584,7 +1675,7 @@ function App() {
             <button className="ghost" onClick={handleDuplicateDraft} disabled={saving}>
               Duplicate draft
             </button>
-            <span className={`pill ${isDirty ? "" : "ghost"}`}>{isDirty ? "Unsaved changes" : "All saved"}</span>
+            <span className={`pill save-status ${saving ? "busy" : "ghost"}`}>{saveStatusLabel}</span>
             <button className="primary" onClick={handleSaveDraft} disabled={saving}>
               {saving ? "Saving…" : "Save draft"}
             </button>
