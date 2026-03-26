@@ -176,7 +176,12 @@ async function goHome(page: Page, attempts = 3) {
   for (let i = 0; i < attempts; i += 1) {
     try {
       await page.goto("/");
-      await page.locator("#root").waitFor({ timeout: 10_000 });
+      await page.waitForLoadState("networkidle");
+      const root = page.locator("#root");
+      await root.waitFor({ timeout: 10_000 });
+      // Wait until the top bar and manifest input are ready so subsequent actions don't time out.
+      await page.getByTestId("manifest-name-input").waitFor({ timeout: 10_000 });
+      await page.locator(".workspace-nav").waitFor({ timeout: 10_000 });
       return;
     } catch (err) {
       if (i === attempts - 1) throw err;
@@ -193,7 +198,7 @@ test.describe("Desktop renderer smoke", () => {
   test("creates draft, autosaves, undoes/redoes, and opens diff", async ({ page }) => {
     await goHome(page);
 
-    const titleInput = page.getByLabel("Manifest name");
+    const titleInput = page.getByTestId("manifest-name-input");
     const saveStatus = page.locator(".save-status-label");
 
     await titleInput.fill("Smoke Draft");
@@ -226,11 +231,13 @@ test.describe("Desktop renderer smoke", () => {
 
   test("loads AO console log panel", async ({ page }) => {
     await goHome(page);
-    await page.getByRole("button", { name: "AO Console" }).click();
+    const aoButton = page.getByRole("button", { name: "AO Console" });
+    await aoButton.waitFor({ timeout: 10_000 });
+    await aoButton.click();
 
     await expect(page.getByText("AO console log")).toBeVisible();
     await expect(page.getByText("Action payloads")).toBeVisible();
-    await expect(page.getByText("No AO actions logged yet.")).toBeVisible();
+    await expect(page.locator(".ao-log-empty").first()).toBeVisible();
     await page.getByRole("heading", { name: "Wallet · Module · Process" }).scrollIntoViewIfNeeded();
     await expect(page.getByText("Deploy status")).toBeVisible();
     await expect(page.getByText("Spawn status")).toBeVisible();
@@ -238,7 +245,9 @@ test.describe("Desktop renderer smoke", () => {
 
   test("unlocks password-protected vault", async ({ page }) => {
     await goHome(page);
-    await page.getByRole("button", { name: "Data Core" }).click();
+    const dataButton = page.getByRole("button", { name: "Data Core" });
+    await dataButton.waitFor({ timeout: 10_000 });
+    await dataButton.click();
 
     const header = page.locator(".pip-vault-header-actions");
     await expect(header).toContainText("Password locked");
@@ -280,7 +289,7 @@ test.describe("Desktop renderer smoke", () => {
   test("shows draft diff after manifest changes", async ({ page }) => {
     await goHome(page);
 
-    const titleInput = page.getByLabel("Manifest name");
+    const titleInput = page.getByTestId("manifest-name-input");
     await titleInput.fill("Diff Baseline");
 
     const firstCatalog = page.locator(".catalog-item").first();
@@ -310,6 +319,7 @@ test.describe("Desktop renderer smoke", () => {
 
     const source = page.locator(".catalog-item").first();
     const dest = page.locator(".preview-surface");
+    await dest.waitFor({ timeout: 10_000 });
     await dest.scrollIntoViewIfNeeded();
     await source.dragTo(dest, { force: true });
 

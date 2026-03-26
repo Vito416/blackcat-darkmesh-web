@@ -1,6 +1,6 @@
 type LocaleHotkeySection = {
   title: string;
-  items: { shortcut: string; action: string; description: string }[];
+  items: { shortcut: string; action?: string; label?: string; description: string }[];
 };
 
 const actions = {

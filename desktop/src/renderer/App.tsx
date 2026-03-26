@@ -45,6 +45,7 @@ import {
   PropsSchema,
   isManifestExpression,
 } from "./types/manifest";
+type VaultMode = "safeStorage" | "plain" | "password";
 type DraftDiffPanelModule = typeof import("./components/DraftDiffPanel");
 type AoLogPanelModule = typeof import("./components/AoLogPanel");
 type ManifestRendererModule = typeof import("./components/ManifestRenderer");
@@ -334,10 +335,14 @@ const formatTime = (iso?: string) =>
     : "—";
 const abbreviateTx = (value?: string | null) =>
   value ? (value.length > 18 ? `${value.slice(0, 10)}…${value.slice(-6)}` : value) : "—";
+const toVaultMode = (mode?: string): VaultMode | undefined => {
+  return mode === "safeStorage" || mode === "plain" || mode === "password" ? mode : undefined;
+};
 const formatVaultMode = (mode?: string) => {
   if (mode === "password") return "Password";
   if (mode === "plain") return "Local key";
-  return "Safe storage";
+  if (mode === "safeStorage") return "Safe storage";
+  return "Unspecified";
 };
 function formatBytes(bytes?: number): string {
   if (bytes == null || Number.isNaN(bytes)) return "—";
@@ -3098,6 +3103,19 @@ function App() {
     setPipVaultAutoLockRemainingMs(null);
   }, []);
 
+  const refreshPipVaultSnapshot = useCallback(async () => {
+    const result = await describePipVault();
+    if (result.ok) {
+      setPipVaultSnapshot(result);
+      setPipVaultError(null);
+      return result;
+    }
+
+    setPipVaultStatus(result.error);
+    setPipVaultError(result.error);
+    return null;
+  }, []);
+
   const scheduleVaultAutoLock = useCallback(() => {
     stopVaultAutoLock();
     if (!pipVaultAutoLockMinutes) return;
@@ -3163,19 +3181,6 @@ function App() {
     },
     [],
   );
-
-  const refreshPipVaultSnapshot = useCallback(async () => {
-    const result = await describePipVault();
-    if (result.ok) {
-      setPipVaultSnapshot(result);
-      setPipVaultError(null);
-      return result;
-    }
-
-    setPipVaultStatus(result.error);
-    setPipVaultError(result.error);
-    return null;
-  }, []);
 
   const refreshPipVaultRecords = useCallback(async () => {
     setPipVaultRecordsLoading(true);
@@ -4778,7 +4783,7 @@ function App() {
           at: startedAt,
           action: "import",
           status: "ok",
-          mode: result.mode,
+          mode: toVaultMode(result.mode),
           recordCount: result.records,
           filename: payload.filename,
           bytes: bundleBytes,
@@ -4797,7 +4802,7 @@ function App() {
           at: new Date().toISOString(),
           action: "import",
           status: "error",
-          mode: payload.bundleMode === "password" ? "password" : pipVaultSnapshot?.mode,
+          mode: toVaultMode(payload.bundleMode === "password" ? "password" : pipVaultSnapshot?.mode),
           filename: payload.filename,
           source: options?.source ?? "panel",
           detail: message,
@@ -6648,6 +6653,7 @@ function App() {
                 value={manifest.name}
                 onChange={(e) => handleManifestName(e.target.value)}
                 aria-label="Manifest name"
+                data-testid="manifest-name-input"
               />
             </div>
           </div>

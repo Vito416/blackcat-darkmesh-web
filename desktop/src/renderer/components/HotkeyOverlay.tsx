@@ -4,7 +4,8 @@ import useFocusTrap from "../hooks/useFocusTrap";
 
 export interface HotkeyOverlayItem {
   shortcut: string;
-  action: string;
+  action?: string;
+  label?: string;
   description: string;
 }
 
@@ -81,15 +82,19 @@ const HotkeyOverlay: React.FC<HotkeyOverlayProps> = ({ open, sections, onClose, 
                   </tr>
                 </thead>
                 <tbody>
-                  {section.items.map((item) => (
-                    <tr key={`${section.title}-${item.shortcut}-${item.action}`}>
-                      <td>
-                        <kbd>{item.shortcut}</kbd>
-                      </td>
-                      <td>{item.action}</td>
-                      <td>{item.description}</td>
-                    </tr>
-                  ))}
+                  {section.items.map((item) => {
+                    const actionText = item.action ?? item.label ?? "—";
+                    const key = `${section.title}-${item.shortcut}-${actionText}`;
+                    return (
+                      <tr key={key}>
+                        <td>
+                          <kbd>{item.shortcut}</kbd>
+                        </td>
+                        <td>{actionText}</td>
+                        <td>{item.description}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </section>

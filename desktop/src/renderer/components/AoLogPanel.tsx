@@ -180,35 +180,38 @@ const AoLogPanel: React.FC<AoLogPanelProps> = ({
             <p className="eyebrow">Latency trend</p>
             <span className="ao-log-badge subtle">sparkline</span>
           </div>
-          {metrics.sparkline ? (
+          {(() => {
+            const spark = metrics.sparkline;
+            return spark ? (
             <div className="ao-log-sparkline" aria-label="AO latency sparkline">
               <svg
-                viewBox={`0 0 ${metrics.sparkline.width} ${metrics.sparkline.height}`}
+                viewBox={`0 0 ${spark.width} ${spark.height}`}
                 width="100%"
-                height={metrics.sparkline.height}
+                height={spark.height}
                 role="presentation"
               >
-                <path d={metrics.sparkline.path} className="sparkline-path" />
-                {metrics.sparkline.points.map((point, idx) => (
+                <path d={spark.path} className="sparkline-path" />
+                {spark.points.map((point, idx) => (
                   <circle
                     key={`${point.x}-${idx}`}
                     cx={point.x}
                     cy={point.y}
-                    r={idx === metrics.sparkline.points.length - 1 ? 2.6 : 1.8}
+                    r={idx === spark.points.length - 1 ? 2.6 : 1.8}
                     className="sparkline-dot"
                   />
                 ))}
               </svg>
               <div className="ao-log-sparkline-meta">
-                <span className="mono">Last {metrics.sparkline.latest} ms</span>
+                <span className="mono">Last {spark.latest} ms</span>
                 <span className="mono subtle">
-                  min {metrics.sparkline.min} • max {metrics.sparkline.max}
+                  min {spark.min} • max {spark.max}
                 </span>
               </div>
             </div>
-          ) : (
-            <p className="hint">Run a deploy or spawn to capture timing.</p>
-          )}
+            ) : (
+              <p className="hint">Run a deploy or spawn to capture timing.</p>
+            );
+          })()}
         </div>
       </div>
 
