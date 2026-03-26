@@ -72,7 +72,13 @@ export const useNeonCursorTrail = (enabled: boolean) => {
       window.removeEventListener("pointerenter", handleMove);
       particlesRef.current.forEach((particle) => particle.remove());
       particlesRef.current = [];
-      layer.remove();
+      const fadeLayer = layerRef.current;
+      if (fadeLayer) {
+        fadeLayer.classList.add("is-fading");
+        fadeLayer.style.transition = fadeLayer.style.transition || "opacity 240ms var(--motion-ease-decelerate)";
+        fadeLayer.style.opacity = "0";
+        window.setTimeout(() => fadeLayer.remove(), 260);
+      }
       layerRef.current = null;
     };
   }, [enabled]);

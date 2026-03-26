@@ -12,27 +12,47 @@ files:
   - node_modules/**/*
 
 extraMetadata:
-  main: dist/main.js
+  main: dist/desktop/src/main.js
 
 mac:
   target:
-    - dmg
-    - zip
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
   category: public.app-category.productivity
   identity: null
-  artifactName: "${productName}-${version}-mac-${arch}.${ext}"
+  artifactName: "${name}-${version}-mac-${arch}.${ext}"
 
 win:
   target:
-    - nsis
-    - portable
-  artifactName: "${productName}-${version}-win-${arch}.${ext}"
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+  artifactName: "${name}-${version}-win-${arch}.${ext}"
+
+nsis:
+  artifactName: "${name}-${version}-win-${arch}-setup.${ext}"
+
+portable:
+  artifactName: "${name}-${version}-win-${arch}-portable.${ext}"
 
 linux:
   target:
-    - AppImage
-    - deb
+    - target: AppImage
+      arch:
+        - x64
+    - target: deb
+      arch:
+        - x64
   category: Utility
-  artifactName: "${productName}-${version}-linux-${arch}.${ext}"
+  artifactName: "${name}-${version}-linux-${arch}.${ext}"
 
 publish: never

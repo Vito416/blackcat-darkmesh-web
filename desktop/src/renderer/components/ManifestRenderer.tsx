@@ -30,6 +30,7 @@ interface ManifestRendererProps {
   onNodeDragEnd?: () => void;
   diffHighlight?: Record<string, DraftDiffKind>;
   validation?: Record<string, NodeValidationBadge>;
+  onApplyDefaults?: (nodeId: string) => void;
 }
 
 const formatValue = (value: ManifestValue): string => {
@@ -123,6 +124,7 @@ const RenderBranch: React.FC<{
   onNodeDragEnd?: () => void;
   diffHighlight?: Record<string, DraftDiffKind>;
   validation?: Record<string, NodeValidationBadge>;
+  onApplyDefaults?: (nodeId: string) => void;
 }> = ({
   node,
   entryId,
@@ -138,6 +140,7 @@ const RenderBranch: React.FC<{
   onNodeDragEnd,
   diffHighlight,
   validation,
+  onApplyDefaults,
 }) => {
   const isSelected = selectedIds?.has(node.id) ?? false;
   const isPrimary = primarySelectedId === node.id;
@@ -154,6 +157,7 @@ const RenderBranch: React.FC<{
     ? nodeValidation.diffCounts.added + nodeValidation.diffCounts.changed + nodeValidation.diffCounts.removed
     : 0;
   const hasSchema = nodeValidation?.hasSchema ?? true;
+  const canApplyDefaults = Boolean(onApplyDefaults && hasSchema);
 
   const getDragMode = (event: React.DragEvent<HTMLElement>): DropMode | null => {
     const types = Array.from(event.dataTransfer.types ?? []);
@@ -287,18 +291,49 @@ const RenderBranch: React.FC<{
             {isEntry && <span className="pill accent">entry</span>}
             {highlightKind && <span className={`pill ${highlightKind}`}>{highlightKind}</span>}
             {nodeValidation && (
-              <span className={`pill ${issueCount ? "issue" : hasSchema ? "accent" : "ghost"}`}>
+              <span
+                className={`pill ${issueCount ? "issue" : hasSchema ? "accent" : "ghost"}`}
+                title={
+                  issueCount
+                    ? `${issueCount} validation issue${issueCount === 1 ? "" : "s"}`
+                    : hasSchema
+                      ? "Props validate against schema"
+                      : "No schema available to validate"
+                }
+              >
                 {issueCount ? `${issueCount} issue${issueCount === 1 ? "" : "s"}` : hasSchema ? "Valid" : "No schema"}
               </span>
             )}
-            {missingRequired > 0 && <span className="pill warn">{missingRequired} req</span>}
+            {missingRequired > 0 && <span className="pill warn" title="Required props missing">{missingRequired} req</span>}
           </div>
-          <span className="node-id">{node.id}</span>
+          <div className="node-meta-actions">
+            <span className="node-id">{node.id}</span>
+            {canApplyDefaults && (
+              <button
+                type="button"
+                className="ghost small node-quick-action"
+                title="Apply defaults to this node"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onApplyDefaults?.(node.id);
+                }}
+                onMouseDown={(event) => event.stopPropagation()}
+              >
+                Apply defaults
+              </button>
+            )}
+          </div>
         </div>
         <h4>{node.title || "Untitled node"}</h4>
         {nodeValidation && (
           <div className="node-validation-row">
-            {diffTotal > 0 ? <span className="pill ghost">Overrides {diffTotal}</span> : <span className="pill ghost">No overrides</span>}
+            {diffTotal > 0 ? (
+              <span className="pill ghost" title="Props that differ from catalog defaults">
+                Overrides {diffTotal}
+              </span>
+            ) : (
+              <span className="pill ghost" title="Props match catalog defaults">No overrides</span>
+            )}
           </div>
         )}
         <PropsPreview props={node.props} />
@@ -330,6 +365,7 @@ const RenderBranch: React.FC<{
               onNodeDragEnd={onNodeDragEnd}
               diffHighlight={diffHighlight}
               validation={validation}
+              onApplyDefaults={onApplyDefaults}
             />
           ))}
         </div>
@@ -351,6 +387,7 @@ const ManifestRenderer: React.FC<ManifestRendererProps> = ({
   onNodeDragEnd,
   diffHighlight,
   validation,
+  onApplyDefaults,
 }) => {
   const selectedIdSet = useMemo(() => new Set(selectedIds ?? []), [selectedIds]);
   const { roots, orphans } = useMemo(() => {
@@ -429,6 +466,7 @@ const ManifestRenderer: React.FC<ManifestRendererProps> = ({
           onNodeDragEnd={onNodeDragEnd}
           diffHighlight={diffHighlight}
           validation={validation}
+          onApplyDefaults={onApplyDefaults}
         />
       ))}
 
@@ -452,6 +490,7 @@ const ManifestRenderer: React.FC<ManifestRendererProps> = ({
                 onNodeDragStart={onNodeDragStart}
                 onNodeDragEnd={onNodeDragEnd}
                 validation={validation}
+                onApplyDefaults={onApplyDefaults}
               />
             ))}
           </div>

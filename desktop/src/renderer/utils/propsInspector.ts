@@ -50,6 +50,31 @@ const cloneValue = (value: unknown): unknown => {
   return value;
 };
 
+const mergeSeedIntoValue = (seed: unknown, value: unknown): unknown => {
+  if (Array.isArray(seed)) {
+    if (Array.isArray(value)) {
+      return value.map((entry, index) => mergeSeedIntoValue(seed[index], entry));
+    }
+    return cloneValue(seed);
+  }
+
+  if (isPlainObject(seed) && isPlainObject(value)) {
+    const result: Record<string, unknown> = { ...value };
+
+    for (const [key, seedValue] of Object.entries(seed)) {
+      result[key] = mergeSeedIntoValue(seedValue, Object.prototype.hasOwnProperty.call(result, key) ? result[key] : undefined);
+    }
+
+    return result;
+  }
+
+  if (isPlainObject(seed)) {
+    return cloneValue(seed);
+  }
+
+  return value !== undefined ? cloneValue(value) : cloneValue(seed);
+};
+
 const createEmptyValue = (schema: PropsSchema | undefined): unknown => {
   if (!schema) {
     return undefined;
@@ -251,6 +276,20 @@ export const buildFormValue = (schema: PropsSchema | undefined, value: unknown):
   }
 
   return createEmptyValue(schema);
+};
+
+export const applyDefaultsToProps = (
+  schema: PropsSchema | undefined,
+  value: unknown,
+  defaultsSeed?: unknown,
+): unknown => {
+  if (!schema) {
+    return mergeSeedIntoValue(defaultsSeed, value);
+  }
+
+  const seededValue = mergeSeedIntoValue(defaultsSeed, value);
+  const baseline = mergeDefaults(schema, seededValue);
+  return buildFormValue(schema, baseline);
 };
 
 export const validate = (schema: PropsSchema | undefined, value: unknown): PropsValidationResult => {

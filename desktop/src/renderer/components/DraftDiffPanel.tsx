@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { DraftDiffEntry, DraftDiffKind } from "../utils/draftDiff";
+import useFocusTrap from "../hooks/useFocusTrap";
 
 export type DraftDiffOption = {
   value: string;
@@ -56,6 +57,9 @@ const DraftDiffPanel: React.FC<DraftDiffPanelProps> = ({
   const selectRef = useRef<HTMLSelectElement>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const lastAnnouncedRef = useRef<string | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = "draft-diff-title";
+  const descriptionId = "draft-diff-desc";
 
   useEffect(() => {
     if (open) {
@@ -145,6 +149,8 @@ const DraftDiffPanel: React.FC<DraftDiffPanelProps> = ({
       rowRefs.current.delete(id);
     }
   }, []);
+
+  useFocusTrap(dialogRef, { active: open, onEscape: onClose, autoFocus: false });
 
   const moveFocus = useCallback(
     (delta: number) => {
@@ -289,13 +295,16 @@ const DraftDiffPanel: React.FC<DraftDiffPanelProps> = ({
   return (
     <div
       className="draft-diff-backdrop"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Draft diff panel"
+      role="presentation"
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
         className="draft-diff-shell"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
         tabIndex={-1}
         onClick={(event) => event.stopPropagation()}
         onKeyDown={handleKeyDown}
@@ -303,8 +312,10 @@ const DraftDiffPanel: React.FC<DraftDiffPanelProps> = ({
         <header className="draft-diff-head">
           <div>
             <p className="eyebrow">Draft diff</p>
-            <h3>Cherry-pick changes</h3>
-            <p className="hint">Compare the in-progress manifest against a saved draft or revision.</p>
+            <h3 id={titleId}>Cherry-pick changes</h3>
+            <p className="hint" id={descriptionId}>
+              Compare the in-progress manifest against a saved draft or revision.
+            </p>
           </div>
           <div className="draft-diff-head-actions">
             <button

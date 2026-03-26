@@ -128,18 +128,20 @@ type NodeVisual = {
 type AoHolomapProps = {
   enabled: boolean;
   reducedMotion: boolean;
-  theme: "light" | "cyberpunk";
+  theme: string;
   health: HealthStatus[];
   summary: HealthStatusSummary;
   events: Array<{ kind: "deploy" | "spawn"; id: string | null; status: string; time: string }>;
+  variant?: "default" | "mini";
 };
 
-const AoHolomap: React.FC<AoHolomapProps> = ({ enabled, reducedMotion, theme, health, summary, events }) => {
+const AoHolomap: React.FC<AoHolomapProps> = ({ enabled, reducedMotion, theme, health, summary, events, variant = "default" }) => {
   const mountRef = useRef<HTMLDivElement>(null);
   const healthRef = useRef<HealthStatus[]>(health);
   const burstsRef = useRef<Burst[]>([]);
   const lastEventKeyRef = useRef<string | null>(null);
   const [mode, setMode] = useState<"paused" | "webgl" | "fallback">("paused");
+  const isMini = variant === "mini";
 
   healthRef.current = health;
 
@@ -434,12 +436,12 @@ const AoHolomap: React.FC<AoHolomapProps> = ({ enabled, reducedMotion, theme, he
 
   const latestEvents = useMemo(
     () =>
-      events.slice(0, 3).map((entry) => ({
+      events.slice(0, isMini ? 2 : 3).map((entry) => ({
         ...entry,
         label: entry.kind === "deploy" ? "Deploy" : "Spawn",
         at: new Date(entry.time).toLocaleTimeString([], { hour12: false }),
       })),
-    [events],
+    [events, isMini],
   );
 
   const overallCopy = summary.overall === "ok" ? "Network nominal" : `${summary.overall.toUpperCase()} · ${summary.ok} OK / ${summary.warn} warn / ${summary.error} error`;
@@ -447,8 +449,12 @@ const AoHolomap: React.FC<AoHolomapProps> = ({ enabled, reducedMotion, theme, he
   const holomapMode = !enabled || reducedMotion ? "paused" : mode;
 
   return (
-    <div className={`ao-holomap-shell mode-${holomapMode}`}>
-      <div className="ao-holomap-stage" ref={mountRef}>
+    <div className={`ao-holomap-shell mode-${holomapMode} ${isMini ? "is-mini" : ""}`}>
+      <div
+        className={`ao-holomap-stage ${isMini ? "is-mini" : ""}`}
+        ref={mountRef}
+        style={isMini ? { minHeight: 220, height: "clamp(220px, 32vw, 320px)" } : undefined}
+      >
         {holomapMode !== "webgl" && (
           <div className="ao-holomap-fallback" aria-live="polite">
             <div className="ao-holomap-fallback-grid" />

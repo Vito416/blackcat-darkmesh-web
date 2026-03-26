@@ -1,7 +1,8 @@
-import React from "react";
+import React, { useRef } from "react";
 
 import draftsDb from "../storage/drafts";
 import healthDb from "../storage/healthStore";
+import useFocusTrap from "../hooks/useFocusTrap";
 
 type ErrorBoundaryVariant = "full" | "panel" | "overlay";
 
@@ -181,6 +182,11 @@ const DefaultFallback: React.FC<ErrorFallbackRenderProps> = ({
   lastDownloadName,
   timestamp,
 }) => {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = "error-overlay-title";
+  const descriptionId = "error-overlay-desc";
+  useFocusTrap(dialogRef, { active: variant === "overlay", onEscape: reset });
+
   const summaryItems = [
     { label: "Scope", value: scope },
     { label: "Captured", value: timestamp ? new Date(timestamp).toLocaleString() : "Just now" },
@@ -214,11 +220,22 @@ const DefaultFallback: React.FC<ErrorFallbackRenderProps> = ({
 
   if (variant === "overlay") {
     return (
-      <div className="error-overlay" role="alertdialog" aria-modal="true" aria-label={`${scope} error`}>
-        <div className="error-overlay-card" onClick={(event) => event.stopPropagation()}>
+      <div className="error-overlay" role="presentation">
+        <div
+          ref={dialogRef}
+          className="error-overlay-card"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby={titleId}
+          aria-describedby={descriptionId}
+          tabIndex={-1}
+          onClick={(event) => event.stopPropagation()}
+        >
           <p className="eyebrow">{scope}</p>
-          <h3>We hit an error while rendering</h3>
-          <p className="hint">Try reloading just this panel or restart the app if it persists.</p>
+          <h3 id={titleId}>We hit an error while rendering</h3>
+          <p className="hint" id={descriptionId}>
+            Try reloading just this panel or restart the app if it persists.
+          </p>
           <div className="error-actions">
             <button className="primary" onClick={reset} type="button">
               Reload panel

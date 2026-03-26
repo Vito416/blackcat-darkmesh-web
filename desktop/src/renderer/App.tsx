@@ -30,6 +30,7 @@ import {
   enableVaultPassword,
   exportPipVaultBundle,
   importPipVaultBundle,
+  inspectVaultBundle,
   scanPipVaultIntegrity,
   type PipVaultRecord,
 } from "./services/pipVault";
@@ -105,6 +106,8 @@ import {
 import {
   addVaultIntegrityEvent,
   getLastVaultIntegrityEvent,
+  listVaultIntegrityEvents,
+  VAULT_INTEGRITY_WIZARD_LIMIT,
   type VaultIntegrityEvent,
 } from "./storage/vaultIntegrity";
 import {
@@ -131,6 +134,7 @@ import {
   diff,
   groupDiffEntries,
   buildFormValue,
+  applyDefaultsToProps,
   indexValidationIssues,
   mergeDefaults,
   validate,
@@ -141,7 +145,9 @@ import { diffManifests, type DraftDiffEntry, type DraftDiffKind } from "./utils/
 import HotkeyOverlay, { type HotkeyOverlaySection } from "./components/HotkeyOverlay";
 import HeroCanvas from "./components/HeroCanvas";
 import HologramBlocks from "./components/HologramBlocks";
+import AoHolomap from "./components/AoHolomap";
 import useNeonCursorTrail from "./hooks/useNeonCursorTrail";
+import useFocusTrap from "./hooks/useFocusTrap";
 import Vault from "./components/Vault";
 import Wizard from "./components/Wizard";
 import { validatePipDocument } from "./services/pipValidation";
@@ -545,6 +551,20 @@ type PipVaultIssue = {
   field: string;
   message: string;
   severity: "error" | "warn";
+};
+
+type VaultImportOptions = {
+  useVaultPassword?: boolean;
+  password?: string | null;
+  rememberPassword?: boolean;
+  onComplete?: () => void;
+  onError?: (message: string) => void;
+  source?: "wizard" | "panel";
+};
+
+type VaultExportOptions = {
+  onComplete?: () => void;
+  source?: "wizard" | "panel";
 };
 
 const THEME_STORAGE_KEY = "darkmesh-theme";
@@ -1742,52 +1762,71 @@ const DraftDiffPanelFallback: React.FC<{
   leftLabel: string;
   leftDetail?: string;
   onClose: () => void;
-}> = ({ leftLabel, leftDetail, onClose }) => (
-  <div className="draft-diff-backdrop" role="dialog" aria-modal="true" aria-label="Draft diff loading" onClick={onClose}>
-    <div className="draft-diff-shell draft-diff-skeleton" onClick={(event) => event.stopPropagation()}>
-      <header className="draft-diff-head">
-        <div>
-          <p className="eyebrow">Draft diff</p>
-          <h3>Loading comparison…</h3>
-          <p className="hint">Fetching the selected draft and preparing the diff.</p>
-        </div>
-        <LazySkeletonPill width="74px" />
-      </header>
+}> = ({ leftLabel, leftDetail, onClose }) => {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = "draft-diff-loading-title";
+  const descriptionId = "draft-diff-loading-desc";
 
-      <div className="draft-diff-sources">
-        <div className="diff-source-card">
-          <span className="eyebrow">Left</span>
-          <strong>{leftLabel}</strong>
-          {leftDetail && <p className="subtle">{leftDetail}</p>}
-        </div>
-        <div className="diff-source-card">
-          <span className="eyebrow">Right</span>
-          <LazySkeletonLine width="92%" />
-          <LazySkeletonLine width="72%" />
-        </div>
-        <div className="diff-summary-chips">
-          <LazySkeletonPill width="86px" />
-          <LazySkeletonPill width="96px" />
-          <LazySkeletonPill width="86px" />
-        </div>
-      </div>
+  useFocusTrap(dialogRef, { active: true, onEscape: onClose });
 
-      <div className="draft-diff-body draft-diff-body-skeleton">
-        {Array.from({ length: 3 }).map((_, index) => (
-          <article key={index} className="draft-diff-row">
-            <div className="draft-diff-row-head">
-              <LazySkeletonLine width="84%" />
-            </div>
-            <div className="draft-diff-row-foot">
-              <LazySkeletonLine width="54%" />
-              <LazySkeletonPill width="120px" />
-            </div>
-          </article>
-        ))}
+  return (
+    <div className="draft-diff-backdrop" role="presentation" onClick={onClose}>
+      <div
+        ref={dialogRef}
+        className="draft-diff-shell draft-diff-skeleton"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
+        tabIndex={-1}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="draft-diff-head">
+          <div>
+            <p className="eyebrow">Draft diff</p>
+            <h3 id={titleId}>Loading comparison…</h3>
+            <p className="hint" id={descriptionId}>
+              Fetching the selected draft and preparing the diff.
+            </p>
+          </div>
+          <LazySkeletonPill width="74px" />
+        </header>
+
+        <div className="draft-diff-sources">
+          <div className="diff-source-card">
+            <span className="eyebrow">Left</span>
+            <strong>{leftLabel}</strong>
+            {leftDetail && <p className="subtle">{leftDetail}</p>}
+          </div>
+          <div className="diff-source-card">
+            <span className="eyebrow">Right</span>
+            <LazySkeletonLine width="92%" />
+            <LazySkeletonLine width="72%" />
+          </div>
+          <div className="diff-summary-chips">
+            <LazySkeletonPill width="86px" />
+            <LazySkeletonPill width="96px" />
+            <LazySkeletonPill width="86px" />
+          </div>
+        </div>
+
+        <div className="draft-diff-body draft-diff-body-skeleton">
+          {Array.from({ length: 3 }).map((_, index) => (
+            <article key={index} className="draft-diff-row">
+              <div className="draft-diff-row-head">
+                <LazySkeletonLine width="84%" />
+              </div>
+              <div className="draft-diff-row-foot">
+                <LazySkeletonLine width="54%" />
+                <LazySkeletonPill width="120px" />
+              </div>
+            </article>
+          ))}
+        </div>
       </div>
     </div>
-  </div>
-);
+  );
+};
 
 function App() {
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
@@ -1865,6 +1904,14 @@ function App() {
     return window.sessionStorage.getItem(PIP_VAULT_REMEMBER_KEY) === "1";
   });
   const [pipVaultModeConfirm, setPipVaultModeConfirm] = useState<{ action: "enable" | "disable"; password?: string } | null>(null);
+  const [vaultWizardOpen, setVaultWizardOpen] = useState(false);
+  const [vaultWizardMode, setVaultWizardMode] = useState<"export" | "import">("export");
+  const [vaultWizardFile, setVaultWizardFile] = useState<File | null>(null);
+  const [vaultWizardImportError, setVaultWizardImportError] = useState<string | null>(null);
+  const [vaultWizardUseVaultPassword, setVaultWizardUseVaultPassword] = useState(true);
+  const [vaultWizardPassword, setVaultWizardPassword] = useState("");
+  const [vaultWizardIntegrity, setVaultWizardIntegrity] = useState<VaultIntegrityEvent[]>([]);
+  const vaultWizardFileInputRef = useRef<HTMLInputElement>(null);
   const [health, setHealth] = useState<HealthStatus[]>([]);
   const [healthLoading, setHealthLoading] = useState(false);
   const [healthExpanded, setHealthExpanded] = useState(false);
@@ -1987,6 +2034,13 @@ function App() {
   const healthCardRef = useRef<HTMLDivElement>(null);
   const healthFailureInputRef = useRef<HTMLInputElement>(null);
   const healthLatencyInputRef = useRef<HTMLInputElement>(null);
+  const mainContentRef = useRef<HTMLElement>(null);
+  const whatsNewDialogRef = useRef<HTMLDivElement>(null);
+  const whatsNewCloseRef = useRef<HTMLButtonElement>(null);
+  const vaultModeDialogRef = useRef<HTMLDivElement>(null);
+  const vaultModeCancelRef = useRef<HTMLButtonElement>(null);
+  const vaultWizardDialogRef = useRef<HTMLDivElement>(null);
+  const vaultWizardCloseRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     manifestRef.current = manifest;
@@ -2062,9 +2116,11 @@ function App() {
   const propsFormValue = useMemo(
     () =>
       selectedNode
-        ? ((buildFormValue(
+        ?
+          ((applyDefaultsToProps(
             selectedCatalogItem?.propsSchema,
-            selectedNode.props ?? propsDefaults ?? {},
+            selectedNode.props ?? {},
+            selectedCatalogItem?.defaultProps ?? propsDefaults ?? {},
           ) ?? {}) as ManifestShape)
         : null,
     [propsDefaults, selectedCatalogItem, selectedNode],
@@ -2194,8 +2250,7 @@ function App() {
         return;
       }
 
-      const baseline = mergeDefaults(schema, node.props ?? defaultsSeed) ?? {};
-      const hydrated = buildFormValue(schema, baseline) as ManifestShape;
+      const hydrated = applyDefaultsToProps(schema, node.props ?? {}, defaultsSeed) as ManifestShape;
 
       setManifest((prev) =>
         touch({
@@ -2277,6 +2332,21 @@ function App() {
       ? `${pipVaultTask.label} (${Math.round(Math.min(100, pipVaultTask.progress))}%)`
       : pipVaultTask.label
     : null;
+  const pipVaultProgressNode = pipVaultTask ? (
+    <div className="pip-vault-progress" role="status">
+      <div className="pip-vault-progress-bar">
+        <span
+          className={`fill ${pipVaultTask.kind} ${pipVaultProgressValue != null ? "has-progress" : ""}`}
+          style={
+            pipVaultProgressValue != null
+              ? { width: `${Math.min(100, Math.max(6, pipVaultProgressValue))}%` }
+              : undefined
+          }
+        />
+      </div>
+      <div className="pip-vault-progress-label">{pipVaultProgressLabel ?? pipVaultTask.label}</div>
+    </div>
+  ) : null;
   const latestVaultAudit = useMemo(() => vaultAuditEvents[0] ?? null, [vaultAuditEvents]);
   const readRememberedPassword = useCallback((): string | null => {
     if (typeof window === "undefined") return null;
@@ -2444,6 +2514,16 @@ function App() {
   );
 
   const aoMiniLogRows = useMemo(() => aoLog.slice(0, 20), [aoLog]);
+  const holomapEvents = useMemo(
+    () =>
+      aoMiniLogRows.map((entry) => ({
+        kind: entry.kind,
+        id: entry.id,
+        status: entry.status,
+        time: entry.time,
+      })),
+    [aoMiniLogRows],
+  );
   const healthSummary: HealthStatusSummary = useMemo(
     () => summarizeHealthStatuses(health),
     [health],
@@ -2879,6 +2959,7 @@ function App() {
           scanned: result.scanned,
           failed: result.failed.length,
           durationMs: result.durationMs,
+          recordCount: result.recordCount,
         });
 
         const latest = await getLastVaultIntegrityEvent();
@@ -2908,6 +2989,48 @@ function App() {
     },
     [flashStatus, pipVaultSnapshot, vaultIntegrityRunning],
   );
+
+  const loadVaultWizardIntegrityHistory = useCallback(async () => {
+    try {
+      const events = await listVaultIntegrityEvents(VAULT_INTEGRITY_WIZARD_LIMIT);
+      setVaultWizardIntegrity(events);
+      return events;
+    } catch (err) {
+      console.error("Failed to load vault integrity history", err);
+      return [];
+    }
+  }, []);
+
+  const openVaultBackupWizard = useCallback(
+    (mode: "export" | "import" = "export") => {
+      setVaultWizardMode(mode);
+      setVaultWizardOpen(true);
+      setVaultWizardImportError(null);
+      setVaultWizardFile(null);
+      setVaultWizardUseVaultPassword(true);
+    },
+    [],
+  );
+
+  const closeVaultBackupWizard = useCallback(() => {
+    setVaultWizardOpen(false);
+    setVaultWizardImportError(null);
+    setVaultWizardFile(null);
+    setVaultWizardPassword("");
+  }, []);
+
+  const handleVaultWizardFileChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0] ?? null;
+    setVaultWizardFile(file);
+    setVaultWizardImportError(null);
+    if (vaultWizardFileInputRef.current) {
+      vaultWizardFileInputRef.current.value = "";
+    }
+  }, []);
+
+  const triggerVaultWizardFilePick = useCallback(() => {
+    vaultWizardFileInputRef.current?.click();
+  }, []);
 
   const refreshDraftHistory = useCallback(async (draftId: number | null) => {
     if (!draftId) {
@@ -3017,6 +3140,11 @@ function App() {
       .then((event) => setVaultIntegrity(event))
       .catch((err) => console.error("Failed to load vault integrity log", err));
   }, []);
+
+  useEffect(() => {
+    if (!vaultWizardOpen) return;
+    void loadVaultWizardIntegrityHistory();
+  }, [vaultIntegrity, loadVaultWizardIntegrityHistory, vaultWizardOpen]);
 
   useEffect(() => {
     if (!pipVaultSnapshot || pipVaultBusy) return;
@@ -3683,6 +3811,38 @@ function App() {
     input.click();
   };
 
+  const handleWizardExport = () => {
+    setVaultWizardMode("export");
+    setVaultWizardImportError(null);
+    void handleExportVaultBundle({
+      source: "wizard",
+      onComplete: () => {
+        void loadVaultWizardIntegrityHistory();
+      },
+    });
+  };
+
+  const handleWizardImport = () => {
+    if (!vaultWizardFile) {
+      setVaultWizardImportError("Choose a backup file first");
+      return;
+    }
+    setVaultWizardMode("import");
+    setVaultWizardImportError(null);
+    handleImportVaultBundle(vaultWizardFile, {
+      source: "wizard",
+      useVaultPassword: vaultWizardUseVaultPassword,
+      password: vaultWizardUseVaultPassword ? null : vaultWizardPassword,
+      rememberPassword: vaultWizardUseVaultPassword ? pipVaultRememberUnlock : false,
+      onComplete: () => {
+        setVaultWizardFile(null);
+        setVaultWizardPassword("");
+        void loadVaultWizardIntegrityHistory();
+      },
+      onError: setVaultWizardImportError,
+    });
+  };
+
   function handleExportPipVaultRecords() {
     setPipVaultError(null);
     void runWithVaultProgress("records-export", "Exporting vault records…", async () => {
@@ -3972,7 +4132,8 @@ function App() {
     setPipVaultModeConfirm(null);
   }, []);
 
-  const handleExportVaultBundle = async () => {
+  const handleExportVaultBundle = async (options?: VaultExportOptions) => {
+    if (pipVaultBusy) return;
     const startedAt = new Date().toISOString();
     setPipVaultError(null);
     setPipVaultBusy(true);
@@ -4016,6 +4177,7 @@ function App() {
       setPipVaultStatus("Vault backup exported");
       setPipVaultError(null);
       flashStatus("Vault backup exported");
+      options?.onComplete?.();
     } catch (err) {
       const message = err instanceof Error ? err.message : "Vault export failed";
       setPipVaultStatus(message);
@@ -4034,46 +4196,25 @@ function App() {
     }
   };
 
-  const handleImportVaultBundle = () => {
-    const input = document.createElement("input");
-    input.type = "file";
-    input.accept = "application/json";
-    input.onchange = async (event) => {
-      const file = (event.target as HTMLInputElement).files?.[0];
-      if (!file) return;
+  const handleImportVaultBundle = (file?: File | null, options?: VaultImportOptions) => {
+    if (pipVaultBusy) return;
 
-      let text = "";
-      try {
-        text = await file.text();
-      } catch {
-        setPipVaultError("Unable to read vault bundle");
-        flashStatus("Unable to read vault bundle");
-        return;
-      }
+    const useVaultPassword = options?.useVaultPassword !== false;
+    const rememberPasswordNext = options?.rememberPassword ?? pipVaultRememberUnlock;
 
-      let bundleMode: string | undefined;
-      try {
-        const parsed = JSON.parse(text);
-        if (parsed?.format !== "pip-vault-bundle") {
-          setPipVaultError("Selected file is not a vault backup bundle");
-          flashStatus("Selected file is not a vault backup bundle");
-          return;
-        }
-        bundleMode = parsed?.mode;
-      } catch (err) {
-        setPipVaultError("Invalid vault bundle JSON");
-        flashStatus("Invalid vault bundle JSON");
-        return;
-      }
-
+    const runImport = async (payload: { text: string; bundleMode?: string; filename?: string }) => {
       const rememberedPassword = readRememberedPassword();
-      const effectivePassword =
-        bundleMode === "password" ? pipVaultPassword.trim() || rememberedPassword || "" : undefined;
+      const resolvedPassword =
+        payload.bundleMode === "password"
+          ? (options?.password ?? "").trim() ||
+            (useVaultPassword ? pipVaultPassword.trim() || rememberedPassword || "" : "")
+          : undefined;
 
-      if (bundleMode === "password" && !effectivePassword) {
+      if (payload.bundleMode === "password" && !resolvedPassword) {
         const message = "Enter the vault password before importing";
         setPipVaultPasswordError(message);
         setPipVaultError(message);
+        options?.onError?.(message);
         flashStatus(message);
         return;
       }
@@ -4083,11 +4224,12 @@ function App() {
       setPipVaultBusy(true);
       try {
         const result = await runWithVaultProgress("import", "Importing vault backup…", async () =>
-          importPipVaultBundle(text, effectivePassword),
+          importPipVaultBundle(payload.text, payload.bundleMode === "password" ? resolvedPassword : undefined),
         );
         if (!result.ok) {
           setPipVaultStatus(result.error);
           setPipVaultError(result.error);
+          options?.onError?.(result.error);
           flashStatus(result.error);
           return;
         }
@@ -4096,21 +4238,65 @@ function App() {
         setPipVaultStatus(message);
         setPipVaultError(null);
         flashStatus(message);
-        rememberPasswordForSession(effectivePassword ?? null);
-        if (!pipVaultRememberUnlock) {
-          setPipVaultPassword("");
+        if (payload.bundleMode === "password") {
+          if (rememberPasswordNext) {
+            rememberPasswordForSession(resolvedPassword ?? null);
+          } else if (useVaultPassword) {
+            rememberPasswordForSession(null, false);
+          }
+          if (!rememberPasswordNext && useVaultPassword) {
+            setPipVaultPassword("");
+          }
         }
         await refreshPipVaultSnapshot();
         await refreshPipVaultRecords();
+        options?.onComplete?.();
       } catch (err) {
         const message = err instanceof Error ? err.message : "Vault import failed";
         setPipVaultStatus(null);
         setPipVaultError(message);
+        options?.onError?.(message);
         flashStatus(message);
       } finally {
         setPipVaultBusy(false);
       }
+    };
 
+    const parseAndRun = async (selected: File) => {
+      let text = "";
+      try {
+        text = await selected.text();
+      } catch {
+        const message = "Unable to read vault bundle";
+        setPipVaultError(message);
+        options?.onError?.(message);
+        flashStatus(message);
+        return;
+      }
+
+      const inspected = inspectVaultBundle(text);
+      if (!inspected.ok) {
+        setPipVaultError(inspected.error);
+        options?.onError?.(inspected.error);
+        flashStatus(inspected.error);
+        return;
+      }
+
+      await runImport({ text, bundleMode: inspected.meta.mode, filename: selected.name });
+    };
+
+    if (file) {
+      void parseAndRun(file);
+      return;
+    }
+
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "application/json";
+    input.onchange = (event) => {
+      const selected = (event.target as HTMLInputElement).files?.[0];
+      if (!selected) return;
+      void parseAndRun(selected);
       input.value = "";
     };
 
@@ -5294,6 +5480,22 @@ function App() {
       shortcut: "Alt+C",
       run: toggleTheme,
     },
+    {
+      id: "toggle-high-effects",
+      label: highEffects ? "Turn off high effects" : "Enable high effects",
+      description: prefersReducedMotion
+        ? "Reduced-motion is on, so visual FX stay paused."
+        : "Toggle WebGL hero grid, holograms, and cursor FX.",
+      shortcut: "Alt+X",
+      run: () => {
+        if (prefersReducedMotion) {
+          setHighEffects(false);
+          flashStatus("High effects paused to respect reduced-motion preference");
+          return;
+        }
+        setHighEffects((current) => !current);
+      },
+    },
     ...themePaletteActions,
     {
       id: "toggle-offline",
@@ -5762,13 +5964,44 @@ function App() {
     return () => window.removeEventListener("keydown", handleEscape);
   }, [whatsNewOpen]);
 
+  useFocusTrap(whatsNewDialogRef, {
+    active: whatsNewOpen,
+    initialFocus: whatsNewCloseRef.current,
+    onEscape: () => setWhatsNewOpen(false),
+  });
+
+  useFocusTrap(vaultModeDialogRef, {
+    active: Boolean(pipVaultModeConfirm),
+    initialFocus: vaultModeCancelRef.current,
+    onEscape: handleCancelVaultModeConfirm,
+  });
+
+  useFocusTrap(vaultWizardDialogRef, {
+    active: vaultWizardOpen,
+    initialFocus: vaultWizardCloseRef.current ?? vaultWizardDialogRef.current,
+    onEscape: closeVaultBackupWizard,
+  });
+
+  const handleSkipToContent = useCallback((event: React.MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault();
+    const target = mainContentRef.current;
+    if (target) {
+      target.focus({ preventScroll: true });
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, []);
+
   const hasHealthAlert =
     !offlineMode && healthSummary.failing.some((item) => item.status !== "offline");
   const previewHologramActive = theme === "cyberpunk" && highEffects && workspace === "preview";
   const hologramActive = previewHologramActive && !prefersReducedMotion;
+  const holomapEnabled = workspace === "preview" && highEffects && !prefersReducedMotion;
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-content" onClick={handleSkipToContent}>
+        Skip to main content
+      </a>
       <HeroCanvas theme={theme} highEffects={highEffects} />
       <header className={`top-bar ${catalogDragging ? "dragging-block" : ""}`}>
         <div className="brand-area">
@@ -6375,6 +6608,7 @@ function App() {
         </div>
       </header>
 
+      <main id="main-content" ref={mainContentRef} tabIndex={-1}>
       <HotkeyOverlay open={hotkeyOverlayOpen} sections={hotkeySections} onClose={closeHotkeyOverlay} />
 
       <ErrorBoundary name="PIP vault" variant="panel" onReset={resetVaultPanelBoundary}>
@@ -6418,21 +6652,7 @@ function App() {
               </span>
             </div>
           </div>
-        {pipVaultTask && (
-          <div className="pip-vault-progress" role="status">
-            <div className="pip-vault-progress-bar">
-              <span
-                className={`fill ${pipVaultTask.kind} ${pipVaultProgressValue != null ? "has-progress" : ""}`}
-                style={
-                  pipVaultProgressValue != null
-                    ? { width: `${Math.min(100, Math.max(6, pipVaultProgressValue))}%` }
-                    : undefined
-                }
-              />
-            </div>
-            <div className="pip-vault-progress-label">{pipVaultProgressLabel ?? pipVaultTask.label}</div>
-          </div>
-        )}
+        {pipVaultProgressNode}
         {pipVaultError && (
           <div className="pip-vault-alert" role="alert">
             <div className="pip-vault-alert-copy">
@@ -6617,12 +6837,12 @@ function App() {
               >
                 {vaultIntegrityRunning ? "Scanning…" : "Scan integrity"}
               </button>
-              <button className="ghost" onClick={handleImportVaultBundle} disabled={pipVaultBusy}>
+              <button className="ghost" onClick={() => openVaultBackupWizard("import")} disabled={pipVaultBusy}>
                 {pipVaultTask?.kind === "import" ? "Importing…" : "Import backup"}
               </button>
               <button
                 className="ghost"
-                onClick={handleExportVaultBundle}
+                onClick={() => openVaultBackupWizard("export")}
                 disabled={pipVaultBusy || (!pipVaultSnapshot?.exists && !pipVaultRecords.length)}
               >
                 {pipVaultTask?.kind === "export" ? "Exporting…" : "Export backup"}
@@ -7134,6 +7354,35 @@ function App() {
               </span>
             </div>
           </section>
+          <section className="preview-holomap-card" aria-label="AO holomap pulse">
+            <div className="stack-head">
+              <div>
+                <p className="eyebrow">AO holomap</p>
+                <h4>Network pulse</h4>
+              </div>
+              <div className="preview-holomap-meta">
+                <span className={`pill ${holomapEnabled ? "accent" : "ghost"}`}>
+                  {prefersReducedMotion
+                    ? "Reduced motion"
+                    : holomapEnabled
+                      ? "Live effects"
+                      : "FX paused"}
+                </span>
+                <span className={`pill ${healthSummary.overall === "ok" ? "ghost" : "warn"}`}>
+                  {healthSummary.overall.toUpperCase()}
+                </span>
+              </div>
+            </div>
+            <AoHolomap
+              enabled={holomapEnabled}
+              reducedMotion={prefersReducedMotion}
+              theme={theme}
+              health={health}
+              summary={healthSummary}
+              events={holomapEvents}
+              variant="mini"
+            />
+          </section>
           <div className="composition-toolbar hud-bar">
             <div className="selection-readout">
               <span className="pill ghost selection-pill">
@@ -7202,6 +7451,7 @@ function App() {
                   onNodeDragEnd={handleNodeDragEnd}
                   diffHighlight={draftDiffOpen ? draftDiffHighlight : undefined}
                   validation={treeValidation}
+                  onApplyDefaults={autofillNodeProps}
                 />
               </Suspense>
             )}
@@ -7247,15 +7497,23 @@ function App() {
                 </p>
               </div>
               <div className="inspector-badges">
-                <span className="badge schema">{selectedCatalogItem?.type ?? selectedNode.type}</span>
-                <span className={`badge ${propsInspection?.valid ? "valid" : "invalid"}`}>
+                <span
+                  className="badge schema"
+                  title={`Schema type: ${selectedCatalogItem?.type ?? selectedNode.type}`}
+                >
+                  {selectedCatalogItem?.type ?? selectedNode.type}
+                </span>
+                <span
+                  className={`badge ${propsInspection?.valid ? "valid" : "invalid"}`}
+                  title={propsInspection?.valid ? "Props satisfy schema validation" : "Props need fixes to validate"}
+                >
                   {propsInspection?.valid ? "Valid" : "Needs attention"}
                 </span>
-                <span className="badge ghost">
+                <span className="badge ghost" title="Differences from the block defaults">
                   {propsInspection?.diffEntries.length ?? 0} diff
                   {(propsInspection?.diffEntries.length ?? 0) === 1 ? "" : "s"}
                 </span>
-                <span className="badge ghost">
+                <span className="badge ghost" title="Validation issues found for this node">
                   {propsInspection?.issueCount ?? 0} issue
                   {(propsInspection?.issueCount ?? 0) === 1 ? "" : "s"}
                 </span>
@@ -7304,7 +7562,21 @@ function App() {
                 <div className="diff-summary">
                   <div className="diff-summary-head">
                     <span className="eyebrow">Validation</span>
-                    <span className="badge ghost">{propsInspection?.issueCount ?? 0}</span>
+                    <div className="inline-actions">
+                      <span className="badge ghost" title="Validation issues on this node">
+                        {propsInspection?.issueCount ?? 0}
+                      </span>
+                      {selectedNodeId && propsInspection?.issues.some((issue) => issue.code === "required") ? (
+                        <button
+                          className="ghost small"
+                          type="button"
+                          onClick={() => autofillNodeProps(selectedNodeId)}
+                          title="Fill missing required props with defaults"
+                        >
+                          Fill required
+                        </button>
+                      ) : null}
+                    </div>
                   </div>
                   {propsInspection?.issues.length ? (
                     <div className="validation-list">
@@ -7917,10 +8189,12 @@ function App() {
             </table>
           </div>
         </div>
-        <Suspense fallback={<AoLogPanelFallback />}>
-          <AoLogPanel aoLog={aoLog} onCopy={handleCopyAoId} onOpen={handleOpenAoId} />
-        </Suspense>
+      <Suspense fallback={<AoLogPanelFallback />}>
+        <AoLogPanel aoLog={aoLog} onCopy={handleCopyAoId} onOpen={handleOpenAoId} />
+      </Suspense>
       </Wizard>
+
+      </main>
 
       {(draftDiffOpen || draftDiffLoading) && (
         <ErrorBoundary name="Draft diff" variant="overlay" onReset={resetDraftDiffBoundary}>
@@ -7956,18 +8230,233 @@ function App() {
         </ErrorBoundary>
       )}
 
+      {vaultWizardOpen && (
+        <div
+          className="pip-vault-modal-backdrop"
+          role="presentation"
+          onClick={closeVaultBackupWizard}
+        >
+          <div
+            ref={vaultWizardDialogRef}
+            className="pip-vault-wizard"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="vault-wizard-title"
+            aria-describedby="vault-wizard-desc"
+            tabIndex={-1}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <input
+              type="file"
+              accept="application/json"
+              ref={vaultWizardFileInputRef}
+              style={{ display: "none" }}
+              onChange={handleVaultWizardFileChange}
+              aria-hidden="true"
+            />
+            <div className="pip-vault-wizard-head">
+              <div>
+                <p className="eyebrow">Backups</p>
+                <h4 id="vault-wizard-title">Vault backup wizard</h4>
+                <p className="subtle" id="vault-wizard-desc">
+                  Export or import vault bundles with progress, integrity context, and reusable passwords.
+                </p>
+              </div>
+              <div className="pip-vault-wizard-actions">
+                <span className="pill ghost">
+                  {pipVaultSnapshot ? formatVaultMode(pipVaultSnapshot.mode) : "Mode unknown"}
+                </span>
+                <span className="pill ghost">
+                  {pipVaultSnapshot ? `${pipVaultSnapshot.recordCount} records` : "Inspecting records…"}
+                </span>
+                <button
+                  ref={vaultWizardCloseRef}
+                  className="ghost small"
+                  type="button"
+                  onClick={closeVaultBackupWizard}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+
+            {pipVaultProgressNode}
+
+            <div className="pip-vault-wizard-grid">
+              <section className={`pip-vault-wizard-card ${vaultWizardMode === "export" ? "active" : ""}`}>
+                <div className="stack-head">
+                  <div>
+                    <p className="eyebrow">Export</p>
+                    <h4>Backup vault</h4>
+                  </div>
+                  <span className="pill ghost mono">
+                    {pipVaultSnapshot?.updatedAt ? formatDate(pipVaultSnapshot.updatedAt) : "No backups yet"}
+                  </span>
+                </div>
+                <div className="pip-vault-wizard-meta">
+                  <div>
+                    <span>Mode</span>
+                    <strong>{pipVaultSnapshot ? formatVaultMode(pipVaultSnapshot.mode) : "—"}</strong>
+                  </div>
+                  <div>
+                    <span>Records</span>
+                    <strong>{pipVaultSnapshot?.recordCount ?? 0}</strong>
+                  </div>
+                  <div>
+                    <span>Integrity</span>
+                    <strong>
+                      {vaultIntegrity
+                        ? vaultIntegrity.failed
+                          ? `${vaultIntegrity.failed} issue${vaultIntegrity.failed === 1 ? "" : "s"}`
+                          : "OK"
+                        : "Not scanned"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Last checksum</span>
+                    <strong className="mono">
+                      {latestVaultAudit?.checksum ? `${latestVaultAudit.checksum.slice(0, 10)}…` : "—"}
+                    </strong>
+                  </div>
+                </div>
+                <div className="pip-vault-wizard-actions">
+                  <button
+                    className="primary"
+                    type="button"
+                    onClick={handleWizardExport}
+                    disabled={pipVaultBusy || (!pipVaultSnapshot?.exists && !pipVaultRecords.length)}
+                  >
+                    {pipVaultTask?.kind === "export" ? "Exporting…" : "Start export"}
+                  </button>
+                  <button
+                    className="ghost"
+                    type="button"
+                    onClick={handleRunIntegrityScan}
+                    disabled={pipVaultBusy || pipVaultLocked || vaultIntegrityRunning}
+                  >
+                    {vaultIntegrityRunning ? "Scanning…" : "Scan integrity"}
+                  </button>
+                </div>
+                <p className="hint">Backups include vault records and use the current vault mode.</p>
+              </section>
+
+              <section className={`pip-vault-wizard-card ${vaultWizardMode === "import" ? "active" : ""}`}>
+                <div className="stack-head">
+                  <div>
+                    <p className="eyebrow">Import</p>
+                    <h4>Restore backup</h4>
+                  </div>
+                  <span className="pill ghost mono">{vaultWizardFile?.name ?? "Choose backup file"}</span>
+                </div>
+                <div className="pip-vault-wizard-actions">
+                  <button className="ghost" type="button" onClick={triggerVaultWizardFilePick} disabled={pipVaultBusy}>
+                    Select file
+                  </button>
+                  <button
+                    className="primary"
+                    type="button"
+                    onClick={handleWizardImport}
+                    disabled={pipVaultBusy || !vaultWizardFile}
+                  >
+                    {pipVaultTask?.kind === "import" ? "Importing…" : "Start import"}
+                  </button>
+                </div>
+                <label className="remember-toggle">
+                  <input
+                    type="checkbox"
+                    checked={vaultWizardUseVaultPassword}
+                    onChange={(e) => setVaultWizardUseVaultPassword(e.target.checked)}
+                  />
+                  Reuse vault password / remembered session
+                  {vaultWizardUseVaultPassword && rememberedVaultPassword ? (
+                    <span className="remember-hint">Using stored session password</span>
+                  ) : null}
+                </label>
+                {!vaultWizardUseVaultPassword && (
+                  <div className={`pip-vault-password-input ${vaultWizardImportError ? "has-error" : ""}`}>
+                    <input
+                      type="password"
+                      value={vaultWizardPassword}
+                      onChange={(e) => {
+                        setVaultWizardPassword(e.target.value);
+                        if (vaultWizardImportError) setVaultWizardImportError(null);
+                      }}
+                      placeholder="Password for encrypted backup"
+                    />
+                  </div>
+                )}
+                {vaultWizardImportError ? (
+                  <p className="error field-error">{vaultWizardImportError}</p>
+                ) : (
+                  <p className="hint">
+                    Encrypted bundles use the vault password. Uncheck reuse to supply a one-off password.
+                  </p>
+                )}
+              </section>
+            </div>
+
+            <div className="pip-vault-wizard-footer">
+              <div className="pip-vault-wizard-integrity">
+                <p className="eyebrow">Integrity history</p>
+                {vaultWizardIntegrity.length ? (
+                  <div className="pip-vault-wizard-integrity-list">
+                    {vaultWizardIntegrity.map((event) => {
+                      const scannedLabel =
+                        event.recordCount != null && Number.isFinite(event.recordCount)
+                          ? `${event.scanned}/${event.recordCount} scanned`
+                          : `${event.scanned} scanned`;
+                      return (
+                        <span key={event.id} className="pill ghost">
+                          {formatTimeShort(event.at)} · {scannedLabel} ·{" "}
+                          {event.failed ? `${event.failed} failed` : "OK"} · {Math.round(event.durationMs)}ms
+                        </span>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="hint">Run an integrity scan to reuse recent results before exporting.</p>
+                )}
+              </div>
+              <div className="pip-vault-wizard-actions">
+                <button
+                  className="ghost small"
+                  type="button"
+                  onClick={handleRunIntegrityScan}
+                  disabled={pipVaultBusy || pipVaultLocked || vaultIntegrityRunning}
+                >
+                  {vaultIntegrityRunning ? "Scanning…" : "Scan now"}
+                </button>
+                <button className="ghost small" type="button" onClick={closeVaultBackupWizard}>
+                  Done
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {pipVaultModeConfirm && (
-        <div className="pip-vault-modal-backdrop">
-          <div className="pip-vault-modal" role="dialog" aria-modal="true" aria-label="Confirm vault mode change">
+        <div className="pip-vault-modal-backdrop" role="presentation">
+          <div
+            ref={vaultModeDialogRef}
+            className="pip-vault-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="pip-vault-mode-title"
+            aria-describedby="pip-vault-mode-copy"
+            tabIndex={-1}
+          >
             <p className="eyebrow">Vault mode</p>
-            <h4>{pipVaultModeConfirm.action === "enable" ? "Enable password mode?" : "Switch to keychain storage?"}</h4>
-            <p>
+            <h4 id="pip-vault-mode-title">
+              {pipVaultModeConfirm.action === "enable" ? "Enable password mode?" : "Switch to keychain storage?"}
+            </h4>
+            <p id="pip-vault-mode-copy">
               {pipVaultModeConfirm.action === "enable"
                 ? "Your vault will be re-encrypted with the password you entered. Backups created after this will require that password to open."
                 : "Vault encryption will use the system keychain or local key. Password-protected backups will still need their password to restore."}
             </p>
             <div className="pip-vault-modal-actions">
-              <button className="ghost" onClick={handleCancelVaultModeConfirm}>
+              <button ref={vaultModeCancelRef} className="ghost" onClick={handleCancelVaultModeConfirm}>
                 Cancel
               </button>
               <button className="primary" onClick={handleConfirmVaultMode}>
@@ -7981,21 +8470,31 @@ function App() {
       {whatsNewOpen && (
         <div
           className="whats-new-backdrop"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="whats-new-title"
+          role="presentation"
           onClick={() => setWhatsNewOpen(false)}
         >
-          <div className="whats-new-modal" onClick={(event) => event.stopPropagation()}>
+          <div
+            ref={whatsNewDialogRef}
+            className="whats-new-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="whats-new-title"
+            aria-describedby="whats-new-desc"
+            tabIndex={-1}
+            onClick={(event) => event.stopPropagation()}
+          >
             <div className="whats-new-head">
               <div>
                 <p className="eyebrow">Changelog</p>
                 <h3 id="whats-new-title">What's new</h3>
               </div>
-              <button className="ghost small" onClick={() => setWhatsNewOpen(false)}>
+              <button ref={whatsNewCloseRef} className="ghost small" onClick={() => setWhatsNewOpen(false)}>
                 Close
               </button>
             </div>
+            <p className="sr-only" id="whats-new-desc">
+              Latest release highlights and dates.
+            </p>
             <div className="whats-new-list">
               {whatsNewEntries.length === 0 ? (
                 <p className="hint">No changelog entries found.</p>

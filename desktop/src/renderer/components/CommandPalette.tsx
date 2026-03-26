@@ -1,4 +1,6 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useRef } from "react";
+
+import useFocusTrap from "../hooks/useFocusTrap";
 
 export interface CommandPaletteAction {
   id: string;
@@ -31,26 +33,34 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
   onExecute,
   onClose,
 }) => {
+  const dialogRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
     window.setTimeout(() => inputRef.current?.focus(), 0);
   }, [inputRef, open]);
 
+  useFocusTrap(dialogRef, { active: open, initialFocus: inputRef.current, onEscape: onClose });
+
   if (!open) return null;
+
+  const titleId = "command-palette-title";
+  const descriptionId = "command-palette-hint";
 
   return (
     <div className="command-palette-backdrop" role="presentation" onMouseDown={onClose}>
       <section
+        ref={dialogRef}
         className="command-palette"
         role="dialog"
         aria-modal="true"
-        aria-label="Command palette"
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="command-palette-header">
           <div>
             <p className="eyebrow">Command palette</p>
-            <h3>Quick actions</h3>
+            <h3 id={titleId}>Quick actions</h3>
           </div>
           <button className="ghost small" type="button" onClick={onClose}>
             Close
@@ -68,7 +78,12 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
           />
         </label>
 
-        <div className="command-palette-list" role="listbox" aria-activedescendant={actions[selectedIndex]?.id}>
+        <div
+          className="command-palette-list"
+          role="listbox"
+          aria-label="Available commands"
+          aria-activedescendant={actions[selectedIndex]?.id}
+        >
           {actions.length === 0 ? (
             <div className="command-palette-empty">
               <strong>No actions match</strong>
@@ -86,12 +101,14 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
                   className={`command-palette-item ${active ? "active" : ""}`}
                   onMouseEnter={() => onSelectIndex(index)}
                   onClick={() => void onExecute(action)}
+                  role="option"
+                  aria-selected={active}
                 >
-                  <div className="command-palette-copy">
-                    <strong>{action.label}</strong>
-                    <span>{action.description}</span>
-                  </div>
-                  {action.shortcut && <kbd>{action.shortcut}</kbd>}
+          <div className="command-palette-copy">
+            <strong>{action.label}</strong>
+            <span>{action.description}</span>
+          </div>
+          {action.shortcut && <kbd>{action.shortcut}</kbd>}
                 </button>
               );
             })
@@ -99,8 +116,9 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
         </div>
 
         <footer className="command-palette-footer">
+          <span id={descriptionId}>Tab or Shift+Tab to move; Enter runs the highlighted action.</span>
           <span>Cmd/Ctrl+K to toggle</span>
-          <span>Enter to run · Esc to close</span>
+          <span>Esc to close</span>
         </footer>
       </section>
     </div>

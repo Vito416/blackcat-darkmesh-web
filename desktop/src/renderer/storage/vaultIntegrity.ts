@@ -6,6 +6,7 @@ export type VaultIntegrityEvent = {
   scanned: number;
   failed: number;
   durationMs: number;
+  recordCount?: number;
 };
 
 type VaultIntegrityRow = Omit<VaultIntegrityEvent, "id"> & { id?: number };
@@ -13,6 +14,7 @@ type VaultIntegrityRow = Omit<VaultIntegrityEvent, "id"> & { id?: number };
 const DB_NAME = "pip-vault-integrity";
 const DB_VERSION = 1;
 const DEFAULT_HISTORY_LIMIT = 50;
+export const VAULT_INTEGRITY_WIZARD_LIMIT = 8;
 
 class VaultIntegrityDatabase extends Dexie {
   events!: Table<VaultIntegrityRow, number>;
@@ -30,6 +32,7 @@ const db = new VaultIntegrityDatabase();
 const stripRow = (row: VaultIntegrityRow): VaultIntegrityEvent => ({
   ...row,
   id: row.id ?? 0,
+  recordCount: row.recordCount,
 });
 
 const enforceLimit = async (limit: number) => {
@@ -49,9 +52,9 @@ export async function addVaultIntegrityEvent(event: Omit<VaultIntegrityEvent, "i
   return id;
 }
 
-export async function listVaultIntegrityEvents(limit?: number): Promise<VaultIntegrityEvent[]> {
+export async function listVaultIntegrityEvents(limit: number = DEFAULT_HISTORY_LIMIT): Promise<VaultIntegrityEvent[]> {
   const query = db.events.orderBy("at").reverse();
-  const rows = typeof limit === "number" && limit > 0 ? await query.limit(limit).toArray() : await query.toArray();
+  const rows = limit > 0 ? await query.limit(limit).toArray() : await query.toArray();
   return rows.map(stripRow);
 }
 

@@ -47,6 +47,13 @@ export type PipVaultIntegrityResult =
   | { ok: true; scanned: number; failed: PipVaultIntegrityIssue[]; durationMs: number; recordCount: number }
   | { ok: false; error: string };
 
+export type PipVaultBundleMeta = {
+  format?: string;
+  mode?: "safeStorage" | "plain" | "password";
+  createdAt?: string;
+  recordCount?: number;
+};
+
 const bridge = (): PipVaultBridge | undefined => {
   if (typeof window === "undefined") return undefined;
   return window.pipVault;
@@ -255,6 +262,32 @@ export async function importPipVaultBundle(
       ok: false,
       error: err instanceof Error ? err.message : "Unable to import PIP vault",
     };
+  }
+}
+
+export function inspectVaultBundle(
+  input: string | ArrayBuffer,
+): { ok: true; meta: PipVaultBundleMeta } | { ok: false; error: string } {
+  try {
+    const text =
+      typeof input === "string"
+        ? input
+        : new TextDecoder().decode(input instanceof ArrayBuffer ? new Uint8Array(input) : input);
+    const parsed = JSON.parse(text);
+    if (parsed?.format !== "pip-vault-bundle") {
+      return { ok: false, error: "Selected file is not a vault backup bundle" };
+    }
+
+    const meta: PipVaultBundleMeta = {
+      format: parsed.format,
+      mode: parsed.mode,
+      createdAt: parsed.createdAt,
+      recordCount: parsed.records ?? parsed.recordCount,
+    };
+
+    return { ok: true, meta };
+  } catch (err) {
+    return { ok: false, error: "Invalid vault bundle JSON" };
   }
 }
 

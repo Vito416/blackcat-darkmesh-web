@@ -13,17 +13,18 @@ npm run clean         # remove dist/ + release/ artifacts
 npm run dev           # start Vite (renderer) + Electron (main) with live reload
 npm run build         # production build (renderer bundle + compiled main/preload)
 npm run package       # build installer(s) for the current OS into release/
-npm run package:mac   # macOS dmg + zip (run on macOS)
-npm run package:win   # Windows nsis + portable exe (run on Windows)
-npm run package:linux # Linux AppImage + deb (run on Linux)
+npm run package:mac   # macOS dmg + zip for arm64 + x64 (run on macOS)
+npm run package:win   # Windows x64 nsis installer + portable exe (run on Windows)
+npm run package:linux # Linux x64 AppImage + deb (run on Linux)
 npm run lint          # eslint (placeholder)
 ```
 
 ### Packaging (electron-builder)
 
 - Config lives in `electron-builder.yml`; outputs land in `release/`.
-- Targets: macOS dmg + zip (unsigned by default), Windows nsis + portable, Linux AppImage + deb.
-- Builds rely on `dist/main.js` + `dist/renderer` from `npm run build`; the `clean` script wipes both build + release artifacts.
+- Targets: macOS dmg + zip (arm64 + x64, unsigned by default), Windows nsis installer + portable exe (x64), Linux AppImage + deb (x64).
+- Artifact names: `blackcat-desktop-${version}-mac-${arch}.{dmg|zip}`, `blackcat-desktop-${version}-win-${arch}-setup.exe`, `blackcat-desktop-${version}-win-${arch}-portable.exe`, `blackcat-desktop-${version}-linux-${arch}.{AppImage|deb}`.
+- Builds rely on `dist/desktop/src/main.js` + `dist/renderer` from `npm run build`; the `clean` script wipes both build + release artifacts.
 - Run platform-specific scripts on their host OS (electron-builder requires macOS to produce dmg/zip and Windows for signed exe/msi-equivalents).
 - Unsigned builds: keep `CSC_IDENTITY_AUTO_DISCOVERY=false` to avoid code-sign prompts. If you do want signing later, export the usual `CSC_LINK` / `CSC_KEY_PASSWORD` (or Apple ID creds for notarization) before rerunning the package command.
 
