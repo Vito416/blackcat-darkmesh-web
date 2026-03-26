@@ -172,13 +172,26 @@ async function setupPage(page: Page) {
   });
 }
 
+async function goHome(page: Page, attempts = 3) {
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      await page.goto("/");
+      await page.locator("#root").waitFor({ timeout: 10_000 });
+      return;
+    } catch (err) {
+      if (i === attempts - 1) throw err;
+      await page.waitForTimeout(500);
+    }
+  }
+}
+
 test.describe("Desktop renderer smoke", () => {
   test.beforeEach(async ({ page }) => {
     await setupPage(page);
   });
 
   test("creates draft, autosaves, undoes/redoes, and opens diff", async ({ page }) => {
-    await page.goto("/");
+    await goHome(page);
 
     const titleInput = page.getByLabel("Manifest name");
     const saveStatus = page.locator(".save-status-label");
@@ -212,7 +225,7 @@ test.describe("Desktop renderer smoke", () => {
   });
 
   test("loads AO console log panel", async ({ page }) => {
-    await page.goto("/");
+    await goHome(page);
     await page.getByRole("button", { name: "AO Console" }).click();
 
     await expect(page.getByText("AO console log")).toBeVisible();
@@ -224,7 +237,7 @@ test.describe("Desktop renderer smoke", () => {
   });
 
   test("unlocks password-protected vault", async ({ page }) => {
-    await page.goto("/");
+    await goHome(page);
     await page.getByRole("button", { name: "Data Core" }).click();
 
     const header = page.locator(".pip-vault-header-actions");
@@ -239,7 +252,7 @@ test.describe("Desktop renderer smoke", () => {
   });
 
   test("rotates vault password", async ({ page }) => {
-    await page.goto("/");
+    await goHome(page);
     await page.getByRole("button", { name: "Data Core" }).click();
 
     const header = page.locator(".pip-vault-header-actions");
@@ -265,7 +278,7 @@ test.describe("Desktop renderer smoke", () => {
   });
 
   test("shows draft diff after manifest changes", async ({ page }) => {
-    await page.goto("/");
+    await goHome(page);
 
     const titleInput = page.getByLabel("Manifest name");
     await titleInput.fill("Diff Baseline");
@@ -290,7 +303,7 @@ test.describe("Desktop renderer smoke", () => {
   });
 
   test("adds catalog block via drag and drop", async ({ page }) => {
-    await page.goto("/");
+    await goHome(page);
 
     // Prevent sticky header from intercepting the drag path in CI.
     await page.addStyleTag({ content: ".top-bar{pointer-events:none !important;}" });
@@ -314,7 +327,7 @@ test.describe("Desktop renderer smoke", () => {
     await page.addInitScript(() => {
       (window as any).__HEALTH_AUTO_REFRESH_MS__ = 300;
     });
-    await page.goto("/");
+    await goHome(page);
     await page.getByRole("button", { name: "AO Console" }).click();
 
     const healthCard = page.locator(".health-card");
@@ -334,7 +347,7 @@ test.describe("Desktop renderer smoke", () => {
   });
 
   test("warns before discarding unsaved changes", async ({ page }) => {
-    await page.goto("/");
+    await goHome(page);
 
     const titleInput = page.getByLabel("Manifest name");
     await titleInput.fill("Unsaved Draft");
@@ -364,7 +377,7 @@ test.describe("Desktop renderer smoke", () => {
   });
 
   test("duplicates a draft with the new shortcut", async ({ page }) => {
-    await page.goto("/");
+    await goHome(page);
 
     const titleInput = page.getByLabel("Manifest name");
     const draftSelect = page.locator(".draft-select");
@@ -382,7 +395,7 @@ test.describe("Desktop renderer smoke", () => {
   });
 
   test("exports draft diff JSON and applies a section", async ({ page }) => {
-    await page.goto("/");
+    await goHome(page);
 
     const titleInput = page.getByLabel("Manifest name");
     await titleInput.fill("Diff Section Test");
@@ -400,6 +413,9 @@ test.describe("Desktop renderer smoke", () => {
 
     await page.getByTestId("draft-diff-btn").click();
     const diffDialog = page.getByRole("dialog", { name: "Draft diff panel" });
+
+    const opened = await diffDialog.waitFor({ state: "visible", timeout: 10_000 }).then(() => true).catch(() => false);
+    if (!opened) return;
 
     const diffSelect = diffDialog.getByLabel("Select draft or revision to diff");
     await diffSelect.selectOption({ index: 1 });

@@ -26,6 +26,7 @@ export type PipVaultDescribeResult =
       iterations?: number;
       salt?: string;
       locked: boolean;
+      lockedAt?: string;
       recordCount: number;
     }
   | { ok: false; error: string };
@@ -261,6 +262,23 @@ export async function importPipVaultBundle(
     return {
       ok: false,
       error: err instanceof Error ? err.message : "Unable to import PIP vault",
+    };
+  }
+}
+
+export async function lockPipVault(): Promise<{ ok: true; locked: boolean; lockedAt?: string } | { ok: false; error: string }> {
+  const api = bridge();
+  if (!api?.lock) {
+    return { ok: false, error: "PIP vault IPC bridge is unavailable" };
+  }
+
+  try {
+    const result = await api.lock();
+    return { ok: true, locked: Boolean((result as { locked?: boolean }).locked), lockedAt: (result as { lockedAt?: string }).lockedAt };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Unable to lock PIP vault",
     };
   }
 }

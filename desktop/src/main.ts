@@ -14,6 +14,7 @@ import {
   listPipVaultRecords,
   readPipVault,
   readPipVaultRecord,
+  lockVault,
   writePipVault,
 } from "./main/pipVault";
 
@@ -152,6 +153,10 @@ app.whenReady().then(() => {
 
   ipcMain.handle("pipVault:disablePassword", async () => {
     return disableVaultPassword();
+  });
+
+  ipcMain.handle("pipVault:lock", async () => {
+    return lockVault();
   });
 
   ipcMain.handle("pipVault:export", async () => {

@@ -31,6 +31,7 @@ import {
   exportPipVaultBundle,
   importPipVaultBundle,
   inspectVaultBundle,
+  lockPipVault,
   scanPipVaultIntegrity,
   type PipVaultRecord,
 } from "./services/pipVault";
@@ -46,6 +47,8 @@ import {
 } from "./types/manifest";
 type DraftDiffPanelModule = typeof import("./components/DraftDiffPanel");
 type AoLogPanelModule = typeof import("./components/AoLogPanel");
+type ManifestRendererModule = typeof import("./components/ManifestRenderer");
+type AoHolomapModule = typeof import("./components/AoHolomap");
 const loadDraftDiffPanel = (() => {
   let modPromise: Promise<DraftDiffPanelModule> | null = null;
   return () => {
@@ -64,14 +67,39 @@ const loadAoLogPanel = (() => {
     return modPromise;
   };
 })();
+const loadManifestRenderer = (() => {
+  let modPromise: Promise<ManifestRendererModule> | null = null;
+  return () => {
+    if (!modPromise) {
+      modPromise = import("./components/ManifestRenderer");
+    }
+    return modPromise;
+  };
+})();
+const loadAoHolomap = (() => {
+  let modPromise: Promise<AoHolomapModule> | null = null;
+  return () => {
+    if (!modPromise) {
+      modPromise = import("./components/AoHolomap");
+    }
+    return modPromise;
+  };
+})();
 const DraftDiffPanel = React.lazy(loadDraftDiffPanel);
 const AoLogPanel = React.lazy(loadAoLogPanel);
-const ManifestRenderer = React.lazy(() => import("./components/ManifestRenderer"));
+const ManifestRenderer = React.lazy(loadManifestRenderer);
+const AoHolomap = React.lazy(loadAoHolomap);
 const prefetchDraftDiffPanel = () => {
   void loadDraftDiffPanel();
 };
 const prefetchAoLogPanel = () => {
   void loadAoLogPanel();
+};
+const prefetchManifestRenderer = () => {
+  void loadManifestRenderer();
+};
+const prefetchAoHolomap = () => {
+  void loadAoHolomap();
 };
 import {
   deleteDraft,
@@ -145,12 +173,12 @@ import { diffManifests, type DraftDiffEntry, type DraftDiffKind } from "./utils/
 import HotkeyOverlay, { type HotkeyOverlaySection } from "./components/HotkeyOverlay";
 import HeroCanvas from "./components/HeroCanvas";
 import HologramBlocks from "./components/HologramBlocks";
-import AoHolomap from "./components/AoHolomap";
 import useNeonCursorTrail from "./hooks/useNeonCursorTrail";
 import useFocusTrap from "./hooks/useFocusTrap";
 import Vault from "./components/Vault";
 import Wizard from "./components/Wizard";
 import { validatePipDocument } from "./services/pipValidation";
+import { DEFAULT_LOCALE, getMessages, I18nContext, makeTranslator, resolveLocale, type LocaleKey } from "./locales";
 
 type WhatsNewEntry = {
   version: string;
@@ -216,6 +244,16 @@ const themePresets = [
     description: "Neon grid with electric cyan and magenta glow.",
   },
   {
+    id: "neon-wasteland",
+    label: "Neon Wasteland",
+    description: "Toxic lime, ultraviolet plasma, and smoked-glass panels.",
+  },
+  {
+    id: "solarized-void",
+    label: "Solarized Void",
+    description: "Solar flare gold over abyssal teal with aurora haze.",
+  },
+  {
     id: "night-drive",
     label: "Night Drive",
     description: "Midnight teal with warm highway amber highlights.",
@@ -240,6 +278,7 @@ const themePresets = [
 type Theme = (typeof themePresets)[number]["id"];
 
 const themePresetMap = new Map(themePresets.map((preset) => [preset.id, preset]));
+const neonThemes: Theme[] = ["cyberpunk", "neon-wasteland", "solarized-void"];
 const DEFAULT_THEME: Theme = "light";
 
 const resolveTheme = (value: string | null): Theme =>
@@ -339,6 +378,14 @@ const openExternal = (url: string) => {
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
+const formatCountdown = (ms: number | null): string => {
+  if (ms == null) return "—";
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+};
+
 const cloneValue = <T,>(value: T): T => {
   const structured = (globalThis as { structuredClone?: <V>(input: V) => V }).structuredClone;
   if (typeof structured === "function") {
@@ -356,42 +403,53 @@ const cloneValue = <T,>(value: T): T => {
   }
 };
 
-type PasswordStrength = { score: number; label: string; hint: string };
+type PasswordStrengthCheck = { id: string; label: string; pass: boolean };
+type PasswordStrength = { score: number; label: string; hint: string; checks: PasswordStrengthCheck[] };
+
+const COMMON_PASSWORD_PATTERNS = [/password/i, /letmein/i, /1234/, /qwerty/i, /darkmesh/i, /blackcat/i];
 
 const evaluatePasswordStrength = (value: string): PasswordStrength => {
   const password = (value ?? "").trim();
+  const checks: PasswordStrengthCheck[] = [
+    { id: "length", label: "14+ characters", pass: password.length >= 14 },
+    { id: "variety", label: "Upper, lower, number, symbol", pass: [/[a-z]/, /[A-Z]/, /\d/, /[^A-Za-z0-9]/].filter((r) => r.test(password)).length >= 3 },
+    { id: "entropy", label: "No long repeats", pass: password.length === 0 ? false : new Set(password.split("")).size / password.length >= 0.55 },
+    {
+      id: "patterns",
+      label: "Avoid common words/sequences",
+      pass:
+        password.length === 0
+          ? false
+          : !COMMON_PASSWORD_PATTERNS.some((regex) => regex.test(password)) && !/(0123|1234|2345|3456|4567|abcd|qwer|aaaa)/i.test(password),
+    },
+  ];
+
   if (!password) {
-    return { score: 0, label: "Add a password", hint: "Use 12+ chars with symbols." };
+    return { score: 0, label: "Add a password", hint: "Use 14+ chars with symbols.", checks };
   }
 
-  let score = 0;
-  if (password.length >= 16) {
-    score += 2;
-  } else if (password.length >= 12) {
-    score += 1;
-  }
+  const baseScore = checks.filter((item) => item.pass).length;
+  const lengthBonus = password.length >= 20 ? 1 : 0;
+  const uniqueRatio = password.length ? new Set(password).size / password.length : 0;
+  const ratioBonus = uniqueRatio > 0.7 ? 1 : 0;
+  const patternPenalty = checks.find((item) => item.id === "patterns" && !item.pass) ? 1 : 0;
 
-  const variety = [/[a-z]/, /[A-Z]/, /\d/, /[^A-Za-z0-9]/].filter((regex) => regex.test(password)).length;
-  if (variety >= 3) score += 1;
-  if (variety === 4) score += 1;
-
-  const uniqueRatio = new Set(password.split("")).size / password.length;
-  if (uniqueRatio < 0.45 && score > 0) {
-    score -= 1;
-  }
-
-  const capped = Math.max(0, Math.min(score, 4));
+  const rawScore = baseScore + lengthBonus + ratioBonus - patternPenalty;
+  const capped = Math.max(0, Math.min(rawScore, 4));
   const label = ["Very weak", "Weak", "Fair", "Good", "Strong"][capped];
-  const hint =
-    capped <= 1
-      ? "Add length and mix upper/lowercase, numbers, symbols."
-      : capped === 2
-        ? "Add another character type to strengthen it."
-        : capped === 3
-          ? "Looks solid; avoid reusing it elsewhere."
-          : "Strong; store it somewhere safe.";
 
-  return { score: capped, label, hint };
+  const firstMissing = checks.find((item) => !item.pass);
+  const hint = firstMissing
+    ? firstMissing.id === "length"
+      ? "Add more length—aim for 14+ characters."
+      : firstMissing.id === "variety"
+        ? "Mix upper/lowercase letters, numbers, and symbols."
+        : firstMissing.id === "entropy"
+          ? "Avoid repeating the same character pattern."
+          : "Swap out common words or sequences."
+    : "Strong; store it somewhere safe.";
+
+  return { score: capped, label, hint, checks };
 };
 
 const healthStatusLabel = (status: HealthStatus["status"]) => {
@@ -520,12 +578,37 @@ type ActionStep = {
   detail?: string | null;
   at?: string;
 };
+export type AoLogSeverity = "success" | "warning" | "error" | "info";
+export type AoLogContext = {
+  manifestTx?: string;
+  moduleTx?: string;
+  scheduler?: string;
+  transient?: boolean;
+};
+export type AoLogSparkline = {
+  path: string;
+  points: { x: number; y: number; value: number }[];
+  width: number;
+  height: number;
+  min: number;
+  max: number;
+  latest: number;
+};
+export type AoLogMetrics = {
+  successRate: number | null;
+  averageLatency: number | null;
+  sparkline: AoLogSparkline | null;
+  counts: Record<AoLogSeverity | "all", number>;
+};
 export type AoMiniLogEntry = {
   kind: "deploy" | "spawn";
   id: string | null;
   status: string;
   time: string;
   href: string | null;
+  severity: AoLogSeverity;
+  durationMs?: number;
+  context?: AoLogContext;
   payload?: unknown;
   raw?: string;
 };
@@ -545,6 +628,7 @@ type PipVaultSnapshot = {
   iterations?: number;
   salt?: string;
   locked: boolean;
+  lockedAt?: string;
   recordCount: number;
 };
 type PipVaultIssue = {
@@ -570,17 +654,22 @@ type VaultExportOptions = {
 const THEME_STORAGE_KEY = "darkmesh-theme";
 const OFFLINE_STORAGE_KEY = "darkmesh-offline-mode";
 const CURSOR_TRAIL_STORAGE_KEY = "darkmesh-cursor-trail";
+const LOCALE_STORAGE_KEY = "darkmesh-locale";
 const OFFLINE_FETCH_ERROR = "Offline mode is enabled; network requests are blocked";
 const HEALTH_AUTO_REFRESH_STORAGE_KEY = "health-auto-refresh";
 type HealthAutoRefresh = "off" | "10" | "30" | "60";
 const HEALTH_AUTO_REFRESH_OPTIONS: HealthAutoRefresh[] = ["off", "10", "30", "60"];
 const PIP_VAULT_REMEMBER_KEY = "pip-vault-remember";
 const PIP_VAULT_REMEMBER_PASSWORD_KEY = "pip-vault-remember-password";
+const PIP_VAULT_AUTO_LOCK_KEY = "pip-vault-auto-lock-minutes";
+const DEFAULT_PIP_VAULT_AUTO_LOCK_MINUTES = 15;
+const PIP_VAULT_HARDWARE_PLACEHOLDER_KEY = "pip-vault-hardware-placeholder";
 const HEALTH_NOTIFY_STORAGE_KEY = "health-sla-notify";
 const HEALTH_SLA_FAILURE_STORAGE_KEY = "health-sla-failure";
 const HEALTH_SLA_LATENCY_STORAGE_KEY = "health-sla-latency";
 const LAST_MODULE_TX_STORAGE_KEY = "ao-last-module-tx";
 const LAST_SPAWN_STORAGE_KEY = "ao-last-spawn";
+const AO_PINNED_IDS_STORAGE_KEY = "ao-console-pins";
 const getEnv = (key: string): string | undefined => resolveEnvWithSettings(key);
 const parsePositiveNumber = (value: string | undefined, fallback: number): number => {
   const parsed = Number(value);
@@ -624,6 +713,7 @@ declare global {
         iterations?: number;
         salt?: string;
         locked: boolean;
+        lockedAt?: string;
         recordCount: number;
       }>;
       list: () => Promise<{ exists: boolean; records: PipVaultRecord[] }>;
@@ -653,6 +743,7 @@ declare global {
       scanIntegrity: (
         password?: string,
       ) => Promise<{ ok: true; scanned: number; failed: { id: string; error: string }[]; durationMs: number; recordCount: number }>;
+      lock: () => Promise<{ ok: true; locked: boolean; lockedAt: string }>;
     };
     __HEALTH_AUTO_REFRESH_MS__?: number;
   }
@@ -1109,19 +1200,31 @@ const matchesCatalogFilters = (
   return typeMatch && tagMatch;
 };
 
-const blockShapeForType = (type: string): "hero" | "grid" | "media" | "pricing" | "footer" => {
-  if (type.includes("hero")) return "hero";
-  if (type.includes("grid")) return "grid";
-  if (type.includes("gallery") || type.includes("media")) return "media";
-  if (type.includes("pricing")) return "pricing";
-  return "footer";
+type CatalogShape = "hero" | "cta" | "grid" | "timeline" | "stats" | "media" | "pricing" | "contact" | "footer";
+
+const blockShapeForType = (type: string): CatalogShape => {
+  const normalized = type.toLowerCase();
+  if (normalized.includes("hero")) return "hero";
+  if (normalized.includes("cta")) return "cta";
+  if (normalized.includes("timeline")) return "timeline";
+  if (normalized.includes("stat")) return "stats";
+  if (normalized.includes("gallery") || normalized.includes("media")) return "media";
+  if (normalized.includes("pricing")) return "pricing";
+  if (normalized.includes("contact")) return "contact";
+  if (normalized.includes("footer")) return "footer";
+  if (normalized.includes("grid")) return "grid";
+  return "grid";
 };
 
 const quickShapeFilters = [
   { id: "hero", label: "Hero", sampleType: "block.hero", hint: "Headlines & CTA" },
+  { id: "cta", label: "CTA", sampleType: "block.cta", hint: "Banners & prompts" },
   { id: "grid", label: "Grid", sampleType: "block.featureGrid", hint: "Cards & columns" },
+  { id: "timeline", label: "Timeline", sampleType: "block.timeline", hint: "Roadmaps & steps" },
+  { id: "stats", label: "Stats", sampleType: "block.stats", hint: "KPIs & telemetry" },
   { id: "media", label: "Media", sampleType: "block.gallery", hint: "Gallery & embeds" },
   { id: "pricing", label: "Pricing", sampleType: "block.pricing", hint: "Plans & tiers" },
+  { id: "contact", label: "Contact", sampleType: "block.contact", hint: "Forms & methods" },
   { id: "footer", label: "Footer", sampleType: "block.footer", hint: "Links & socials" },
 ] as const;
 
@@ -1131,7 +1234,10 @@ const BlockPlaceholder: React.FC<{ type: string }> = ({ type }) => {
 
   return (
     <div className={className} aria-hidden>
-      <span className="placeholder-chip" />
+      <div className="placeholder-head">
+        <span className="placeholder-chip" />
+        {(shape === "cta" || shape === "hero") && <span className="placeholder-pill" />}
+      </div>
       <span className="placeholder-line wide" />
       <span className="placeholder-line" />
       <span className="placeholder-line short" />
@@ -1148,6 +1254,42 @@ const BlockPlaceholder: React.FC<{ type: string }> = ({ type }) => {
           <span />
           <span />
           <span />
+        </div>
+      )}
+      {shape === "timeline" && (
+        <div className="placeholder-timeline">
+          {[0, 1, 2].map((index) => (
+            <div key={index} className="placeholder-timeline-step">
+              <span className="timeline-dot" />
+              <span className="placeholder-line wide" />
+              <span className="placeholder-pill tiny" />
+            </div>
+          ))}
+        </div>
+      )}
+      {shape === "stats" && (
+        <div className="placeholder-stats">
+          {[0, 1, 2].map((index) => (
+            <div key={index} className="placeholder-stat-card">
+              <span className="placeholder-line short" />
+              <span className="placeholder-line wide" />
+              <span className="placeholder-pill tiny" />
+            </div>
+          ))}
+        </div>
+      )}
+      {shape === "contact" && (
+        <div className="placeholder-contact">
+          <div className="placeholder-contact-list">
+            <span className="placeholder-pill" />
+            <span className="placeholder-pill" />
+            <span className="placeholder-pill" />
+          </div>
+          <div className="placeholder-form">
+            <span className="placeholder-input" />
+            <span className="placeholder-input short" />
+            <span className="placeholder-button" />
+          </div>
         </div>
       )}
     </div>
@@ -1704,6 +1846,30 @@ const ManifestRendererFallback: React.FC = () => (
   </div>
 );
 
+const AoHolomapFallback: React.FC = () => (
+  <div className="holomap-fallback" role="status" aria-live="polite">
+    <LazySkeletonLine width="52%" />
+    <LazySkeletonLine width="64%" />
+    <LazySkeletonPill width="38%" />
+  </div>
+);
+
+const workspaceLabels: Record<Workspace, string> = {
+  studio: "Creator Studio",
+  ao: "AO Console",
+  data: "Data Core",
+  preview: "Preview Hub",
+};
+
+const WorkspaceSuspenseFallback: React.FC<{ workspace: Workspace }> = ({ workspace }) => (
+  <div className="workspace-fallback" role="status" aria-live="polite">
+    <p className="eyebrow">Loading</p>
+    <h4>{workspaceLabels[workspace]}</h4>
+    <p className="subtle">Pulling lazy chunks for this workspace…</p>
+    {workspace === "preview" ? <AoHolomapFallback /> : null}
+  </div>
+);
+
 const AoLogPanelFallback: React.FC = () => (
   <div className="ao-log-panel" role="status" aria-live="polite">
     <div className="ao-log-panel-header">
@@ -1711,10 +1877,31 @@ const AoLogPanelFallback: React.FC = () => (
         <p className="eyebrow">AO console log</p>
         <h4>Loading action payloads…</h4>
       </div>
-      <div className="ao-log-filters">
-        <LazySkeletonPill width="86px" />
-        <LazySkeletonPill width="98px" />
-        <LazySkeletonPill width="86px" />
+      <div className="ao-log-toolbar">
+        <div className="ao-log-filters">
+          <LazySkeletonPill width="86px" />
+          <LazySkeletonPill width="98px" />
+          <LazySkeletonPill width="86px" />
+        </div>
+        <div className="ao-log-filters">
+          <LazySkeletonPill width="96px" />
+          <LazySkeletonPill width="84px" />
+          <LazySkeletonPill width="88px" />
+        </div>
+      </div>
+    </div>
+    <div className="ao-log-metrics">
+      <div className="ao-log-metric-card">
+        <LazySkeletonLine width="42%" />
+        <LazySkeletonPill width="48%" />
+      </div>
+      <div className="ao-log-metric-card">
+        <LazySkeletonLine width="36%" />
+        <LazySkeletonPill width="52%" />
+      </div>
+      <div className="ao-log-metric-card">
+        <LazySkeletonLine width="64%" />
+        <LazySkeletonLine width="72%" />
       </div>
     </div>
     <div className="ao-log-table-wrap">
@@ -1724,6 +1911,7 @@ const AoLogPanelFallback: React.FC = () => (
             <th scope="col">Type</th>
             <th scope="col">tx / processId</th>
             <th scope="col">Status</th>
+            <th scope="col">Latency</th>
             <th scope="col">Time</th>
             <th scope="col">Actions</th>
             <th scope="col">Details</th>
@@ -1746,6 +1934,9 @@ const AoLogPanelFallback: React.FC = () => (
               </td>
               <td>
                 <LazySkeletonLine width="72%" />
+              </td>
+              <td>
+                <LazySkeletonLine width="60%" />
               </td>
               <td>
                 <LazySkeletonLine width="60%" />
@@ -1829,6 +2020,12 @@ const DraftDiffPanelFallback: React.FC<{
 };
 
 function App() {
+  const [locale, setLocale] = useState<LocaleKey>(() => {
+    if (typeof window === "undefined") return DEFAULT_LOCALE;
+    return resolveLocale(window.localStorage.getItem(LOCALE_STORAGE_KEY));
+  });
+  const messages = useMemo(() => getMessages(locale), [locale]);
+  const t = useMemo(() => makeTranslator(messages), [messages]);
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
   const [highEffects, setHighEffects] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
@@ -1898,11 +2095,23 @@ function App() {
     kind: PipVaultTaskKind;
     label: string;
     progress?: number;
+    detail?: string;
   } | null>(null);
   const [pipVaultRememberUnlock, setPipVaultRememberUnlock] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     return window.sessionStorage.getItem(PIP_VAULT_REMEMBER_KEY) === "1";
   });
+  const [pipVaultAutoLockMinutes, setPipVaultAutoLockMinutes] = useState<number>(() => {
+    if (typeof window === "undefined") return DEFAULT_PIP_VAULT_AUTO_LOCK_MINUTES;
+    const stored = Number(window.localStorage.getItem(PIP_VAULT_AUTO_LOCK_KEY));
+    return Number.isFinite(stored) && stored >= 0 ? stored : DEFAULT_PIP_VAULT_AUTO_LOCK_MINUTES;
+  });
+  const [pipVaultAutoLockRemainingMs, setPipVaultAutoLockRemainingMs] = useState<number | null>(null);
+  const [pipVaultHardwarePlaceholder, setPipVaultHardwarePlaceholder] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(PIP_VAULT_HARDWARE_PLACEHOLDER_KEY) === "1";
+  });
+  const [vaultAuditExpandedId, setVaultAuditExpandedId] = useState<number | null>(null);
   const [pipVaultModeConfirm, setPipVaultModeConfirm] = useState<{ action: "enable" | "disable"; password?: string } | null>(null);
   const [vaultWizardOpen, setVaultWizardOpen] = useState(false);
   const [vaultWizardMode, setVaultWizardMode] = useState<"export" | "import">("export");
@@ -1973,6 +2182,16 @@ function App() {
   const [deployedModuleTx, setDeployedModuleTx] = useState<string | null>(() => loadLastModuleTx());
   const [lastSpawnSnapshot, setLastSpawnSnapshot] = useState<SpawnSnapshot | null>(() => loadLastSpawnSnapshot());
   const [aoLog, setAoLog] = useState<AoMiniLogEntry[]>([]);
+  const [pinnedAoIds, setPinnedAoIds] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const stored = window.localStorage.getItem(AO_PINNED_IDS_STORAGE_KEY);
+      const parsed = stored ? JSON.parse(stored) : [];
+      return Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : [];
+    } catch {
+      return [];
+    }
+  });
   const [moduleSourceError, setModuleSourceError] = useState<string | null>(null);
   const [moduleTxError, setModuleTxError] = useState<string | null>(null);
   const [manifestTxError, setManifestTxError] = useState<string | null>(null);
@@ -2020,6 +2239,9 @@ function App() {
   const saveTimerRef = useRef<number | null>(null);
   const saveInFlightRef = useRef(false);
   const autoUnlockAttemptRef = useRef(false);
+  const vaultAutoLockTimerRef = useRef<number | null>(null);
+  const vaultAutoLockTickerRef = useRef<number | null>(null);
+  const lastVaultLockReasonRef = useRef<"timer" | "manual" | null>(null);
   const lastHealthNotificationRef = useRef<string | null>(null);
   const historySuppressedRef = useRef(false);
   const lastIntegrityFingerprintRef = useRef<string | null>(null);
@@ -2344,7 +2566,10 @@ function App() {
           }
         />
       </div>
-      <div className="pip-vault-progress-label">{pipVaultProgressLabel ?? pipVaultTask.label}</div>
+      <div className="pip-vault-progress-labels">
+        <div className="pip-vault-progress-label">{pipVaultProgressLabel ?? pipVaultTask.label}</div>
+        {pipVaultTask.detail ? <div className="pip-vault-progress-detail">{pipVaultTask.detail}</div> : null}
+      </div>
     </div>
   ) : null;
   const latestVaultAudit = useMemo(() => vaultAuditEvents[0] ?? null, [vaultAuditEvents]);
@@ -2514,6 +2739,69 @@ function App() {
   );
 
   const aoMiniLogRows = useMemo(() => aoLog.slice(0, 20), [aoLog]);
+  const aoLogMetrics = useMemo<AoLogMetrics>(() => {
+    const sample = aoLog.slice(0, 30);
+    const counts: Record<AoLogSeverity | "all", number> = {
+      success: 0,
+      warning: 0,
+      error: 0,
+      info: 0,
+      all: 0,
+    };
+
+    for (const entry of sample) {
+      counts.all += 1;
+      counts[entry.severity] = (counts[entry.severity] ?? 0) + 1;
+    }
+
+    const latencyValues = sample
+      .map((entry) => entry.durationMs)
+      .filter((value): value is number => typeof value === "number")
+      .reverse();
+
+    const successRate = counts.all ? Math.round((counts.success / counts.all) * 100) : null;
+
+    if (!latencyValues.length) {
+      return { successRate, averageLatency: null, sparkline: null, counts };
+    }
+
+    const max = Math.max(...latencyValues);
+    const min = Math.min(...latencyValues);
+    const range = max - min || 1;
+    const width = Math.max(110, latencyValues.length * 10);
+    const height = 40;
+    const step = latencyValues.length > 1 ? width / (latencyValues.length - 1) : width;
+
+    const points = latencyValues.map((value, idx) => {
+      const x = idx * step;
+      const normalized = (value - min) / range;
+      const y = height - normalized * height;
+      return { x, y, value };
+    });
+
+    const path = points
+      .map((point, idx) => `${idx === 0 ? "M" : "L"}${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
+      .join(" ");
+
+    const averageLatency = Math.round(
+      latencyValues.reduce((acc, value) => acc + value, 0) / latencyValues.length,
+    );
+
+    return {
+      successRate,
+      averageLatency,
+      sparkline: {
+        path,
+        points,
+        width,
+        height,
+        min: Math.round(min),
+        max: Math.round(max),
+        latest: Math.round(latencyValues[latencyValues.length - 1]),
+      },
+      counts,
+    };
+  }, [aoLog]);
   const holomapEvents = useMemo(
     () =>
       aoMiniLogRows.map((entry) => ({
@@ -2755,7 +3043,11 @@ function App() {
   );
 
   const toggleTheme = useCallback(() => {
-    setTheme((current) => (current === "cyberpunk" ? "light" : "cyberpunk"));
+    setTheme((current) => {
+      const index = themePresets.findIndex((preset) => preset.id === current);
+      const next = themePresets[(index + 1) % themePresets.length]?.id ?? DEFAULT_THEME;
+      return next as Theme;
+    });
   }, []);
 
   const persistRememberPreference = useCallback((value: boolean) => {
@@ -2765,6 +3057,15 @@ function App() {
     } else {
       window.sessionStorage.removeItem(PIP_VAULT_REMEMBER_KEY);
       window.sessionStorage.removeItem(PIP_VAULT_REMEMBER_PASSWORD_KEY);
+    }
+  }, []);
+
+  const persistHardwarePlaceholder = useCallback((value: boolean) => {
+    if (typeof window === "undefined") return;
+    if (value) {
+      window.localStorage.setItem(PIP_VAULT_HARDWARE_PLACEHOLDER_KEY, "1");
+    } else {
+      window.localStorage.removeItem(PIP_VAULT_HARDWARE_PLACEHOLDER_KEY);
     }
   }, []);
 
@@ -2785,9 +3086,65 @@ function App() {
     [pipVaultRememberUnlock],
   );
 
+  const stopVaultAutoLock = useCallback(() => {
+    if (vaultAutoLockTimerRef.current) {
+      window.clearTimeout(vaultAutoLockTimerRef.current);
+    }
+    if (vaultAutoLockTickerRef.current) {
+      window.clearInterval(vaultAutoLockTickerRef.current);
+    }
+    vaultAutoLockTimerRef.current = null;
+    vaultAutoLockTickerRef.current = null;
+    setPipVaultAutoLockRemainingMs(null);
+  }, []);
+
+  const scheduleVaultAutoLock = useCallback(() => {
+    stopVaultAutoLock();
+    if (!pipVaultAutoLockMinutes) return;
+    if (pipVaultSnapshot?.mode !== "password" || pipVaultSnapshot.locked) return;
+    if (pipVaultBusy) return;
+
+    const durationMs = pipVaultAutoLockMinutes * 60_000;
+    const target = Date.now() + durationMs;
+    setPipVaultAutoLockRemainingMs(durationMs);
+
+    vaultAutoLockTimerRef.current = window.setTimeout(() => {
+      lastVaultLockReasonRef.current = "timer";
+      setPipVaultBusy(true);
+      void lockPipVault()
+        .then((result) => {
+          if (!result.ok) {
+            setPipVaultError(result.error);
+            return;
+          }
+          setPipVaultStatus(`Vault auto-locked after ${pipVaultAutoLockMinutes}m`);
+          setPipVaultPassword("");
+        })
+        .catch((err) => {
+          const message = err instanceof Error ? err.message : "Unable to auto-lock vault";
+          setPipVaultError(message);
+        })
+        .finally(() => {
+          stopVaultAutoLock();
+          setPipVaultBusy(false);
+          void refreshPipVaultSnapshot();
+        });
+    }, durationMs);
+
+    vaultAutoLockTickerRef.current = window.setInterval(() => {
+      setPipVaultAutoLockRemainingMs(Math.max(0, target - Date.now()));
+    }, 1000);
+  }, [lockPipVault, pipVaultAutoLockMinutes, pipVaultBusy, pipVaultSnapshot?.locked, pipVaultSnapshot?.mode, refreshPipVaultSnapshot, stopVaultAutoLock]);
+
+  const markVaultActivity = useCallback(() => {
+    if (pipVaultSnapshot?.mode === "password" && !pipVaultSnapshot.locked && !pipVaultBusy) {
+      scheduleVaultAutoLock();
+    }
+  }, [pipVaultBusy, pipVaultSnapshot, scheduleVaultAutoLock]);
+
   const runWithVaultProgress = useCallback(
-    async <T,>(kind: PipVaultTaskKind, label: string, task: () => Promise<T>) => {
-      setPipVaultTask({ kind, label, progress: 8 });
+    async <T,>(kind: PipVaultTaskKind, label: string, task: () => Promise<T>, options?: { detail?: string }) => {
+      setPipVaultTask({ kind, label, progress: 8, detail: options?.detail });
       let current = 8;
       const timer = window.setInterval(() => {
         current = Math.min(94, current + 6 + Math.random() * 6);
@@ -2940,6 +3297,10 @@ function App() {
     [refreshVaultAudit],
   );
 
+  const toggleVaultAuditRow = useCallback((id: number) => {
+    setVaultAuditExpandedId((current) => (current === id ? null : id));
+  }, []);
+
   const runVaultIntegrityScan = useCallback(
     async (reason: "auto" | "manual" = "auto") => {
       if (vaultIntegrityRunning) return;
@@ -2977,6 +3338,7 @@ function App() {
         } else if (reason === "manual") {
           flashStatus(`Vault integrity OK (${result.scanned} record${result.scanned === 1 ? "" : "s"})`);
         }
+        markVaultActivity();
       } catch (err) {
         const message = err instanceof Error ? err.message : "Vault integrity scan failed";
         if (reason === "manual") {
@@ -2987,7 +3349,7 @@ function App() {
         setVaultIntegrityRunning(false);
       }
     },
-    [flashStatus, pipVaultSnapshot, vaultIntegrityRunning],
+    [flashStatus, markVaultActivity, pipVaultSnapshot, vaultIntegrityRunning],
   );
 
   const loadVaultWizardIntegrityHistory = useCallback(async () => {
@@ -3136,6 +3498,13 @@ function App() {
   }, [refreshVaultAudit]);
 
   useEffect(() => {
+    if (vaultAuditExpandedId == null) return;
+    if (!vaultAuditEvents.some((event) => event.id === vaultAuditExpandedId)) {
+      setVaultAuditExpandedId(null);
+    }
+  }, [vaultAuditEvents, vaultAuditExpandedId]);
+
+  useEffect(() => {
     getLastVaultIntegrityEvent()
       .then((event) => setVaultIntegrity(event))
       .catch((err) => console.error("Failed to load vault integrity log", err));
@@ -3156,6 +3525,31 @@ function App() {
 
     void runVaultIntegrityScan("auto");
   }, [pipVaultBusy, pipVaultSnapshot, runVaultIntegrityScan]);
+
+  useEffect(() => {
+    persistHardwarePlaceholder(pipVaultHardwarePlaceholder);
+  }, [persistHardwarePlaceholder, pipVaultHardwarePlaceholder]);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(PIP_VAULT_AUTO_LOCK_KEY, String(pipVaultAutoLockMinutes));
+    }
+
+    if (pipVaultAutoLockMinutes && pipVaultSnapshot?.mode === "password" && !pipVaultSnapshot.locked && !pipVaultBusy) {
+      scheduleVaultAutoLock();
+    } else {
+      stopVaultAutoLock();
+    }
+  }, [
+    pipVaultAutoLockMinutes,
+    pipVaultBusy,
+    pipVaultSnapshot?.locked,
+    pipVaultSnapshot?.mode,
+    scheduleVaultAutoLock,
+    stopVaultAutoLock,
+  ]);
+
+  useEffect(() => () => stopVaultAutoLock(), [stopVaultAutoLock]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -3193,6 +3587,15 @@ function App() {
   }, [neonCursorEnabled]);
 
   useEffect(() => {
+    if (typeof document !== "undefined") {
+      document.documentElement.setAttribute("lang", locale);
+    }
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(LOCALE_STORAGE_KEY, locale);
+    }
+  }, [locale]);
+
+  useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
     window.localStorage.setItem(THEME_STORAGE_KEY, theme);
   }, [theme]);
@@ -3203,6 +3606,11 @@ function App() {
       window.localStorage.setItem("darkmesh-high-effects", highEffects ? "1" : "0");
     }
   }, [highEffects]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(AO_PINNED_IDS_STORAGE_KEY, JSON.stringify(pinnedAoIds));
+  }, [pinnedAoIds]);
 
   useEffect(() => {
     void refreshHealthHistory();
@@ -3709,6 +4117,7 @@ function App() {
       setPipVaultStatus("Vault loaded");
       setPipVaultError(null);
       flashStatus("PIP loaded from vault");
+      markVaultActivity();
       await refreshPipVaultSnapshot();
       await refreshPipVaultRecords();
     } finally {
@@ -3750,6 +4159,7 @@ function App() {
         setPipVaultStatus(message);
         setPipVaultError(null);
         flashStatus("PIP saved to vault");
+        markVaultActivity();
         await refreshPipVaultSnapshot();
         await refreshPipVaultRecords();
       } else {
@@ -3845,21 +4255,28 @@ function App() {
 
   function handleExportPipVaultRecords() {
     setPipVaultError(null);
-    void runWithVaultProgress("records-export", "Exporting vault records…", async () => {
-      const payload = {
-        exportedAt: new Date().toISOString(),
-        count: pipVaultRecords.length,
-        records: pipVaultRecords,
-      };
+    setPipVaultBusy(true);
+    void runWithVaultProgress(
+      "records-export",
+      "Exporting vault records…",
+      async () => {
+        const payload = {
+          exportedAt: new Date().toISOString(),
+          count: pipVaultRecords.length,
+          records: pipVaultRecords,
+        };
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `pip-vault-records-${new Date().toISOString().slice(0, 10)}.json`;
-      link.click();
-      URL.revokeObjectURL(url);
-      flashStatus(`Exported ${pipVaultRecords.length} record${pipVaultRecords.length === 1 ? "" : "s"}`);
-    });
+        link.download = `pip-vault-records-${new Date().toISOString().slice(0, 10)}.json`;
+        link.click();
+        URL.revokeObjectURL(url);
+        flashStatus(`Exported ${pipVaultRecords.length} record${pipVaultRecords.length === 1 ? "" : "s"}`);
+        markVaultActivity();
+      },
+      { detail: `${pipVaultRecords.length} record${pipVaultRecords.length === 1 ? "" : "s"}` },
+    ).finally(() => setPipVaultBusy(false));
   }
 
   const handleRunIntegrityScan = () => {
@@ -3872,6 +4289,41 @@ function App() {
     }
 
     void runVaultIntegrityScan("manual");
+  };
+
+  const handleLockVaultNow = async () => {
+    if (pipVaultSnapshot?.mode !== "password") {
+      flashStatus("Password mode is not enabled");
+      return;
+    }
+
+    if (pipVaultSnapshot.locked) {
+      flashStatus("Vault already locked");
+      return;
+    }
+
+    setPipVaultBusy(true);
+    try {
+      lastVaultLockReasonRef.current = "manual";
+      const result = await lockPipVault();
+      if (!result.ok) {
+        setPipVaultError(result.error);
+        flashStatus(result.error);
+        return;
+      }
+
+      stopVaultAutoLock();
+      setPipVaultStatus("Vault locked");
+      setPipVaultPassword("");
+      flashStatus("Vault locked");
+      await refreshPipVaultSnapshot();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unable to lock vault";
+      setPipVaultError(message);
+      flashStatus(message);
+    } finally {
+      setPipVaultBusy(false);
+    }
   };
 
   const handleClearPipVault = async () => {
@@ -3929,6 +4381,7 @@ function App() {
       setPipVaultStatus(`Loaded record ${recordId}`);
       setPipVaultError(null);
       flashStatus(`Loaded PIP record ${abbreviateTx(loaded.pip.manifestTx)}`);
+      markVaultActivity();
       await refreshPipVaultSnapshot();
     } finally {
       setPipVaultBusy(false);
@@ -3963,6 +4416,7 @@ function App() {
         setPipVaultStatus("Vault record deleted");
         setPipVaultError(null);
         flashStatus("PIP vault record deleted");
+        markVaultActivity();
       } else {
         setPipVaultStatus("Record not found");
         setPipVaultError("Record not found");
@@ -4024,10 +4478,12 @@ function App() {
         if (!options?.auto) {
           flashStatus(message);
         }
+        lastVaultLockReasonRef.current = null;
         rememberPasswordForSession(trimmed);
         setPipVaultPassword("");
         await refreshPipVaultSnapshot();
         await refreshPipVaultRecords();
+        markVaultActivity();
       } catch (err) {
         const message = err instanceof Error ? err.message : "Unable to enable password";
         setPipVaultStatus(null);
@@ -4043,6 +4499,7 @@ function App() {
     },
     [
       enableVaultPassword,
+      markVaultActivity,
       pipVaultSnapshot?.mode,
       pipVaultLocked,
       rememberPasswordForSession,
@@ -4070,6 +4527,8 @@ function App() {
       setPipVaultStatus(message);
       setPipVaultError(null);
       flashStatus("Password mode disabled");
+      lastVaultLockReasonRef.current = null;
+      stopVaultAutoLock();
       rememberPasswordForSession(null, false);
       setPipVaultPassword("");
       await refreshPipVaultSnapshot();
@@ -4083,7 +4542,7 @@ function App() {
       setPipVaultBusy(false);
       setPipVaultTask(null);
     }
-  }, [disableVaultPassword, rememberPasswordForSession, refreshPipVaultRecords, refreshPipVaultSnapshot]);
+  }, [disableVaultPassword, rememberPasswordForSession, refreshPipVaultRecords, refreshPipVaultSnapshot, stopVaultAutoLock]);
 
   const handleEnableVaultPassword = async () => {
     const password = pipVaultPassword.trim();
@@ -4116,6 +4575,15 @@ function App() {
     autoUnlockAttemptRef.current = false;
   };
 
+  const handleToggleHardwarePlaceholder = useCallback(() => {
+    setPipVaultHardwarePlaceholder((current) => {
+      const next = !current;
+      persistHardwarePlaceholder(next);
+      flashStatus(next ? "Hardware key placeholder added" : "Hardware key placeholder removed");
+      return next;
+    });
+  }, [flashStatus, persistHardwarePlaceholder]);
+
   const handleConfirmVaultMode = useCallback(async () => {
     if (!pipVaultModeConfirm) return;
     const { action, password } = pipVaultModeConfirm;
@@ -4138,7 +4606,27 @@ function App() {
     setPipVaultError(null);
     setPipVaultBusy(true);
     try {
-      const result = await runWithVaultProgress("export", "Exporting vault backup…", async () => exportPipVaultBundle());
+      const result = await runWithVaultProgress(
+        "export",
+        "Exporting vault backup…",
+        async () => {
+          setPipVaultTask((state) => (state?.kind === "export" ? { ...state, detail: "Bundling encrypted records" } : state));
+          const exported = await exportPipVaultBundle();
+          if (exported.ok) {
+            setPipVaultTask((state) =>
+              state?.kind === "export"
+                ? { ...state, detail: `Checksum ${exported.checksum.slice(0, 10)}…` }
+                : state,
+            );
+          }
+          return exported;
+        },
+        {
+          detail: pipVaultSnapshot?.recordCount
+            ? `Preparing ${pipVaultSnapshot.recordCount} record${pipVaultSnapshot.recordCount === 1 ? "" : "s"}`
+            : "Collecting vault metadata",
+        },
+      );
       if (!result.ok) {
         setPipVaultStatus(result.error);
         setPipVaultError(result.error);
@@ -4149,13 +4637,14 @@ function App() {
           status: "error",
           mode: pipVaultSnapshot?.mode,
           recordCount: pipVaultSnapshot?.recordCount,
+          source: options?.source ?? "panel",
           detail: result.error,
         });
         return;
       }
 
-      const blob = new Blob([result.bundle], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
+        const blob = new Blob([result.bundle], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
       const suffix = pipVaultSnapshot?.mode === "password" ? "-pw" : "";
@@ -4164,33 +4653,36 @@ function App() {
       link.download = filename;
       link.click();
       URL.revokeObjectURL(url);
-      await recordVaultAudit({
-        at: createdAt,
-        action: "backup",
-        status: "ok",
-        mode: pipVaultSnapshot?.mode,
-        recordCount: result.recordCount ?? pipVaultSnapshot?.recordCount,
-        filename,
-        checksum: result.checksum,
-        bytes: result.bytes ?? new TextEncoder().encode(result.bundle).byteLength,
-      });
+        await recordVaultAudit({
+          at: createdAt,
+          action: "backup",
+          status: "ok",
+          mode: pipVaultSnapshot?.mode,
+          recordCount: result.recordCount ?? pipVaultSnapshot?.recordCount,
+          source: options?.source ?? "panel",
+          filename,
+          checksum: result.checksum,
+          bytes: result.bytes ?? new TextEncoder().encode(result.bundle).byteLength,
+        });
       setPipVaultStatus("Vault backup exported");
       setPipVaultError(null);
       flashStatus("Vault backup exported");
+      markVaultActivity();
       options?.onComplete?.();
     } catch (err) {
       const message = err instanceof Error ? err.message : "Vault export failed";
       setPipVaultStatus(message);
       setPipVaultError(message);
       flashStatus(message);
-      await recordVaultAudit({
-        at: startedAt,
-        action: "backup",
-        status: "error",
-        mode: pipVaultSnapshot?.mode,
-        recordCount: pipVaultSnapshot?.recordCount,
-        detail: message,
-      });
+        await recordVaultAudit({
+          at: startedAt,
+          action: "backup",
+          status: "error",
+          mode: pipVaultSnapshot?.mode,
+          recordCount: pipVaultSnapshot?.recordCount,
+          source: options?.source ?? "panel",
+          detail: message,
+        });
     } finally {
       setPipVaultBusy(false);
     }
@@ -4202,7 +4694,7 @@ function App() {
     const useVaultPassword = options?.useVaultPassword !== false;
     const rememberPasswordNext = options?.rememberPassword ?? pipVaultRememberUnlock;
 
-    const runImport = async (payload: { text: string; bundleMode?: string; filename?: string }) => {
+    const runImport = async (payload: { text: string; bundleMode?: string; filename?: string; bytes?: number }) => {
       const rememberedPassword = readRememberedPassword();
       const resolvedPassword =
         payload.bundleMode === "password"
@@ -4223,14 +4715,46 @@ function App() {
       setPipVaultError(null);
       setPipVaultBusy(true);
       try {
-        const result = await runWithVaultProgress("import", "Importing vault backup…", async () =>
-          importPipVaultBundle(payload.text, payload.bundleMode === "password" ? resolvedPassword : undefined),
+        const bundleBytes = payload.bytes ?? new TextEncoder().encode(payload.text).byteLength;
+        const startedAt = new Date().toISOString();
+        const result = await runWithVaultProgress(
+          "import",
+          "Importing vault backup…",
+          async () => {
+            setPipVaultTask((state) =>
+              state?.kind === "import" ? { ...state, detail: "Verifying bundle metadata" } : state,
+            );
+            const outcome = await importPipVaultBundle(
+              payload.text,
+              payload.bundleMode === "password" ? resolvedPassword : undefined,
+            );
+            if (outcome.ok) {
+              setPipVaultTask((state) =>
+                state?.kind === "import"
+                  ? { ...state, detail: `Restoring ${outcome.records} record${outcome.records === 1 ? "" : "s"}` }
+                  : state,
+              );
+            }
+            return outcome;
+          },
+          { detail: payload.filename ? `Reading ${payload.filename}` : "Reading backup file" },
         );
         if (!result.ok) {
           setPipVaultStatus(result.error);
           setPipVaultError(result.error);
           options?.onError?.(result.error);
           flashStatus(result.error);
+          await recordVaultAudit({
+            at: startedAt,
+            action: "import",
+            status: "error",
+            mode: payload.bundleMode === "password" ? "password" : pipVaultSnapshot?.mode,
+            recordCount: pipVaultSnapshot?.recordCount,
+            filename: payload.filename,
+            bytes: bundleBytes,
+            source: options?.source ?? "panel",
+            detail: result.error,
+          });
           return;
         }
 
@@ -4250,6 +4774,18 @@ function App() {
         }
         await refreshPipVaultSnapshot();
         await refreshPipVaultRecords();
+        await recordVaultAudit({
+          at: startedAt,
+          action: "import",
+          status: "ok",
+          mode: result.mode,
+          recordCount: result.records,
+          filename: payload.filename,
+          bytes: bundleBytes,
+          source: options?.source ?? "panel",
+          detail: payload.bundleMode === "password" ? "Password-protected bundle" : "Unprotected bundle",
+        });
+        markVaultActivity();
         options?.onComplete?.();
       } catch (err) {
         const message = err instanceof Error ? err.message : "Vault import failed";
@@ -4257,6 +4793,16 @@ function App() {
         setPipVaultError(message);
         options?.onError?.(message);
         flashStatus(message);
+        await recordVaultAudit({
+          at: new Date().toISOString(),
+          action: "import",
+          status: "error",
+          mode: payload.bundleMode === "password" ? "password" : pipVaultSnapshot?.mode,
+          filename: payload.filename,
+          source: options?.source ?? "panel",
+          detail: message,
+          bytes: payload.bytes,
+        });
       } finally {
         setPipVaultBusy(false);
       }
@@ -4282,7 +4828,12 @@ function App() {
         return;
       }
 
-      await runImport({ text, bundleMode: inspected.meta.mode, filename: selected.name });
+      await runImport({
+        text,
+        bundleMode: inspected.meta.mode,
+        filename: selected.name,
+        bytes: new TextEncoder().encode(text).byteLength,
+      });
     };
 
     if (file) {
@@ -4307,10 +4858,14 @@ function App() {
     if (!pipVaultSnapshot || pipVaultBusy) return;
     if (pipVaultSnapshot.mode !== "password" || !pipVaultSnapshot.locked) {
       autoUnlockAttemptRef.current = false;
+      if (pipVaultSnapshot.mode !== "password") {
+        lastVaultLockReasonRef.current = null;
+      }
       return;
     }
 
     if (!pipVaultRememberUnlock) return;
+    if (lastVaultLockReasonRef.current) return;
 
     const stored = readRememberedPassword();
     if (!stored) return;
@@ -4535,6 +5090,7 @@ function App() {
   };
 
   const handleDeployModuleClick = async () => {
+    const deployStartedAt = performance.now();
     setDeployTransient(false);
     setDeployOutcome(null);
     setDeployStep(null);
@@ -4582,7 +5138,17 @@ function App() {
       markDeployTimeline("deploy-signer", "success", "Signer ready");
       markDeployTimeline("deploy-deploy", "pending", "Sending module to AO");
       const response = await deployModule(walletSource, moduleSource, [], { offline: offlineMode });
-      recordAoLog("deploy", response.txId, response.placeholder ? "Placeholder" : "Success", response.raw ?? response);
+      recordAoLog(
+        "deploy",
+        response.txId,
+        response.placeholder ? "Placeholder" : "Success",
+        response.raw ?? response,
+        {
+          moduleTx: response.txId ?? (moduleTxInput || deployedModuleTx) ?? undefined,
+          transient: Boolean(response.transient),
+        },
+        { durationMs: performance.now() - deployStartedAt },
+      );
       setDeployTransient(Boolean(response.transient));
 
       if (response.txId) {
@@ -4617,6 +5183,8 @@ function App() {
         null,
         "Error",
         err instanceof Error ? { message: err.message } : { error: String(err) },
+        { moduleTx: moduleTxInput || deployedModuleTx || undefined, transient },
+        { durationMs: performance.now() - deployStartedAt },
       );
       setDeployOutcome(message);
       setDeployState("error");
@@ -4630,6 +5198,7 @@ function App() {
   };
 
   const handleSpawnProcessClick = async (override?: { manifestTx?: string; moduleTx?: string; scheduler?: string }) => {
+    const spawnStartedAt = performance.now();
     setSpawnTransient(false);
     setSpawnOutcome(null);
     setSpawnStep(null);
@@ -4712,7 +5281,19 @@ function App() {
         walletSource,
         { offline: offlineMode },
       );
-      recordAoLog("spawn", response.processId, response.placeholder ? "Placeholder" : "Success", response.raw ?? response);
+      recordAoLog(
+        "spawn",
+        response.processId,
+        response.placeholder ? "Placeholder" : "Success",
+        response.raw ?? response,
+        {
+          manifestTx: manifestValidation.value,
+          moduleTx: response.moduleTx ?? moduleValidation.value,
+          scheduler: schedulerCandidate || undefined,
+          transient: Boolean(response.transient),
+        },
+        { durationMs: performance.now() - spawnStartedAt },
+      );
       setSpawnTransient(Boolean(response.transient));
 
       if (response.moduleTx) {
@@ -4760,6 +5341,8 @@ function App() {
         null,
         "Error",
         err instanceof Error ? { message: err.message } : { error: String(err) },
+        { manifestTx: manifestCandidate, moduleTx, scheduler: schedulerCandidate || undefined, transient },
+        { durationMs: performance.now() - spawnStartedAt },
       );
       setSpawnOutcome(message);
       setSpawnState("error");
@@ -5371,13 +5954,31 @@ function App() {
     openExternal(url);
   };
 
-  const recordAoLog = (kind: "deploy" | "spawn", id: string | null, status: string, payload?: unknown) => {
+  const classifyAoSeverity = (status: string): AoLogSeverity => {
+    const normalized = status.toLowerCase();
+    if (normalized.includes("error") || normalized.includes("fail")) return "error";
+    if (normalized.includes("placeholder") || normalized.includes("warn")) return "warning";
+    if (normalized.includes("success")) return "success";
+    return "info";
+  };
+
+  const recordAoLog = (
+    kind: "deploy" | "spawn",
+    id: string | null,
+    status: string,
+    payload?: unknown,
+    context?: AoLogContext,
+    meta?: { durationMs?: number },
+  ) => {
     const entry: AoMiniLogEntry = {
       kind,
       id,
       status,
       time: new Date().toISOString(),
       href: buildAoExplorerUrl(id),
+      severity: classifyAoSeverity(status),
+      ...(typeof meta?.durationMs === "number" ? { durationMs: Math.round(meta.durationMs) } : {}),
+      ...(context ? { context } : {}),
       ...(payload !== undefined ? { payload } : {}),
     };
 
@@ -5395,7 +5996,42 @@ function App() {
       entry.raw = rawValue;
     }
 
-    setAoLog((current) => [entry, ...current].slice(0, 20));
+    setAoLog((current) => [entry, ...current].slice(0, 40));
+  };
+
+  const togglePinnedAoId = (id: string | null) => {
+    if (!id) return;
+    setPinnedAoIds((current) =>
+      current.includes(id) ? current.filter((value) => value !== id) : [id, ...current].slice(0, 20),
+    );
+  };
+
+  const retryAoAction = (entry: AoMiniLogEntry) => {
+    if (entry.kind === "deploy") {
+      void handleDeployModuleClick();
+      return;
+    }
+
+    if (entry.context?.manifestTx) {
+      setManifestTxInput(entry.context.manifestTx);
+    }
+    if (entry.context?.moduleTx) {
+      setModuleTxInput(entry.context.moduleTx);
+    }
+    if (entry.context && "scheduler" in entry.context) {
+      setScheduler(entry.context.scheduler ?? "");
+    }
+
+    void handleSpawnProcessClick({
+      manifestTx: entry.context?.manifestTx,
+      moduleTx: entry.context?.moduleTx,
+      scheduler: entry.context?.scheduler,
+    });
+  };
+
+  const resumeAoAction = (entry: AoMiniLogEntry) => {
+    flashStatus(entry.kind === "deploy" ? "Retrying deploy" : "Resuming spawn");
+    retryAoAction(entry);
   };
 
   const closePalette = useCallback(() => {
@@ -5437,9 +6073,29 @@ function App() {
     [closePalette, flashStatus],
   );
 
+  const changeLocale = useCallback(
+    (next: LocaleKey) => {
+      const nextMessages = getMessages(next);
+      const nextTranslator = makeTranslator(nextMessages);
+      if (next === locale) {
+        flashStatus(nextTranslator("statuses.localeAlready", { language: nextMessages.meta.languageNative }));
+        return;
+      }
+      setLocale(next);
+      flashStatus(nextTranslator("statuses.localeChanged", { language: nextMessages.meta.languageNative }));
+    },
+    [flashStatus, locale],
+  );
+
+  const actionCopy = messages.actions;
+  const nextThemePreset = useMemo(
+    () => themePresets[(themePresets.findIndex((preset) => preset.id === theme) + 1) % themePresets.length] ?? themePresets[0],
+    [theme],
+  );
+
   const themePaletteActions: CommandPaletteAction[] = themePresets.map((preset) => ({
     id: `theme-${preset.id}`,
-    label: `Theme · ${preset.label}`,
+    label: `${actionCopy.toggles.theme.label} · ${preset.label}`,
     description: preset.id === theme ? `${preset.description} · Active` : preset.description,
     run: () => setTheme(preset.id),
   }));
@@ -5447,50 +6103,52 @@ function App() {
   const paletteActions: CommandPaletteAction[] = [
     {
       id: "workspace-studio",
-      label: "Switch to Creator Studio",
-      description: "Edit manifests and blocks.",
-      shortcut: "Alt+1",
+      label: actionCopy.workspace.studio.label,
+      description: actionCopy.workspace.studio.description,
+      shortcut: actionCopy.workspace.studio.shortcut,
       run: () => setWorkspace("studio"),
     },
     {
       id: "workspace-ao",
-      label: "Switch to AO Console",
-      description: "Deploy modules and spawn processes.",
-      shortcut: "Alt+2",
+      label: actionCopy.workspace.ao.label,
+      description: actionCopy.workspace.ao.description,
+      shortcut: actionCopy.workspace.ao.shortcut,
       run: () => setWorkspace("ao"),
     },
     {
       id: "workspace-data",
-      label: "Switch to Data Core",
-      description: "Manage encrypted PIP vaults.",
-      shortcut: "Alt+3",
+      label: actionCopy.workspace.data.label,
+      description: actionCopy.workspace.data.description,
+      shortcut: actionCopy.workspace.data.shortcut,
       run: () => setWorkspace("data"),
     },
     {
       id: "workspace-preview",
-      label: "Switch to Preview Hub",
-      description: "View live manifest previews.",
-      shortcut: "Alt+4",
+      label: actionCopy.workspace.preview.label,
+      description: actionCopy.workspace.preview.description,
+      shortcut: actionCopy.workspace.preview.shortcut,
       run: () => setWorkspace("preview"),
     },
     {
       id: "toggle-theme",
-      label: "Toggle Light / Cyberpunk",
-      description: theme === "cyberpunk" ? "Switch back to the light skin." : "Enable the cyberpunk skin.",
-      shortcut: "Alt+C",
+      label: actionCopy.toggles.theme.label,
+      description: t("actions.toggles.theme.nextLabel", {
+        theme: nextThemePreset?.label ?? getThemeLabel(DEFAULT_THEME),
+      }),
+      shortcut: actionCopy.toggles.theme.shortcut,
       run: toggleTheme,
     },
     {
       id: "toggle-high-effects",
-      label: highEffects ? "Turn off high effects" : "Enable high effects",
+      label: highEffects ? actionCopy.toggles.highEffects.labelOn : actionCopy.toggles.highEffects.labelOff,
       description: prefersReducedMotion
-        ? "Reduced-motion is on, so visual FX stay paused."
-        : "Toggle WebGL hero grid, holograms, and cursor FX.",
-      shortcut: "Alt+X",
+        ? actionCopy.toggles.highEffects.description.blocked
+        : actionCopy.toggles.highEffects.description.default,
+      shortcut: actionCopy.toggles.highEffects.shortcut,
       run: () => {
         if (prefersReducedMotion) {
           setHighEffects(false);
-          flashStatus("High effects paused to respect reduced-motion preference");
+          flashStatus(actionCopy.toggles.highEffects.description.blocked);
           return;
         }
         setHighEffects((current) => !current);
@@ -5499,131 +6157,141 @@ function App() {
     ...themePaletteActions,
     {
       id: "toggle-offline",
-      label: offlineMode ? "Go online (disable offline)" : "Enable offline / air-gap",
-      description: offlineMode
-        ? "Allow renderer network requests again."
-        : "Block all network requests from the renderer.",
-      shortcut: "Alt+O",
+      label: offlineMode ? actionCopy.toggles.offline.labelOn : actionCopy.toggles.offline.labelOff,
+      description: offlineMode ? actionCopy.toggles.offline.description.on : actionCopy.toggles.offline.description.off,
+      shortcut: actionCopy.toggles.offline.shortcut,
       run: () => setOfflineMode((current) => !current),
     },
     {
       id: "toggle-health",
-      label: healthExpanded ? "Collapse health" : "Expand health",
-      description: "Show or hide the diagnostics panel.",
-      shortcut: "Alt+H",
+      label: healthExpanded ? actionCopy.toggles.health.labelOpen : actionCopy.toggles.health.labelClosed,
+      description: actionCopy.toggles.health.description,
+      shortcut: actionCopy.toggles.health.shortcut,
       run: () => setHealthExpanded((open) => !open),
     },
     {
       id: "focus-wizard-wallet",
-      label: "Focus deploy wizard · wallet",
-      description: "Jump to the wallet step in the AO deploy wizard.",
-      shortcut: "Alt+Shift+W",
+      label: actionCopy.focus.wizardWallet.label,
+      description: actionCopy.focus.wizardWallet.description,
+      shortcut: actionCopy.focus.wizardWallet.shortcut,
       run: () => focusWizardStep("wallet"),
     },
     {
       id: "focus-wizard-module",
-      label: "Focus deploy wizard · module",
-      description: "Move to the module source input in the deploy wizard.",
-      shortcut: "Alt+Shift+M",
+      label: actionCopy.focus.wizardModule.label,
+      description: actionCopy.focus.wizardModule.description,
+      shortcut: actionCopy.focus.wizardModule.shortcut,
       run: () => focusWizardStep("module"),
     },
     {
       id: "focus-wizard-process",
-      label: "Focus deploy wizard · process",
-      description: "Move to the manifestTx spawn input in the deploy wizard.",
-      shortcut: "Alt+Shift+P",
+      label: actionCopy.focus.wizardProcess.label,
+      description: actionCopy.focus.wizardProcess.description,
+      shortcut: actionCopy.focus.wizardProcess.shortcut,
       run: () => focusWizardStep("spawn"),
     },
     {
       id: "focus-vault-password",
-      label: "Focus vault password",
-      description: "Jump to the vault password input in Data Core.",
-      shortcut: "Alt+Shift+V",
+      label: actionCopy.focus.vaultPassword.label,
+      description: actionCopy.focus.vaultPassword.description,
+      shortcut: actionCopy.focus.vaultPassword.shortcut,
       run: () => focusVaultField("password"),
     },
     {
       id: "focus-vault-filter",
-      label: "Focus vault filter",
-      description: "Move to the vault records filter.",
-      shortcut: "Alt+Shift+F",
+      label: actionCopy.focus.vaultFilter.label,
+      description: actionCopy.focus.vaultFilter.description,
+      shortcut: actionCopy.focus.vaultFilter.shortcut,
       run: () => focusVaultField("filter"),
     },
     {
       id: "focus-health-failure",
-      label: "Focus SLA failure threshold",
-      description: "Jump to the failure streak input in diagnostics.",
-      shortcut: "Alt+Shift+H",
+      label: actionCopy.focus.healthFailure.label,
+      description: actionCopy.focus.healthFailure.description,
+      shortcut: actionCopy.focus.healthFailure.shortcut,
       run: () => focusHealthThreshold("failure"),
     },
     {
       id: "focus-health-latency",
-      label: "Focus SLA latency threshold",
-      description: "Jump to the average latency input in diagnostics.",
-      shortcut: "Alt+Shift+L",
+      label: actionCopy.focus.healthLatency.label,
+      description: actionCopy.focus.healthLatency.description,
+      shortcut: actionCopy.focus.healthLatency.shortcut,
       run: () => focusHealthThreshold("latency"),
     },
     {
       id: "new-draft",
-      label: "New draft",
-      description: "Start from a blank manifest.",
-      shortcut: "N",
-      run: () => startNewDraft("New draft started"),
+      label: actionCopy.drafts.new.label,
+      description: actionCopy.drafts.new.description,
+      shortcut: actionCopy.drafts.new.shortcut,
+      run: () => startNewDraft(actionCopy.drafts.new.label),
     },
     {
       id: "duplicate-draft",
-      label: "Duplicate draft",
-      description: "Save a copy of the current draft.",
-      shortcut: "Alt+N or Cmd/Ctrl+Shift+D",
+      label: actionCopy.drafts.duplicate.label,
+      description: actionCopy.drafts.duplicate.description,
+      shortcut: actionCopy.drafts.duplicate.shortcut,
       run: () => void handleDuplicateDraft(),
     },
     {
       id: "open-draft-diff",
-      label: "Open draft diff",
-      description: "Compare current manifest with a saved draft or revision.",
-      shortcut: "D",
+      label: actionCopy.drafts.diff.label,
+      description: actionCopy.drafts.diff.description,
+      shortcut: actionCopy.drafts.diff.shortcut,
       run: () => void openDraftDiffPanel(),
     },
     {
       id: "save-draft",
-      label: "Save draft",
-      description: "Persist the current manifest to IndexedDB.",
-      shortcut: "S",
+      label: actionCopy.drafts.save.label,
+      description: actionCopy.drafts.save.description,
+      shortcut: actionCopy.drafts.save.shortcut,
       run: () => void handleSaveDraft(),
     },
     {
       id: "refresh-health",
-      label: "Refresh health",
-      description: "Run the diagnostics checks again.",
-      shortcut: "R",
+      label: actionCopy.diagnostics.refresh.label,
+      description: actionCopy.diagnostics.refresh.description,
+      shortcut: actionCopy.diagnostics.refresh.shortcut,
       run: () => void refreshHealth(),
     },
     {
       id: "load-pip-vault",
-      label: "Load PIP from vault",
-      description: "Restore the encrypted PIP document from local vault storage.",
-      shortcut: "L",
+      label: actionCopy.vault.load.label,
+      description: actionCopy.vault.load.description,
+      shortcut: actionCopy.vault.load.shortcut,
       run: () => void handleLoadPipFromVault(),
     },
     {
       id: "save-pip-vault",
-      label: "Save PIP to vault",
-      description: "Write the current PIP document into vault storage.",
-      shortcut: "V",
+      label: actionCopy.vault.save.label,
+      description: actionCopy.vault.save.description,
+      shortcut: actionCopy.vault.save.shortcut,
       run: () => void handleSavePipToVault(),
     },
     {
       id: "export-drafts",
-      label: "Export drafts",
-      description: "Download all saved drafts as JSON.",
-      shortcut: "Shift+E",
+      label: actionCopy.exports.drafts.label,
+      description: actionCopy.exports.drafts.description,
+      shortcut: actionCopy.exports.drafts.shortcut,
       run: () => void handleExportDrafts(),
     },
     {
       id: "export-manifest",
-      label: "Export manifest",
-      description: "Download the current manifest as JSON.",
-      shortcut: "E",
+      label: actionCopy.exports.manifest.label,
+      description: actionCopy.exports.manifest.description,
+      shortcut: actionCopy.exports.manifest.shortcut,
       run: () => handleExportManifest(),
+    },
+    {
+      id: "language-en",
+      label: actionCopy.language.options.en.label,
+      description: actionCopy.language.options.en.description,
+      run: () => changeLocale("en"),
+    },
+    {
+      id: "language-cs",
+      label: actionCopy.language.options.cs.label,
+      description: actionCopy.language.options.cs.description,
+      run: () => changeLocale("cs"),
     },
   ];
 
@@ -5638,89 +6306,9 @@ function App() {
     : 0;
 
   const hotkeySections: HotkeyOverlaySection[] = [
+    ...messages.hotkeys.sections,
     {
-      title: "Global shortcuts",
-      items: [
-        {
-          shortcut: "Cmd/Ctrl+K",
-          action: "Command palette",
-          description: "Open or close the action palette.",
-        },
-        {
-          shortcut: "Shift+/",
-          action: "Hotkey overlay",
-          description: "Open or close this reference panel.",
-        },
-        {
-          shortcut: "Cmd/Ctrl+Z",
-          action: "Undo",
-          description: "Step back through manifest changes (history capped at 20).",
-        },
-        {
-          shortcut: "Shift+Cmd/Ctrl+Z",
-          action: "Redo",
-          description: "Reapply the next manifest change.",
-        },
-        {
-          shortcut: "Esc",
-          action: "Close modal",
-          description: "Dismiss the palette or the hotkey overlay.",
-        },
-      ],
-    },
-    {
-      title: "Composition",
-      items: [
-        {
-          shortcut: "Alt+Arrow Up/Down",
-          action: "Move node",
-          description: "Reorder the primary selection among its siblings.",
-        },
-        {
-          shortcut: "Drag cards",
-          action: "Reorder / nest",
-          description: "Drag tree cards to move or nest blocks.",
-        },
-      ],
-    },
-    {
-      title: "Palette controls",
-      items: [
-        {
-          shortcut: "Arrow keys",
-          action: "Move selection",
-          description: "Step through filtered palette actions.",
-        },
-        {
-          shortcut: "Enter",
-          action: "Run action",
-          description: "Execute the selected palette item.",
-        },
-      ],
-    },
-    {
-      title: "Workspaces",
-      items: [
-        { shortcut: "Alt+1", action: "Creator Studio", description: "Build and edit manifests." },
-        { shortcut: "Alt+2", action: "AO Console", description: "Deploy and spawn AO processes." },
-        { shortcut: "Alt+3", action: "Data Core", description: "Manage PIP vaults and records." },
-        { shortcut: "Alt+4", action: "Preview Hub", description: "Preview manifests and blocks." },
-      ],
-    },
-    {
-      title: "Focus jumps",
-      items: [
-        { shortcut: "Alt+Shift+W", action: "Wizard · Wallet", description: "Focus wallet step in AO deploy." },
-        { shortcut: "Alt+Shift+M", action: "Wizard · Module", description: "Focus module source input." },
-        { shortcut: "Alt+Shift+P", action: "Wizard · Process", description: "Focus manifestTx spawn input." },
-        { shortcut: "Alt+Shift+V", action: "Vault password", description: "Focus password field in Data Core." },
-        { shortcut: "Alt+Shift+F", action: "Vault filter", description: "Focus vault records filter field." },
-        { shortcut: "Alt+Shift+H", action: "SLA failure threshold", description: "Focus failure streak input in Health." },
-        { shortcut: "Alt+Shift+L", action: "SLA latency threshold", description: "Focus latency threshold input in Health." },
-      ],
-    },
-    {
-      title: "Palette actions",
+      title: messages.hotkeys.paletteSectionTitle,
       items: paletteActions.map((action) => ({
         shortcut: action.shortcut ?? "—",
         action: action.label,
@@ -5822,12 +6410,33 @@ function App() {
 
       if (isAltShortcut && key === "n") {
         event.preventDefault();
+        const duplicateAction = actionCopy.drafts.duplicate;
         void runPaletteAction({
           id: "duplicate-draft",
-          label: "Duplicate draft",
-          description: "Save a copy of the current draft.",
-          shortcut: "Alt+N or Cmd/Ctrl+Shift+D",
+          label: duplicateAction.label,
+          description: duplicateAction.description,
+          shortcut: duplicateAction.shortcut,
           run: () => void handleDuplicateDraft(),
+        });
+        return;
+      }
+
+      if (isAltShortcut && key === "x") {
+        event.preventDefault();
+        const highFx = actionCopy.toggles.highEffects;
+        void runPaletteAction({
+          id: "toggle-high-effects",
+          label: highEffects ? highFx.labelOn : highFx.labelOff,
+          description: prefersReducedMotion ? highFx.description.blocked : highFx.description.default,
+          shortcut: highFx.shortcut,
+          run: () => {
+            if (prefersReducedMotion) {
+              setHighEffects(false);
+              flashStatus(highFx.description.blocked);
+              return;
+            }
+            setHighEffects((current) => !current);
+          },
         });
         return;
       }
@@ -5836,11 +6445,12 @@ function App() {
         event.preventDefault();
         const target: Workspace =
           key === "1" ? "studio" : key === "2" ? "ao" : key === "3" ? "data" : "preview";
+        const workspaceAction = actionCopy.workspace[target as keyof typeof actionCopy.workspace];
         void runPaletteAction(
           paletteActions.find((action) => action.id === `workspace-${target}`) ?? {
             id: `workspace-${target}`,
-            label: "Switch workspace",
-            description: "",
+            label: workspaceAction.label,
+            description: workspaceAction.description,
             run: () => setWorkspace(target),
           },
         );
@@ -5849,11 +6459,12 @@ function App() {
 
       if (isAltShortcut && key === "h") {
         event.preventDefault();
+        const healthAction = actionCopy.toggles.health;
         void runPaletteAction({
           id: "toggle-health",
-          label: healthExpanded ? "Collapse health" : "Expand health",
-          description: "Show or hide the diagnostics panel.",
-          shortcut: "Alt+H",
+          label: healthExpanded ? healthAction.labelOpen : healthAction.labelClosed,
+          description: healthAction.description,
+          shortcut: healthAction.shortcut,
           run: () => setHealthExpanded((open) => !open),
         });
         return;
@@ -5861,11 +6472,14 @@ function App() {
 
       if (isAltShortcut && key === "c") {
         event.preventDefault();
+        const themeAction = actionCopy.toggles.theme;
         void runPaletteAction({
           id: "toggle-theme",
-          label: "Toggle cyberpunk",
-          description: "Flip the active renderer theme.",
-          shortcut: "Alt+C",
+          label: themeAction.label,
+          description: t("actions.toggles.theme.nextLabel", {
+            theme: nextThemePreset?.label ?? getThemeLabel(DEFAULT_THEME),
+          }),
+          shortcut: themeAction.shortcut,
           run: toggleTheme,
         });
         return;
@@ -5873,13 +6487,12 @@ function App() {
 
       if (isAltShortcut && key === "o") {
         event.preventDefault();
+        const offlineAction = actionCopy.toggles.offline;
         void runPaletteAction({
           id: "toggle-offline",
-          label: offlineMode ? "Go online (disable offline)" : "Enable offline / air-gap",
-          description: offlineMode
-            ? "Allow renderer network requests again."
-            : "Block all network requests from the renderer.",
-          shortcut: "Alt+O",
+          label: offlineMode ? offlineAction.labelOn : offlineAction.labelOff,
+          description: offlineMode ? offlineAction.description.on : offlineAction.description.off,
+          shortcut: offlineAction.shortcut,
           run: () => setOfflineMode((current) => !current),
         });
         return;
@@ -5941,6 +6554,12 @@ function App() {
     closeHotkeyOverlay,
     toggleHotkeyOverlay,
     toggleTheme,
+    actionCopy,
+    flashStatus,
+    highEffects,
+    prefersReducedMotion,
+    nextThemePreset,
+    t,
     offlineMode,
     filteredPaletteActions,
     paletteActions,
@@ -5982,6 +6601,20 @@ function App() {
     onEscape: closeVaultBackupWizard,
   });
 
+  useEffect(() => {
+    if (workspace === "ao") {
+      prefetchAoLogPanel();
+      void loadAoDeployModule();
+    }
+    if (workspace === "preview") {
+      prefetchAoHolomap();
+      prefetchManifestRenderer();
+    }
+    if (workspace === "studio") {
+      prefetchManifestRenderer();
+    }
+  }, [workspace]);
+
   const handleSkipToContent = useCallback((event: React.MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault();
     const target = mainContentRef.current;
@@ -5993,14 +6626,15 @@ function App() {
 
   const hasHealthAlert =
     !offlineMode && healthSummary.failing.some((item) => item.status !== "offline");
-  const previewHologramActive = theme === "cyberpunk" && highEffects && workspace === "preview";
+  const previewHologramActive = neonThemes.includes(theme) && highEffects && workspace === "preview";
   const hologramActive = previewHologramActive && !prefersReducedMotion;
   const holomapEnabled = workspace === "preview" && highEffects && !prefersReducedMotion;
 
   return (
-    <div className="app-shell">
+    <I18nContext.Provider value={{ locale, messages, t, setLocale }}>
+      <div className="app-shell">
       <a className="skip-link" href="#main-content" onClick={handleSkipToContent}>
-        Skip to main content
+        {messages.app.skipToContent}
       </a>
       <HeroCanvas theme={theme} highEffects={highEffects} />
       <header className={`top-bar ${catalogDragging ? "dragging-block" : ""}`}>
@@ -6008,7 +6642,7 @@ function App() {
           <div className="brand">
             <div className="brand-dot" />
             <div>
-              <p className="eyebrow">Darkmesh editor</p>
+              <p className="eyebrow">{messages.app.brandEyebrow}</p>
               <input
                 className="title-input"
                 value={manifest.name}
@@ -6101,8 +6735,8 @@ function App() {
             className="ghost small hotkey-help-button"
             type="button"
             onClick={toggleHotkeyOverlay}
-            aria-label="Open hotkey reference"
-            title="Hotkey reference"
+            aria-label={messages.hotkeys.title}
+            title={messages.hotkeys.title}
           >
             ?
           </button>
@@ -6609,7 +7243,19 @@ function App() {
       </header>
 
       <main id="main-content" ref={mainContentRef} tabIndex={-1}>
-      <HotkeyOverlay open={hotkeyOverlayOpen} sections={hotkeySections} onClose={closeHotkeyOverlay} />
+        <HotkeyOverlay
+          open={hotkeyOverlayOpen}
+          sections={hotkeySections}
+          onClose={closeHotkeyOverlay}
+          labels={{
+            eyebrow: messages.hotkeys.eyebrow,
+          title: messages.hotkeys.title,
+          tableHeaders: messages.hotkeys.tableHeaders,
+          footer: messages.hotkeys.footer,
+          close: messages.paletteUi.close,
+          formatCount: (count: number) => t("hotkeys.itemsLabel", { count }),
+        }}
+        />
 
       <ErrorBoundary name="PIP vault" variant="panel" onReset={resetVaultPanelBoundary}>
         <Vault
@@ -6757,6 +7403,19 @@ function App() {
                     : "Not scanned"}
                 </strong>
               </div>
+              <div>
+                <span>Auto-lock</span>
+                <strong>{pipVaultAutoLockMinutes ? `${pipVaultAutoLockMinutes} min` : "Off"}</strong>
+                {pipVaultAutoLockMinutes ? (
+                  <span className="hint mono">
+                    {pipVaultAutoLockRemainingMs != null ? `in ${formatCountdown(pipVaultAutoLockRemainingMs)}` : "Armed"}
+                  </span>
+                ) : null}
+              </div>
+              <div>
+                <span>Hardware key</span>
+                <strong>{pipVaultHardwarePlaceholder ? "Placeholder set" : "Not set"}</strong>
+              </div>
             </div>
             <div className="pip-vault-password-row">
               <div className={`pip-vault-password-input ${pipVaultPasswordError ? "has-error" : ""}`}>
@@ -6803,13 +7462,13 @@ function App() {
             )}
           </div>
           <p id="vault-password-help" className="sr-only">
-            Unlock or set the vault password. Press Alt+Shift+V to focus this input quickly.
-          </p>
-          <div className="pip-vault-password-meta">
-            <label className="remember-toggle">
-              <input
-                type="checkbox"
-                checked={pipVaultRememberUnlock}
+              Unlock or set the vault password. Press Alt+Shift+V to focus this input quickly.
+            </p>
+            <div className="pip-vault-password-meta">
+              <label className="remember-toggle">
+                <input
+                  type="checkbox"
+                  checked={pipVaultRememberUnlock}
                   onChange={(e) => handleRememberUnlockToggle(e.target.checked)}
                 />
                 Remember unlock for this session
@@ -6820,15 +7479,73 @@ function App() {
                   <span style={{ width: `${(pipVaultPasswordStrength.score / 4) * 100}%` }} />
                 </div>
                 <div className="strength-meta">
-                  <strong>
-                    {pipVaultPasswordStrength.score ? pipVaultPasswordStrength.label : "Strength"}
-                  </strong>
+                  <strong>{pipVaultPasswordStrength.score ? pipVaultPasswordStrength.label : "Strength"}</strong>
                   <span>
-                    {pipVaultPasswordStrength.score ? pipVaultPasswordStrength.hint : "Use 12+ chars with numbers & symbols."}
+                    {pipVaultPasswordStrength.score ? pipVaultPasswordStrength.hint : "Use 14+ chars with numbers & symbols."}
                   </span>
+                  <div className="strength-checks">
+                    {pipVaultPasswordStrength.checks.map((check) => (
+                      <span key={check.id} className={`strength-check ${check.pass ? "ok" : ""}`}>
+                        {check.pass ? "✔" : "○"} {check.label}
+                      </span>
+                    ))}
+                  </div>
                 </div>
               </div>
             </div>
+              <div className="pip-vault-auto-lock">
+                <div className="auto-lock-row">
+                  <label htmlFor="vault-auto-lock">Auto-lock</label>
+                  <select
+                    id="vault-auto-lock"
+                    className="pip-vault-auto-lock-select"
+                    value={pipVaultAutoLockMinutes}
+                    onChange={(e) => setPipVaultAutoLockMinutes(Number(e.target.value))}
+                    disabled={pipVaultBusy}
+                  >
+                    <option value={0}>Off</option>
+                    <option value={5}>5 min</option>
+                    <option value={10}>10 min</option>
+                    <option value={15}>15 min</option>
+                    <option value={30}>30 min</option>
+                    <option value={60}>60 min</option>
+                  </select>
+                  <span className="pill ghost">
+                    {pipVaultAutoLockMinutes
+                      ? pipVaultAutoLockRemainingMs != null
+                        ? `Locks in ${formatCountdown(pipVaultAutoLockRemainingMs)}`
+                        : "Timer armed"
+                      : "Disabled"}
+                  </span>
+                  <button
+                    className="ghost small"
+                    onClick={handleLockVaultNow}
+                    disabled={pipVaultBusy || pipVaultLocked || pipVaultSnapshot?.mode !== "password"}
+                  >
+                    Lock now
+                  </button>
+                </div>
+                <div className="auto-lock-meta">
+                  <span className="hint">Clears cached vault keys after inactivity (password mode only).</span>
+                  {pipVaultSnapshot?.lockedAt && pipVaultSnapshot.locked ? (
+                    <span className="hint mono">Last lock {formatTime(pipVaultSnapshot.lockedAt)}</span>
+                  ) : null}
+                </div>
+              </div>
+              <div className="pip-vault-hw">
+                <div className="pip-vault-hw-copy">
+                  <span className="pill ghost">Hardware key</span>
+                  <strong>{pipVaultHardwarePlaceholder ? "Placeholder added" : "Optional placeholder"}</strong>
+                  <p className="hint">Reserve a hardware-key requirement; actual hardware key binding is coming soon.</p>
+                </div>
+                <button
+                  className={`ghost small ${pipVaultHardwarePlaceholder ? "accent" : ""}`}
+                  type="button"
+                  onClick={handleToggleHardwarePlaceholder}
+                >
+                  {pipVaultHardwarePlaceholder ? "Remove placeholder" : "Add placeholder"}
+                </button>
+              </div>
             <div className="pip-vault-actions">
               <button
                 className="ghost"
@@ -7047,6 +7764,7 @@ function App() {
                   <thead>
                     <tr>
                       <th>When</th>
+                      <th>Action</th>
                       <th>Status</th>
                       <th>Checksum</th>
                       <th>Size</th>
@@ -7055,29 +7773,77 @@ function App() {
                   </thead>
                   <tbody>
                     {vaultAuditEvents.map((event) => (
-                      <tr key={event.id}>
-                        <td>
-                          <div className="pip-vault-audit-when">
-                            <strong>{formatTimeShort(event.at)}</strong>
-                            <span className="subtle">{new Date(event.at).toLocaleDateString()}</span>
-                          </div>
-                        </td>
-                        <td>
-                          <span className={`pill ${event.status === "ok" ? "accent" : "issue"}`}>
-                            {event.status === "ok" ? "OK" : "Error"}
-                          </span>
-                        </td>
-                        <td className="mono pip-vault-checksum-cell" title={event.checksum ?? ""}>
-                          {event.checksum ? `${event.checksum.slice(0, 18)}…` : "—"}
-                        </td>
-                        <td className="mono">{formatBytes(event.bytes)}</td>
-                        <td>
-                          <div className="pip-vault-audit-meta">
-                            <span className="pill ghost">{event.mode ? formatVaultMode(event.mode) : "—"}</span>
-                            <span className="mono subtle">{event.filename ?? "—"}</span>
-                          </div>
-                        </td>
-                      </tr>
+                      <React.Fragment key={event.id}>
+                        <tr>
+                          <td>
+                            <div className="pip-vault-audit-when">
+                              <strong>{formatTimeShort(event.at)}</strong>
+                              <span className="subtle">{new Date(event.at).toLocaleDateString()}</span>
+                            </div>
+                          </td>
+                          <td>
+                            <span className="pill ghost">
+                              {event.action
+                                ? event.action === "backup"
+                                  ? "Backup"
+                                  : event.action === "import"
+                                    ? "Import"
+                                    : event.action
+                                : "—"}
+                            </span>
+                          </td>
+                          <td>
+                            <span className={`pill ${event.status === "ok" ? "accent" : "issue"}`}>
+                              {event.status === "ok" ? "OK" : "Error"}
+                            </span>
+                          </td>
+                          <td className="mono pip-vault-checksum-cell" title={event.checksum ?? ""}>
+                            {event.checksum ? `${event.checksum.slice(0, 18)}…` : "—"}
+                          </td>
+                          <td className="mono">{formatBytes(event.bytes)}</td>
+                          <td>
+                            <div className="pip-vault-audit-meta">
+                              <span className="pill ghost">{event.mode ? formatVaultMode(event.mode) : "—"}</span>
+                              <span className="mono subtle">{event.filename ?? "—"}</span>
+                              <button className="ghost small" onClick={() => toggleVaultAuditRow(event.id)}>
+                                {vaultAuditExpandedId === event.id ? "Hide detail" : "Drill down"}
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                        {vaultAuditExpandedId === event.id ? (
+                          <tr className="pip-vault-audit-detail-row">
+                            <td colSpan={6}>
+                              <div className="audit-detail-grid">
+                                <div>
+                                  <span>Mode</span>
+                                  <strong>{event.mode ? formatVaultMode(event.mode) : "—"}</strong>
+                                </div>
+                                <div>
+                                  <span>Records</span>
+                                  <strong>{event.recordCount ?? "—"}</strong>
+                                </div>
+                                <div>
+                                  <span>Bytes</span>
+                                  <strong className="mono">{formatBytes(event.bytes)}</strong>
+                                </div>
+                                <div>
+                                  <span>Path</span>
+                                  <strong className="mono pip-vault-checksum">{event.path ?? "—"}</strong>
+                                </div>
+                                <div>
+                                  <span>Source</span>
+                                  <strong>{event.source ?? "—"}</strong>
+                                </div>
+                                <div className="audit-detail-wide">
+                                  <span>Detail</span>
+                                  <p className="hint">{event.detail ?? "No additional detail captured."}</p>
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        ) : null}
+                      </React.Fragment>
                     ))}
                   </tbody>
                 </table>
@@ -7122,7 +7888,7 @@ function App() {
         </Vault>
       </ErrorBoundary>
 
-      <div className="panels" style={{ display: workspace === "studio" ? undefined : "none" }}>
+      <div className="panels" style={{ display: workspace === "ao" || workspace === "data" ? "none" : undefined }}>
         <aside className="panel catalog">
           <div className="panel-header">
             <div>
@@ -7195,6 +7961,8 @@ function App() {
             <div className="quick-gallery-grid">
               {quickShapeFilters.map((shape) => {
                 const active = quickShape === shape.id;
+                const sampleItem = catalogByType.get(shape.sampleType);
+                const preview = sampleItem?.preview;
                 return (
                   <button
                     key={shape.id}
@@ -7204,8 +7972,23 @@ function App() {
                   >
                     <BlockPlaceholder type={shape.sampleType} />
                     <div className="quick-card-meta">
-                      <strong>{shape.label}</strong>
-                      <span>{shape.hint}</span>
+                      <div className="quick-card-title-row">
+                        <strong>{shape.label}</strong>
+                        {preview?.badge ? <span className="pill ghost micro">{preview.badge}</span> : null}
+                      </div>
+                      <div className="quick-card-preview">
+                        <strong>{preview?.title ?? shape.hint}</strong>
+                        <p>{preview?.body ?? "Filter by layout silhouette"}</p>
+                        {preview?.meta?.length ? (
+                          <div className="quick-card-meta-chips">
+                            {preview.meta.slice(0, 3).map((meta) => (
+                              <span key={meta} className="pill ghost micro">
+                                {meta}
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
                     </div>
                   </button>
                 );
@@ -7248,6 +8031,24 @@ function App() {
                       <BlockPlaceholder type={item.type} />
                       <div className="item-title">{item.name}</div>
                       <p className="item-summary">{item.summary}</p>
+                      {item.preview ? (
+                        <div className="catalog-preview">
+                          <div className="catalog-preview-head">
+                            {item.preview.badge ? <span className="pill ghost micro">{item.preview.badge}</span> : null}
+                            {item.preview.title ? <strong>{item.preview.title}</strong> : null}
+                          </div>
+                          {item.preview.body ? <p>{item.preview.body}</p> : null}
+                          {item.preview.meta?.length ? (
+                            <div className="catalog-preview-meta">
+                              {item.preview.meta.map((meta) => (
+                                <span key={meta} className="pill ghost micro">
+                                  {meta}
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
                       <div className="tags">
                         <span className="pill ghost">{item.type}</span>
                         {item.tags?.map((tag) => (
@@ -7288,101 +8089,101 @@ function App() {
               </div>
             </div>
           </div>
-          <section
-            className="manifest-preview-card"
-            aria-label="Current manifest metadata"
-            style={{ display: workspace === "preview" ? undefined : "none" }}
-          >
-            <div className="stack-head">
-              <div>
-                <p className="eyebrow">Manifest</p>
-                <h4>Current metadata</h4>
-              </div>
-              <div className="manifest-preview-actions">
-                <button
-                  className="ghost small"
-                  type="button"
-                  onClick={() => currentManifestTx && openExternal(manifestArweaveUrl)}
-                  disabled={!currentManifestTx}
-                  title={currentManifestTx ? "Open on arweave.net" : "Load a manifest tx first"}
-                >
-                  Open on arweave.net
-                </button>
-                <button
-                  className="ghost small"
-                  type="button"
-                  onClick={() => openExternal(manifestGqlExplorerUrl)}
-                  title="Open the Arweave GraphQL explorer"
-                >
-                  GQL explorer
-                </button>
-              </div>
-            </div>
-            <div className="manifest-preview-grid">
-              <div>
-                <span>ID</span>
-                <strong className="mono">{manifest.id}</strong>
-              </div>
-              <div>
-                <span>Version</span>
-                <strong>{manifest.version}</strong>
-              </div>
-              <div>
-                <span>Author</span>
-                <strong>{normalizeText(manifest.metadata.author) || "—"}</strong>
-              </div>
-              <div>
-                <span>Created</span>
-                <strong>{formatDate(manifest.metadata.createdAt)}</strong>
-              </div>
-              <div>
-                <span>Updated</span>
-                <strong>{formatDate(manifest.metadata.updatedAt)}</strong>
-              </div>
-              <div>
-                <span>Nodes</span>
-                <strong>{totalNodes}</strong>
-              </div>
-            </div>
-            <div className="manifest-preview-footer">
-              <div className="manifest-preview-tx">
-                <span>manifestTx</span>
-                <strong className="mono">{currentManifestTx ? currentManifestTx : "—"}</strong>
-              </div>
-              <span className={`pill ${loadingManifest ? "ghost" : remoteError ? "error" : "accent"}`}>
-                {loadingManifest ? "Fetching…" : remoteError ? "Fetch error" : "Ready"}
-              </span>
-            </div>
-          </section>
-          <section className="preview-holomap-card" aria-label="AO holomap pulse">
-            <div className="stack-head">
-              <div>
-                <p className="eyebrow">AO holomap</p>
-                <h4>Network pulse</h4>
-              </div>
-              <div className="preview-holomap-meta">
-                <span className={`pill ${holomapEnabled ? "accent" : "ghost"}`}>
-                  {prefersReducedMotion
-                    ? "Reduced motion"
-                    : holomapEnabled
-                      ? "Live effects"
-                      : "FX paused"}
-                </span>
-                <span className={`pill ${healthSummary.overall === "ok" ? "ghost" : "warn"}`}>
-                  {healthSummary.overall.toUpperCase()}
-                </span>
-              </div>
-            </div>
-            <AoHolomap
-              enabled={holomapEnabled}
-              reducedMotion={prefersReducedMotion}
-              theme={theme}
-              health={health}
-              summary={healthSummary}
-              events={holomapEvents}
-              variant="mini"
-            />
-          </section>
+          {workspace === "preview" ? (
+            <Suspense fallback={<WorkspaceSuspenseFallback workspace="preview" />}>
+              <section className="manifest-preview-card" aria-label="Current manifest metadata">
+                <div className="stack-head">
+                  <div>
+                    <p className="eyebrow">Manifest</p>
+                    <h4>Current metadata</h4>
+                  </div>
+                  <div className="manifest-preview-actions">
+                    <button
+                      className="ghost small"
+                      type="button"
+                      onClick={() => currentManifestTx && openExternal(manifestArweaveUrl)}
+                      disabled={!currentManifestTx}
+                      title={currentManifestTx ? "Open on arweave.net" : "Load a manifest tx first"}
+                    >
+                      Open on arweave.net
+                    </button>
+                    <button
+                      className="ghost small"
+                      type="button"
+                      onClick={() => openExternal(manifestGqlExplorerUrl)}
+                      title="Open the Arweave GraphQL explorer"
+                    >
+                      GQL explorer
+                    </button>
+                  </div>
+                </div>
+                <div className="manifest-preview-grid">
+                  <div>
+                    <span>ID</span>
+                    <strong className="mono">{manifest.id}</strong>
+                  </div>
+                  <div>
+                    <span>Version</span>
+                    <strong>{manifest.version}</strong>
+                  </div>
+                  <div>
+                    <span>Author</span>
+                    <strong>{normalizeText(manifest.metadata.author) || "—"}</strong>
+                  </div>
+                  <div>
+                    <span>Created</span>
+                    <strong>{formatDate(manifest.metadata.createdAt)}</strong>
+                  </div>
+                  <div>
+                    <span>Updated</span>
+                    <strong>{formatDate(manifest.metadata.updatedAt)}</strong>
+                  </div>
+                  <div>
+                    <span>Nodes</span>
+                    <strong>{totalNodes}</strong>
+                  </div>
+                </div>
+                <div className="manifest-preview-footer">
+                  <div className="manifest-preview-tx">
+                    <span>manifestTx</span>
+                    <strong className="mono">{currentManifestTx ? currentManifestTx : "—"}</strong>
+                  </div>
+                  <span className={`pill ${loadingManifest ? "ghost" : remoteError ? "error" : "accent"}`}>
+                    {loadingManifest ? "Fetching…" : remoteError ? "Fetch error" : "Ready"}
+                  </span>
+                </div>
+              </section>
+              <section className="preview-holomap-card" aria-label="AO holomap pulse">
+                <div className="stack-head">
+                  <div>
+                    <p className="eyebrow">AO holomap</p>
+                    <h4>Network pulse</h4>
+                  </div>
+                  <div className="preview-holomap-meta">
+                    <span className={`pill ${holomapEnabled ? "accent" : "ghost"}`}>
+                      {prefersReducedMotion
+                        ? "Reduced motion"
+                        : holomapEnabled
+                          ? "Live effects"
+                          : "FX paused"}
+                    </span>
+                    <span className={`pill ${healthSummary.overall === "ok" ? "ghost" : "warn"}`}>
+                      {healthSummary.overall.toUpperCase()}
+                    </span>
+                  </div>
+                </div>
+                <AoHolomap
+                  enabled={holomapEnabled}
+                  reducedMotion={prefersReducedMotion}
+                  theme={theme}
+                  health={health}
+                  summary={healthSummary}
+                  events={holomapEvents}
+                  variant="mini"
+                />
+              </section>
+            </Suspense>
+          ) : null}
           <div className="composition-toolbar hud-bar">
             <div className="selection-readout">
               <span className="pill ghost selection-pill">
@@ -8189,9 +8990,19 @@ function App() {
             </table>
           </div>
         </div>
-      <Suspense fallback={<AoLogPanelFallback />}>
-        <AoLogPanel aoLog={aoLog} onCopy={handleCopyAoId} onOpen={handleOpenAoId} />
-      </Suspense>
+      
+        <Suspense fallback={<AoLogPanelFallback />}>
+          <AoLogPanel
+            aoLog={aoLog}
+            metrics={aoLogMetrics}
+            pinned={pinnedAoIds}
+            onTogglePin={togglePinnedAoId}
+            onCopy={handleCopyAoId}
+            onOpen={handleOpenAoId}
+            onRetry={retryAoAction}
+            onResume={resumeAoAction}
+          />
+        </Suspense>
       </Wizard>
 
       </main>
@@ -8536,7 +9347,8 @@ function App() {
         onExecute={runPaletteAction}
         onClose={closePalette}
       />
-    </div>
+      </div>
+    </I18nContext.Provider>
   );
 }
 

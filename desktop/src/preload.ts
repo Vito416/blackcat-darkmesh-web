@@ -36,6 +36,7 @@ type PipVaultIntegrityResult = {
   durationMs: number;
   recordCount: number;
 };
+type PipVaultLockResult = { ok: true; locked: boolean; lockedAt: string };
 
 const walletApi = {
   readWallet: async (walletPath: string): Promise<WalletResponse> => {
@@ -65,6 +66,7 @@ contextBridge.exposeInMainWorld("pipVault", {
   importVault: (bundle: unknown, password?: string) => ipcRenderer.invoke("pipVault:import", bundle, password),
   scanIntegrity: (password?: string): Promise<PipVaultIntegrityResult> =>
     ipcRenderer.invoke("pipVault:scanIntegrity", password),
+  lock: (): Promise<PipVaultLockResult> => ipcRenderer.invoke("pipVault:lock"),
 });
 
 export {};

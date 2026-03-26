@@ -1,25 +1,48 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { visualizer } from "rollup-plugin-visualizer";
 import path from "path";
 
+const analyze = process.env.ANALYZE === "true";
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    react(),
+    ...(analyze
+      ? [
+          visualizer({
+            filename: "dist/renderer/bundle-report.html",
+            gzipSize: true,
+            brotliSize: true,
+            template: "treemap",
+          }),
+        ]
+      : []),
+  ],
   root: path.resolve(__dirname, "src/renderer"),
   base: "./",
   build: {
     outDir: path.resolve(__dirname, "dist/renderer"),
     emptyOutDir: true,
-    chunkSizeWarningLimit: 8000,
+    chunkSizeWarningLimit: 5000,
     rollupOptions: {
       output: {
         manualChunks(id) {
+          const normalized = id.replace(/\\/g, "/");
           if (id.includes("node_modules")) {
-            if (id.includes("@permaweb/aoconnect")) return "aoconnect";
+            if (id.includes("@permaweb/aoconnect")) return "ao-connect";
+            if (id.includes("three")) return "three";
+            if (id.includes("dexie")) return "dexie";
             if (id.includes("react")) return "react";
           }
+          if (normalized.includes("/components/ManifestRenderer")) return "manifest-renderer";
+          if (normalized.includes("/components/AoHolomap")) return "ao-holomap";
         },
       },
     },
+  },
+  optimizeDeps: {
+    exclude: ["@permaweb/aoconnect"],
   },
   server: {
     port: 5174,

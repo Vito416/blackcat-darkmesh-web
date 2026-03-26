@@ -3,7 +3,7 @@ import * as THREE from "three";
 
 type HeroMode = "idle" | "webgl" | "fallback";
 
-type ThemeName = "light" | "cyberpunk" | "night-drive" | "vapor" | "synthwave" | "void";
+type ThemeName = "light" | "cyberpunk" | "neon-wasteland" | "solarized-void" | "night-drive" | "vapor" | "synthwave" | "void";
 
 type HeroCanvasProps = {
   theme: ThemeName;
@@ -12,6 +12,7 @@ type HeroCanvasProps = {
 
 const PARTICLE_COUNT = 220;
 const FRAME_INTERVAL = 1000 / 30; // throttle to ~30fps to keep perf steady
+const WEBGL_THEMES: ThemeName[] = ["cyberpunk", "neon-wasteland", "solarized-void"];
 
 const cssColor = (value: string, fallback: string) => value.trim() || fallback;
 
@@ -19,12 +20,77 @@ const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme, highEffects }) => {
   const mountRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [mode, setMode] = useState<HeroMode>("idle");
+  const parallaxRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const setParallaxRef = (index: number) => (node: HTMLDivElement | null) => {
+    parallaxRefs.current[index] = node;
+  };
+
+  useEffect(() => {
+    const layers = parallaxRefs.current;
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+
+    if (!highEffects || reduceMotion) {
+      layers.forEach((layer) => {
+        if (layer) layer.style.transform = "";
+      });
+      return;
+    }
+
+    let targetX = 0;
+    let targetY = 0;
+    let currentX = 0;
+    let currentY = 0;
+    let raf = 0;
+
+    const applyParallax = () => {
+      currentX += (targetX - currentX) * 0.08;
+      currentY += (targetY - currentY) * 0.08;
+      const total = layers.length || 1;
+
+      layers.forEach((layer, index) => {
+        if (!layer) return;
+        const depth = (index + 1) / total;
+        const translateX = currentX * 32 * depth;
+        const translateY = currentY * 22 * depth;
+        const rotateY = currentX * 6 * depth;
+        const rotateX = currentY * -6 * depth;
+        layer.style.transform = `translate3d(${translateX}px, ${translateY}px, 0) rotateY(${rotateY}deg) rotateX(${rotateX}deg)`;
+      });
+
+      raf = requestAnimationFrame(applyParallax);
+    };
+
+    const handlePointerMove = (event: PointerEvent) => {
+      targetX = event.clientX / window.innerWidth - 0.5;
+      targetY = -(event.clientY / window.innerHeight - 0.5);
+      if (!raf) raf = requestAnimationFrame(applyParallax);
+    };
+
+    const handleLeave = () => {
+      targetX = 0;
+      targetY = 0;
+      if (!raf) raf = requestAnimationFrame(applyParallax);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove, { passive: true });
+    window.addEventListener("pointerleave", handleLeave);
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerleave", handleLeave);
+      cancelAnimationFrame(raf);
+      layers.forEach((layer) => {
+        if (layer) layer.style.transform = "";
+      });
+    };
+  }, [highEffects]);
 
   useEffect(() => {
     const mount = mountRef.current;
     const canvas = canvasRef.current;
+    const neonTheme = WEBGL_THEMES.includes(theme);
 
-    if (!mount || !canvas || theme !== "cyberpunk") {
+    if (!mount || !canvas || !neonTheme) {
       setMode("idle");
       return;
     }
@@ -324,6 +390,11 @@ const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme, highEffects }) => {
       data-high-effects={highEffects ? "on" : "off"}
       aria-hidden="true"
     >
+      <div className="hero-parallax layer horizon" ref={setParallaxRef(0)} />
+      <div className="hero-parallax layer shards" ref={setParallaxRef(1)} />
+      <div className="hero-parallax layer frame" ref={setParallaxRef(2)}>
+        <div className="hero-holo-frame" />
+      </div>
       <canvas ref={canvasRef} className="hero-canvas" />
       <div className="hero-fallback">
         <div className="hero-fallback-layer glow" />

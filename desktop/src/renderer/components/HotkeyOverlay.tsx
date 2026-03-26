@@ -17,9 +17,17 @@ interface HotkeyOverlayProps {
   open: boolean;
   sections: HotkeyOverlaySection[];
   onClose: () => void;
+  labels: {
+    eyebrow: string;
+    title: string;
+    tableHeaders: { shortcut: string; action: string; details: string };
+    footer: { open: string; close: string };
+    close: string;
+    formatCount?: (count: number) => string;
+  };
 }
 
-const HotkeyOverlay: React.FC<HotkeyOverlayProps> = ({ open, sections, onClose }) => {
+const HotkeyOverlay: React.FC<HotkeyOverlayProps> = ({ open, sections, onClose, labels }) => {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
 
@@ -48,11 +56,11 @@ const HotkeyOverlay: React.FC<HotkeyOverlayProps> = ({ open, sections, onClose }
       >
         <div className="hotkey-overlay-header">
           <div>
-            <p className="eyebrow">Reference</p>
-            <h3 id={titleId}>Hotkeys and palette actions</h3>
+            <p className="eyebrow">{labels.eyebrow}</p>
+            <h3 id={titleId}>{labels.title}</h3>
           </div>
           <button ref={closeButtonRef} className="ghost small" type="button" onClick={onClose}>
-            Close
+            {labels.close}
           </button>
         </div>
 
@@ -61,15 +69,15 @@ const HotkeyOverlay: React.FC<HotkeyOverlayProps> = ({ open, sections, onClose }
             <section key={section.title} className="hotkey-section">
               <div className="hotkey-section-head">
                 <h4>{section.title}</h4>
-                <span>{section.items.length} items</span>
+                <span>{labels.formatCount ? labels.formatCount(section.items.length) : `${section.items.length} items`}</span>
               </div>
 
               <table className="hotkey-table">
                 <thead>
                   <tr>
-                    <th scope="col">Shortcut</th>
-                    <th scope="col">Action</th>
-                    <th scope="col">Details</th>
+                    <th scope="col">{labels.tableHeaders.shortcut}</th>
+                    <th scope="col">{labels.tableHeaders.action}</th>
+                    <th scope="col">{labels.tableHeaders.details}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -89,8 +97,8 @@ const HotkeyOverlay: React.FC<HotkeyOverlayProps> = ({ open, sections, onClose }
         </div>
 
         <footer className="hotkey-overlay-footer">
-          <span>Shift+/ or ? to open this panel</span>
-          <span id={descriptionId}>Esc to close</span>
+          <span>{labels.footer.open}</span>
+          <span id={descriptionId}>{labels.footer.close}</span>
         </footer>
       </section>
     </div>

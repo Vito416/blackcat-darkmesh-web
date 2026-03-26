@@ -66,6 +66,13 @@ export interface ManifestDraft {
   versionStamp?: number;
 }
 
+export interface CatalogPreview {
+  badge?: string;
+  title?: string;
+  body?: string;
+  meta?: string[];
+}
+
 export interface CatalogItem {
   id: string;
   type: string;
@@ -74,4 +81,5 @@ export interface CatalogItem {
   tags?: string[];
   defaultProps?: ManifestShape;
   propsSchema?: PropsSchema;
+  preview?: CatalogPreview;
 }

@@ -1,6 +1,6 @@
 import Dexie, { Table } from "dexie";
 
-export type VaultAuditAction = "backup";
+export type VaultAuditAction = "backup" | "import";
 
 export type VaultAuditStatus = "ok" | "error";
 
@@ -16,6 +16,7 @@ export type VaultAuditEvent = {
   checksum?: string;
   bytes?: number;
   detail?: string;
+  source?: string;
 };
 
 type VaultAuditRow = Omit<VaultAuditEvent, "id"> & { id?: number };
@@ -81,6 +82,7 @@ export const vaultAuditToCsv = (events: VaultAuditEvent[]): string => {
     "at",
     "action",
     "status",
+    "source",
     "mode",
     "recordCount",
     "filename",
@@ -96,6 +98,7 @@ export const vaultAuditToCsv = (events: VaultAuditEvent[]): string => {
       event.at,
       event.action,
       event.status,
+      event.source ?? "",
       event.mode ?? "",
       event.recordCount ?? "",
       event.filename ?? "",

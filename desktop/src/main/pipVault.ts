@@ -176,6 +176,7 @@ const buildRecordKey = (pip: PipDocument): string =>
 
 let cachedMasterKey: Buffer | null = null;
 let cachedEnvelope: KeyEnvelopeV2 | null = null;
+let lastLockAt: string | null = null;
 
 const normalizeKeyEnvelope = (raw: AnyKeyEnvelope | null): KeyEnvelopeV2 | null => {
   if (!raw) return null;
@@ -216,6 +217,7 @@ const derivePasswordKey = (password: string, salt: Buffer, iterations: number): 
 const cacheMasterKey = (key: Buffer, envelope: KeyEnvelopeV2) => {
   cachedMasterKey = key;
   cachedEnvelope = envelope;
+  lastLockAt = null;
 };
 
 const loadMasterKeyFromEnvelope = async (envelope: KeyEnvelopeV2, password?: string): Promise<Buffer> => {
@@ -466,6 +468,7 @@ export async function describePipVault(): Promise<{
   iterations?: number;
   salt?: string;
   locked: boolean;
+  lockedAt?: string;
   recordCount: number;
 }> {
   const envelope = normalizeKeyEnvelope(await readJsonFile<AnyKeyEnvelope>(keyPath()));
@@ -487,6 +490,7 @@ export async function describePipVault(): Promise<{
     iterations: envelope?.kdf?.iterations,
     salt: envelope?.kdf?.salt,
     locked,
+    lockedAt: locked ? lastLockAt ?? undefined : undefined,
     recordCount: store.records.length,
   };
 }
@@ -614,6 +618,13 @@ export async function disableVaultPassword(): Promise<{ ok: true; mode: VaultKey
   cacheMasterKey(masterKey, envelope);
 
   return { ok: true, mode: envelope.mode };
+}
+
+export function lockVault(): { ok: true; locked: boolean; lockedAt: string } {
+  cachedMasterKey = null;
+  const lockedAt = nowIso();
+  lastLockAt = lockedAt;
+  return { ok: true, locked: true, lockedAt };
 }
 
 export async function exportPipVault(): Promise<{
