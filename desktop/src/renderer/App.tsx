@@ -123,6 +123,7 @@ import {
   validateSchedulerInput,
   validateWalletJsonInput,
   validateWalletPathInput,
+  type WalletFieldValidation,
 } from "./services/aoDeploy";
 import VaultCrystal, { type VaultCrystalPulse, type VaultCrystalState } from "./components/VaultCrystal";
 import CommandPalette, { type CommandPaletteAction } from "./components/CommandPalette";
@@ -7647,9 +7648,13 @@ function App() {
             ) : (
               <p className="subtle">
                 {walletMode === "path"
-                  ? walletPathValidation.hint ?? walletNote ?? "Enter a wallet path or pick via IPC."
+                  ? (walletPathValidation.ok ? walletPathValidation.hint : undefined) ??
+                    walletNote ??
+                    "Enter a wallet path or pick via IPC."
                   : walletMode === "jwk"
-                    ? walletJwkValidation.hint ?? walletNote ?? "Paste wallet JSON or pick via IPC."
+                    ? (walletJwkValidation.ok ? walletJwkValidation.hint : undefined) ??
+                      walletNote ??
+                      "Paste wallet JSON or pick via IPC."
                     : walletNote ?? "Choose IPC, path, or pasted JWK."}
               </p>
             )}
@@ -7793,7 +7798,7 @@ function App() {
             <div className="inline-actions">
               <button
                 className="primary"
-                onClick={handleSpawnProcessClick}
+                onClick={() => void handleSpawnProcessClick()}
                 disabled={spawning || !canSpawn || offlineMode}
                 type="button"
                 aria-label="Spawn process"
