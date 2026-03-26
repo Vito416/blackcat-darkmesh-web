@@ -30,6 +30,7 @@ import {
   enableVaultPassword,
   exportPipVaultBundle,
   importPipVaultBundle,
+  scanPipVaultIntegrity,
   type PipVaultRecord,
 } from "./services/pipVault";
 import type { PipDocument } from "./services/pipValidation";
@@ -90,6 +91,7 @@ import {
   addHealthEvent,
   getRecentHealthEvents,
   healthEventsToCsv,
+  healthEventsToJson,
   listHealthEvents,
   type HealthEvent,
 } from "./storage/healthStore";
@@ -101,6 +103,11 @@ import {
   type VaultAuditEvent,
 } from "./storage/vaultAudit";
 import {
+  addVaultIntegrityEvent,
+  getLastVaultIntegrityEvent,
+  type VaultIntegrityEvent,
+} from "./storage/vaultIntegrity";
+import {
   hasStoredSettings,
   loadSettings,
   markSetupComplete,
@@ -109,6 +116,14 @@ import {
   setupCompleted,
 } from "./storage/settings";
 import { fetchWalletFromPath, parseWalletJson } from "./services/wallet";
+import {
+  classifyAoError,
+  validateAoId,
+  validateModuleTxInput,
+  validateSchedulerInput,
+  validateWalletJsonInput,
+  validateWalletPathInput,
+} from "./services/aoDeploy";
 import VaultCrystal, { type VaultCrystalPulse, type VaultCrystalState } from "./components/VaultCrystal";
 import CommandPalette, { type CommandPaletteAction } from "./components/CommandPalette";
 import {
@@ -124,6 +139,8 @@ import {
 import { diffManifests, type DraftDiffEntry, type DraftDiffKind } from "./utils/draftDiff";
 import HotkeyOverlay, { type HotkeyOverlaySection } from "./components/HotkeyOverlay";
 import HeroCanvas from "./components/HeroCanvas";
+import HologramBlocks from "./components/HologramBlocks";
+import useNeonCursorTrail from "./hooks/useNeonCursorTrail";
 import Vault from "./components/Vault";
 import Wizard from "./components/Wizard";
 import { validatePipDocument } from "./services/pipValidation";
@@ -180,10 +197,53 @@ const fromCatalog = (item: CatalogItem): ManifestNode => ({
   children: [],
 });
 
+const themePresets = [
+  {
+    id: "light",
+    label: "Light",
+    description: "Bright neutral shell with aqua and lime accents.",
+  },
+  {
+    id: "cyberpunk",
+    label: "Cyberpunk",
+    description: "Neon grid with electric cyan and magenta glow.",
+  },
+  {
+    id: "night-drive",
+    label: "Night Drive",
+    description: "Midnight teal with warm highway amber highlights.",
+  },
+  {
+    id: "vapor",
+    label: "Vapor",
+    description: "Soft pastel vaporwave with violet, mint, and blush.",
+  },
+  {
+    id: "synthwave",
+    label: "Synthwave",
+    description: "Retro-future violet base with magenta and cyan pops.",
+  },
+  {
+    id: "void",
+    label: "Void",
+    description: "High-contrast charcoal with icy cyan edges.",
+  },
+] as const;
+
+type Theme = (typeof themePresets)[number]["id"];
+
+const themePresetMap = new Map(themePresets.map((preset) => [preset.id, preset]));
+const DEFAULT_THEME: Theme = "light";
+
+const resolveTheme = (value: string | null): Theme =>
+  (value && themePresetMap.has(value as Theme) ? (value as Theme) : DEFAULT_THEME);
+
+const getThemeLabel = (value: Theme): string => themePresetMap.get(value)?.label ?? "Light";
+
 const getInitialTheme = (): Theme => {
-  if (typeof window === "undefined") return "light";
+  if (typeof window === "undefined") return DEFAULT_THEME;
   const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
-  const next = stored === "cyberpunk" ? "cyberpunk" : "light";
+  const next = resolveTheme(stored);
   document.documentElement.setAttribute("data-theme", next);
   return next;
 };
@@ -191,6 +251,34 @@ const getInitialTheme = (): Theme => {
 const getInitialOffline = (): boolean => {
   if (typeof window === "undefined") return false;
   return window.localStorage.getItem(OFFLINE_STORAGE_KEY) === "true";
+};
+
+const getInitialCursorTrail = (): boolean => {
+  if (typeof window === "undefined") return false;
+  const stored = window.localStorage.getItem(CURSOR_TRAIL_STORAGE_KEY);
+  if (stored === "on" || stored === "true" || stored === "1") return true;
+  if (stored === "off" || stored === "false" || stored === "0") return false;
+
+  const prefersReduced = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+  return !prefersReduced;
+};
+
+const usePrefersReducedMotion = (): boolean => {
+  const [prefers, setPrefers] = useState(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return false;
+    return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  });
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    setPrefers(media.matches);
+    const handleChange = (event: MediaQueryListEvent) => setPrefers(event.matches);
+    media.addEventListener("change", handleChange);
+    return () => media.removeEventListener("change", handleChange);
+  }, []);
+
+  return prefers;
 };
 
 const formatDate = (iso?: string) => (iso ? new Date(iso).toLocaleString() : "—");
@@ -217,7 +305,13 @@ const normalizeText = (value: unknown) => (typeof value === "string" ? value.tri
 const formatTimeShort = (iso?: string) =>
   iso ? new Date(iso).toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit" }) : "—";
 
-const formatDraftSaveMode = (mode: DraftSaveMode) => (mode === "autosave" ? "Autosave" : "Manual save");
+const AUTOSAVE_DEBOUNCE_MS = 1200;
+
+const formatDraftSaveMode = (mode: DraftSaveMode) => {
+  if (mode === "autosave") return "Autosave";
+  if (mode === "duplicate") return "Duplicate";
+  return "Manual save";
+};
 
 const buildAoExplorerUrl = (id?: string | null) => (id ? `https://ao.link/#/entity/${encodeURIComponent(id)}` : null);
 
@@ -371,9 +465,8 @@ const mergeHealthResults = (previous: HealthStatus[], next: HealthStatus[]): Hea
         ? item.lastSuccessAt ?? item.checkedAt
         : item.lastSuccessAt ?? prior?.lastSuccessAt;
     const lastError =
-      item.status === "ok"
-        ? undefined
-        : item.lastError ?? item.detail ?? prior?.lastError;
+      item.lastError ??
+      (item.status === "ok" ? prior?.lastError : item.detail ?? prior?.lastError);
 
     return {
       ...prior,
@@ -410,10 +503,16 @@ type FileBridgeResult = {
   canceled?: boolean;
 };
 
-type Theme = "light" | "cyberpunk";
 type Workspace = "data" | "ao" | "studio" | "preview";
 type WalletMode = "ipc" | "path" | "jwk";
 type TaskState = "idle" | "pending" | "success" | "error";
+type ActionStep = {
+  id: string;
+  label: string;
+  status: TaskState | "idle";
+  detail?: string | null;
+  at?: string;
+};
 export type AoMiniLogEntry = {
   kind: "deploy" | "spawn";
   id: string | null;
@@ -422,6 +521,13 @@ export type AoMiniLogEntry = {
   href: string | null;
   payload?: unknown;
   raw?: string;
+};
+type SpawnSnapshot = {
+  processId: string;
+  manifestTx: string;
+  moduleTx: string;
+  scheduler?: string;
+  time: string;
 };
 type PipVaultSnapshot = {
   exists: boolean;
@@ -442,13 +548,18 @@ type PipVaultIssue = {
 
 const THEME_STORAGE_KEY = "darkmesh-theme";
 const OFFLINE_STORAGE_KEY = "darkmesh-offline-mode";
+const CURSOR_TRAIL_STORAGE_KEY = "darkmesh-cursor-trail";
 const OFFLINE_FETCH_ERROR = "Offline mode is enabled; network requests are blocked";
 const HEALTH_AUTO_REFRESH_STORAGE_KEY = "health-auto-refresh";
+type HealthAutoRefresh = "off" | "10" | "30" | "60";
+const HEALTH_AUTO_REFRESH_OPTIONS: HealthAutoRefresh[] = ["off", "10", "30", "60"];
 const PIP_VAULT_REMEMBER_KEY = "pip-vault-remember";
 const PIP_VAULT_REMEMBER_PASSWORD_KEY = "pip-vault-remember-password";
 const HEALTH_NOTIFY_STORAGE_KEY = "health-sla-notify";
 const HEALTH_SLA_FAILURE_STORAGE_KEY = "health-sla-failure";
 const HEALTH_SLA_LATENCY_STORAGE_KEY = "health-sla-latency";
+const LAST_MODULE_TX_STORAGE_KEY = "ao-last-module-tx";
+const LAST_SPAWN_STORAGE_KEY = "ao-last-spawn";
 const getEnv = (key: string): string | undefined => resolveEnvWithSettings(key);
 const parsePositiveNumber = (value: string | undefined, fallback: number): number => {
   const parsed = Number(value);
@@ -460,6 +571,17 @@ const DEFAULT_SLA_FAILURE_THRESHOLD = parsePositiveNumber(getEnv("HEALTH_SLA_FAI
 const DEFAULT_SLA_LATENCY_THRESHOLD_MS = parsePositiveNumber(getEnv("HEALTH_SLA_LATENCY_MS"), 1500);
 const MANIFEST_HISTORY_LIMIT = 20;
 const VAULT_AUDIT_DISPLAY_LIMIT = 12;
+const resolveAutoRefreshIntervalMs = (value: HealthAutoRefresh): number | null => {
+  if (value === "off") return null;
+  const override =
+    typeof window !== "undefined" && typeof (window as { __HEALTH_AUTO_REFRESH_MS__?: unknown }).__HEALTH_AUTO_REFRESH_MS__ !== "undefined"
+      ? Number((window as { __HEALTH_AUTO_REFRESH_MS__?: unknown }).__HEALTH_AUTO_REFRESH_MS__)
+      : NaN;
+  if (Number.isFinite(override) && override > 0) {
+    return Math.round(override);
+  }
+  return Number(value) * 1000;
+};
 
 declare global {
   interface Window {
@@ -507,7 +629,11 @@ declare global {
         mode: "safeStorage" | "plain" | "password";
         records: number;
       }>;
+      scanIntegrity: (
+        password?: string,
+      ) => Promise<{ ok: true; scanned: number; failed: { id: string; error: string }[]; durationMs: number; recordCount: number }>;
     };
+    __HEALTH_AUTO_REFRESH_MS__?: number;
   }
 }
 
@@ -664,6 +790,109 @@ const insertNodeIntoTree = (
   return [...nodes, node];
 };
 
+const detachNodeFromTree = (
+  nodes: ManifestNode[],
+  targetId: string,
+): { nodes: ManifestNode[]; removed: ManifestNode | null } => {
+  let removed: ManifestNode | null = null;
+
+  const walk = (list: ManifestNode[]): ManifestNode[] => {
+    let changed = false;
+
+    const next = list
+      .map((node) => {
+        if (node.id === targetId) {
+          removed = node;
+          changed = true;
+          return null;
+        }
+        if (node.children?.length) {
+          const nextChildren = walk(node.children);
+          if (nextChildren !== node.children) {
+            changed = true;
+            return { ...node, children: nextChildren };
+          }
+        }
+        return node;
+      })
+      .filter(Boolean) as ManifestNode[];
+
+    return changed ? next : list;
+  };
+
+  const pruned = walk(nodes);
+  return { nodes: removed ? pruned : nodes, removed };
+};
+
+const isAncestorOf = (
+  ancestorId: string,
+  nodeId: string,
+  parentIndex: Map<string, { parentId: string | null; index: number }>,
+): boolean => {
+  let current = parentIndex.get(nodeId);
+  while (current) {
+    if (current.parentId === ancestorId) return true;
+    current = current.parentId ? parentIndex.get(current.parentId) : undefined;
+  }
+  return false;
+};
+
+const moveNodeWithinTree = (
+  nodes: ManifestNode[],
+  sourceId: string,
+  targetId: string | null,
+  placement: DropPlacement,
+): ManifestNode[] => {
+  if (sourceId === targetId) return nodes;
+
+  const parentIndex = buildParentIndex(nodes);
+  const sourceMeta = parentIndex.get(sourceId);
+  if (!sourceMeta) return nodes;
+  const siblingList = sourceMeta.parentId ? findNodeById(nodes, sourceMeta.parentId)?.children ?? [] : nodes;
+
+  if (targetId && isAncestorOf(sourceId, targetId, parentIndex)) {
+    return nodes;
+  }
+
+  const targetMeta = targetId ? parentIndex.get(targetId) : null;
+  if (targetId && !targetMeta) return nodes;
+
+  const { nodes: withoutSource, removed } = detachNodeFromTree(nodes, sourceId);
+  if (!removed) return nodes;
+
+  let destinationParent: string | null = null;
+  let destinationIndex: number | undefined;
+
+  if (!targetId) {
+    destinationParent = null;
+    destinationIndex = placement === "before" ? 0 : undefined;
+  } else if (placement === "inside") {
+    destinationParent = targetId;
+    destinationIndex = undefined;
+  } else {
+    destinationParent = targetMeta?.parentId ?? null;
+    let baseIndex = targetMeta?.index ?? 0;
+    const sameParent = destinationParent === sourceMeta.parentId;
+    if (sameParent && sourceMeta.index < (targetMeta?.index ?? 0)) {
+      baseIndex -= 1;
+    }
+    if (placement === "after") {
+      baseIndex += 1;
+    }
+    destinationIndex = Math.max(0, baseIndex);
+  }
+
+  if (destinationParent === sourceMeta.parentId && destinationIndex != null) {
+    const boundedIndex = Math.max(0, Math.min(destinationIndex, Math.max(0, siblingList.length - 1)));
+    if (boundedIndex === sourceMeta.index) {
+      return nodes;
+    }
+  }
+
+  const nextNodes = insertNodeIntoTree(withoutSource, destinationParent, removed, destinationIndex);
+  return nextNodes;
+};
+
 const ensureEntry = (entry: string | undefined, nodes: ManifestNode[]): string | undefined => {
   if (entry && findNodeById(nodes, entry)) return entry;
   return nodes[0]?.id;
@@ -772,6 +1001,81 @@ const selectionsEqual = (a: string[], b: string[]): boolean =>
 
 const uniqueSorted = (values: Iterable<string>): string[] => Array.from(new Set(values)).sort((a, b) => a.localeCompare(b));
 
+const buildActionTimeline = (kind: "deploy" | "spawn"): ActionStep[] => {
+  const steps = kind === "deploy" ? ["Wallet", "Signer", "Deploy"] : ["Wallet", "Module", "Spawn"];
+  return steps.map((label) => ({
+    id: `${kind}-${label.toLowerCase().replace(/\\s+/g, "-")}`,
+    label,
+    status: "idle" as const,
+    detail: null,
+  }));
+};
+
+const stampStep = (step: ActionStep, status: ActionStep["status"], detail?: string | null): ActionStep => ({
+  ...step,
+  status,
+  detail: detail ?? step.detail,
+  at: new Date().toISOString(),
+});
+
+const updateTimelineStep = (
+  timeline: ActionStep[],
+  id: string,
+  status: ActionStep["status"],
+  detail?: string | null,
+): ActionStep[] =>
+  timeline.map((step) => (step.id === id ? stampStep(step, status, detail) : step));
+
+const loadLastModuleTx = (): string | null => {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(LAST_MODULE_TX_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+};
+
+const persistLastModuleTx = (value: string | null): void => {
+  if (typeof window === "undefined") return;
+  try {
+    if (value) {
+      window.localStorage.setItem(LAST_MODULE_TX_STORAGE_KEY, value);
+    } else {
+      window.localStorage.removeItem(LAST_MODULE_TX_STORAGE_KEY);
+    }
+  } catch {
+    // ignore storage issues
+  }
+};
+
+const loadLastSpawnSnapshot = (): SpawnSnapshot | null => {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(LAST_SPAWN_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as SpawnSnapshot;
+    if (parsed?.processId && parsed?.manifestTx && parsed?.moduleTx) {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+};
+
+const persistLastSpawnSnapshot = (snapshot: SpawnSnapshot | null): void => {
+  if (typeof window === "undefined") return;
+  try {
+    if (snapshot) {
+      window.localStorage.setItem(LAST_SPAWN_STORAGE_KEY, JSON.stringify(snapshot));
+    } else {
+      window.localStorage.removeItem(LAST_SPAWN_STORAGE_KEY);
+    }
+  } catch {
+    // ignore storage issues
+  }
+};
+
 const matchesCatalogFilters = (
   item: CatalogItem,
   activeTypes: string[],
@@ -791,6 +1095,14 @@ const blockShapeForType = (type: string): "hero" | "grid" | "media" | "pricing" 
   if (type.includes("pricing")) return "pricing";
   return "footer";
 };
+
+const quickShapeFilters = [
+  { id: "hero", label: "Hero", sampleType: "block.hero", hint: "Headlines & CTA" },
+  { id: "grid", label: "Grid", sampleType: "block.featureGrid", hint: "Cards & columns" },
+  { id: "media", label: "Media", sampleType: "block.gallery", hint: "Gallery & embeds" },
+  { id: "pricing", label: "Pricing", sampleType: "block.pricing", hint: "Plans & tiers" },
+  { id: "footer", label: "Footer", sampleType: "block.footer", hint: "Links & socials" },
+] as const;
 
 const BlockPlaceholder: React.FC<{ type: string }> = ({ type }) => {
   const shape = blockShapeForType(type);
@@ -842,6 +1154,28 @@ const getIssueLabel = (issues: PropsValidationIssue[]): string =>
 
 type PropsDraftPath = Array<string | number>;
 type PropsMode = "form" | "json";
+type DropPlacement = "before" | "after" | "inside";
+type TreeDropMode = "catalog" | "move";
+type TreeDropState = { id: string | null; placement: DropPlacement; mode: TreeDropMode | null };
+type NodeValidationSummary = {
+  id: string;
+  title?: string;
+  type?: string;
+  issues: PropsValidationIssue[];
+  missingRequired: PropsValidationIssue[];
+  diffEntries: PropsDiffEntry[];
+  diffCounts: { added: number; changed: number; removed: number };
+  defaults: ManifestShape;
+  hasSchema: boolean;
+  valid: boolean;
+};
+
+type ManifestIssue = {
+  nodeId: string;
+  nodeTitle?: string;
+  nodeType?: string;
+  issue: PropsValidationIssue;
+};
 
 const stringifyPropsDraft = (value: unknown): string => JSON.stringify(value, null, 2);
 
@@ -1456,17 +1790,21 @@ const DraftDiffPanelFallback: React.FC<{
 
 function App() {
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
-const [highEffects, setHighEffects] = useState<boolean>(() => {
-  if (typeof window === "undefined") return true;
-  const stored = window.localStorage.getItem("darkmesh-high-effects");
-  return stored ? stored === "1" : true;
-});
+  const [highEffects, setHighEffects] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    const stored = window.localStorage.getItem("darkmesh-high-effects");
+    return stored ? stored === "1" : true;
+  });
+  const [cursorTrailPref, setCursorTrailPref] = useState<boolean>(() => getInitialCursorTrail());
+  const prefersReducedMotion = usePrefersReducedMotion();
   const [offlineMode, setOfflineMode] = useState<boolean>(() => getInitialOffline());
   const [workspace, setWorkspace] = useState<Workspace>("studio");
   const [catalog, setCatalog] = useState<CatalogItem[]>(seedCatalog);
+  const [catalogLoading, setCatalogLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [activeTypes, setActiveTypes] = useState<string[]>([]);
   const [activeTags, setActiveTags] = useState<string[]>([]);
+  const [quickShape, setQuickShape] = useState<string | null>(null);
   const initialManifest = useMemo(() => newManifest(), []);
   const [manifest, setManifest] = useState<ManifestDocument>(() => initialManifest);
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
@@ -1505,6 +1843,8 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
   const [pipVaultBusy, setPipVaultBusy] = useState(false);
   const [pipVaultSnapshot, setPipVaultSnapshot] = useState<PipVaultSnapshot | null>(null);
   const [pipVaultRecords, setPipVaultRecords] = useState<PipVaultRecord[]>([]);
+  const [vaultIntegrity, setVaultIntegrity] = useState<VaultIntegrityEvent | null>(null);
+  const [vaultIntegrityRunning, setVaultIntegrityRunning] = useState(false);
   const [vaultAuditEvents, setVaultAuditEvents] = useState<VaultAuditEvent[]>([]);
   const [vaultAuditLoading, setVaultAuditLoading] = useState(false);
   const [vaultAuditExporting, setVaultAuditExporting] = useState<"csv" | "json" | null>(null);
@@ -1513,9 +1853,11 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
   const [pipVaultPassword, setPipVaultPassword] = useState("");
   const [pipVaultError, setPipVaultError] = useState<string | null>(null);
   const [pipVaultPasswordError, setPipVaultPasswordError] = useState<string | null>(null);
+  type PipVaultTaskKind = "import" | "export" | "unlock" | "records-export" | "integrity";
   const [pipVaultTask, setPipVaultTask] = useState<{
-    kind: "import" | "export" | "unlock" | "records-export";
+    kind: PipVaultTaskKind;
     label: string;
+    progress?: number;
   } | null>(null);
   const [pipVaultRememberUnlock, setPipVaultRememberUnlock] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
@@ -1526,10 +1868,10 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
   const [healthLoading, setHealthLoading] = useState(false);
   const [healthExpanded, setHealthExpanded] = useState(false);
   const [healthEvents, setHealthEvents] = useState<HealthEvent[]>([]);
-  const [healthAutoRefresh, setHealthAutoRefresh] = useState<"off" | "30" | "60">(() => {
+  const [healthAutoRefresh, setHealthAutoRefresh] = useState<HealthAutoRefresh>(() => {
     if (typeof window === "undefined") return "off";
-    const stored = window.localStorage.getItem(HEALTH_AUTO_REFRESH_STORAGE_KEY);
-    return stored === "30" || stored === "60" ? stored : "off";
+    const stored = window.localStorage.getItem(HEALTH_AUTO_REFRESH_STORAGE_KEY) as HealthAutoRefresh | null;
+    return stored && HEALTH_AUTO_REFRESH_OPTIONS.includes(stored) ? stored : "off";
   });
   const [slaFailureThreshold, setSlaFailureThreshold] = useState<number>(() => {
     if (typeof window === "undefined") return DEFAULT_SLA_FAILURE_THRESHOLD;
@@ -1545,6 +1887,10 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     return window.localStorage.getItem(HEALTH_NOTIFY_STORAGE_KEY) === "true";
   });
+  const [deployTimeline, setDeployTimeline] = useState<ActionStep[]>(() => buildActionTimeline("deploy"));
+  const [spawnTimeline, setSpawnTimeline] = useState<ActionStep[]>(() => buildActionTimeline("spawn"));
+  const [deployTransient, setDeployTransient] = useState(false);
+  const [spawnTransient, setSpawnTransient] = useState(false);
   const [walletMode, setWalletMode] = useState<WalletMode>(() => {
     if (getEnv("AO_WALLET_JSON") || getEnv("VITE_AO_WALLET_JSON")) return "jwk";
     if (getEnv("AO_WALLET_PATH") || getEnv("VITE_AO_WALLET_PATH")) return "path";
@@ -1565,7 +1911,9 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
   const [moduleSource, setModuleSource] = useState("");
   const [manifestTxInput, setManifestTxInput] = useState("");
   const [scheduler, setScheduler] = useState(getEnv("SCHEDULER") ?? getEnv("VITE_SCHEDULER") ?? "");
-  const [moduleTxInput, setModuleTxInput] = useState(getEnv("AO_MODULE_TX") ?? getEnv("VITE_AO_MODULE_TX") ?? "");
+  const [moduleTxInput, setModuleTxInput] = useState(
+    () => getEnv("AO_MODULE_TX") ?? getEnv("VITE_AO_MODULE_TX") ?? loadLastModuleTx() ?? "",
+  );
   const [deploying, setDeploying] = useState(false);
   const [spawning, setSpawning] = useState(false);
   const [deployState, setDeployState] = useState<TaskState>("idle");
@@ -1574,7 +1922,8 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
   const [spawnOutcome, setSpawnOutcome] = useState<string | null>(null);
   const [deployStep, setDeployStep] = useState<string | null>(null);
   const [spawnStep, setSpawnStep] = useState<string | null>(null);
-  const [deployedModuleTx, setDeployedModuleTx] = useState<string | null>(null);
+  const [deployedModuleTx, setDeployedModuleTx] = useState<string | null>(() => loadLastModuleTx());
+  const [lastSpawnSnapshot, setLastSpawnSnapshot] = useState<SpawnSnapshot | null>(() => loadLastSpawnSnapshot());
   const [aoLog, setAoLog] = useState<AoMiniLogEntry[]>([]);
   const [moduleSourceError, setModuleSourceError] = useState<string | null>(null);
   const [moduleTxError, setModuleTxError] = useState<string | null>(null);
@@ -1585,24 +1934,48 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [hotkeyOverlayOpen, setHotkeyOverlayOpen] = useState(false);
   const [compositionDropActive, setCompositionDropActive] = useState(false);
-  const [treeDropTargetId, setTreeDropTargetId] = useState<string | null>(null);
+  const [treeDropState, setTreeDropState] = useState<TreeDropState | null>(null);
+  const [draggedNodeId, setDraggedNodeId] = useState<string | null>(null);
   const [draggedCatalogId, setDraggedCatalogId] = useState<string | null>(null);
+  const [catalogDragging, setCatalogDragging] = useState(false);
   const [whatsNewOpen, setWhatsNewOpen] = useState(false);
+  const [issuesDockCollapsed, setIssuesDockCollapsed] = useState(false);
 
   const whatsNewEntries = useMemo<WhatsNewEntry[]>(() => {
     const entries = (whatsNewData as { entries?: WhatsNewEntry[] }).entries ?? [];
     return [...entries].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   }, []);
 
+  const neonCursorEnabled = cursorTrailPref && !prefersReducedMotion && !offlineMode && highEffects;
+  const cursorTrailBlockedReason = prefersReducedMotion
+    ? "reduced motion"
+    : offlineMode
+      ? "offline mode"
+      : !highEffects
+        ? "effects off"
+        : null;
+  const cursorTrailLabel = prefersReducedMotion
+    ? "Neon disabled"
+    : offlineMode && cursorTrailPref
+      ? "Trail paused"
+      : !highEffects
+        ? "High effects off"
+        : cursorTrailPref
+          ? "Neon cursor"
+          : "Trail off";
+
   const paletteInputRef = useRef<HTMLInputElement>(null);
   const originalFetchRef = useRef<typeof fetch | undefined>((globalThis as any).fetch);
   const manifestRef = useRef(manifest);
   const activeDraftIdRef = useRef(activeDraftId);
+  const autofillNodePropsRef = useRef<(targetId: string) => void>(() => {});
   const saveTimerRef = useRef<number | null>(null);
   const saveInFlightRef = useRef(false);
   const autoUnlockAttemptRef = useRef(false);
   const lastHealthNotificationRef = useRef<string | null>(null);
   const historySuppressedRef = useRef(false);
+  const lastIntegrityFingerprintRef = useRef<string | null>(null);
+  const previewSurfaceRef = useRef<HTMLDivElement>(null);
   const wizardRegionRef = useRef<HTMLElement>(null);
   const vaultRegionRef = useRef<HTMLElement>(null);
   const wizardWalletRef = useRef<HTMLButtonElement>(null);
@@ -1619,8 +1992,24 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
   }, [manifest]);
 
   useEffect(() => {
+    if (typeof document === "undefined") return;
+    document.documentElement.classList.toggle("catalog-dragging", catalogDragging);
+    return () => {
+      document.documentElement.classList.remove("catalog-dragging");
+    };
+  }, [catalogDragging]);
+
+  useEffect(() => {
     activeDraftIdRef.current = activeDraftId;
   }, [activeDraftId]);
+
+  useEffect(() => {
+    persistLastModuleTx(deployedModuleTx);
+  }, [deployedModuleTx]);
+
+  useEffect(() => {
+    persistLastSpawnSnapshot(lastSpawnSnapshot);
+  }, [lastSpawnSnapshot]);
 
   useEffect(() => {
     if (historySuppressedRef.current) {
@@ -1686,19 +2075,159 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
   );
   const isDirty = useMemo(() => currentManifestSignature !== savedSignature, [currentManifestSignature, savedSignature]);
   const totalNodes = useMemo(() => countNodes(manifest.nodes), [manifest.nodes]);
+  const catalogByType = useMemo(() => {
+    const map = new Map<string, CatalogItem>();
+    seedCatalog.forEach((item) => map.set(item.type, item));
+    catalog.forEach((item) => map.set(item.type, item));
+    return map;
+  }, [catalog]);
   const catalogTypes = useMemo(() => uniqueSorted(catalog.map((item) => item.type)), [catalog]);
   const catalogTags = useMemo(
     () => uniqueSorted(catalog.flatMap((item) => item.tags ?? [])),
     [catalog],
   );
   const visibleCatalog = useMemo(
-    () => catalog.filter((item) => matchesCatalogFilters(item, activeTypes, activeTags)),
-    [activeTags, activeTypes, catalog],
+    () =>
+      catalog.filter(
+        (item) =>
+          matchesCatalogFilters(item, activeTypes, activeTags) &&
+          (quickShape ? blockShapeForType(item.type) === quickShape : true),
+      ),
+    [activeTags, activeTypes, catalog, quickShape],
   );
+  const manifestValidation = useMemo(() => {
+    const byId: Record<string, NodeValidationSummary> = {};
+    const issues: ManifestIssue[] = [];
+
+    const walk = (nodes: ManifestNode[]) => {
+      nodes.forEach((node) => {
+        const catalogItem = catalogByType.get(node.type ?? "");
+        const schema = catalogItem?.propsSchema;
+        const defaults = (mergeDefaults(schema, catalogItem?.defaultProps ?? {}) ?? {}) as ManifestShape;
+        const props = (node.props ?? {}) as ManifestShape;
+        const validation = schema ? validate(schema, props) : { valid: true, issues: [] };
+        const diffEntries = diff(defaults, props);
+        const diffCounts = { added: 0, changed: 0, removed: 0 };
+        diffEntries.forEach((entry) => {
+          diffCounts[entry.kind] += 1;
+        });
+        const missingRequired = validation.issues.filter((issue) => issue.code === "required");
+
+        byId[node.id] = {
+          id: node.id,
+          title: node.title,
+          type: node.type,
+          issues: validation.issues,
+          missingRequired,
+          diffEntries,
+          diffCounts,
+          defaults,
+          hasSchema: Boolean(schema),
+          valid: !schema || validation.valid,
+        };
+
+        validation.issues.forEach((issue) =>
+          issues.push({ nodeId: node.id, nodeTitle: node.title, nodeType: node.type, issue }),
+        );
+
+        if (node.children?.length) {
+          walk(node.children);
+        }
+      });
+    };
+
+    walk(manifest.nodes);
+
+    const requiredIssues = issues.filter((entry) => entry.issue.code === "required");
+
+    return {
+      byId,
+      issues,
+      totalIssues: issues.length,
+      requiredIssues,
+    };
+  }, [catalogByType, manifest.nodes]);
+  const nodeValidationMap = manifestValidation.byId;
+  const manifestIssues = manifestValidation.issues;
+  const manifestIssueCount = manifestValidation.totalIssues;
+  const manifestRequiredIssueCount = manifestValidation.requiredIssues.length;
+  const manifestRequiredIssues = useMemo(
+    () => manifestIssues.filter((entry) => entry.issue.code === "required"),
+    [manifestIssues],
+  );
+  const showIssuesDock = manifestIssueCount > 0;
+  const treeValidation = useMemo(
+    () =>
+      Object.fromEntries(
+        Object.entries(nodeValidationMap).map(([id, summary]) => [
+          id,
+          {
+            issues: summary.issues.length,
+            missingRequired: summary.missingRequired.length,
+            diffCounts: summary.diffCounts,
+            hasSchema: summary.hasSchema,
+          },
+        ]),
+      ),
+    [nodeValidationMap],
+  );
+
+  function autofillNodeProps(targetId: string) {
+    autofillNodePropsRef.current(targetId);
+  }
+
+  useEffect(() => {
+    autofillNodePropsRef.current = (targetId: string) => {
+      const node = findNodeById(manifestRef.current.nodes, targetId);
+      if (!node) {
+        flashStatus("Node not found");
+        return;
+      }
+
+      const catalogItem = catalogByType.get(node.type ?? "");
+      const schema = catalogItem?.propsSchema;
+      const defaultsSeed = catalogItem?.defaultProps ?? {};
+
+      if (!schema) {
+        flashStatus("No schema found for this block");
+        return;
+      }
+
+      const baseline = mergeDefaults(schema, node.props ?? defaultsSeed) ?? {};
+      const hydrated = buildFormValue(schema, baseline) as ManifestShape;
+
+      setManifest((prev) =>
+        touch({
+          ...prev,
+          nodes: updateNodeInTree(prev.nodes, targetId, (entry) => ({ ...entry, props: hydrated })),
+        }),
+      );
+
+      if (selectedNodeId === targetId) {
+        setPropsFormDraft(hydrated as ManifestShape);
+        setPropsDraft(stringifyPropsDraft(hydrated));
+      }
+
+      flashStatus("Defaults filled");
+    };
+  }, [catalogByType, flashStatus, selectedNodeId]);
+
+  const autofillRequiredIssues = useCallback(() => {
+    const unique = new Set(manifestRequiredIssues.map((entry) => entry.nodeId));
+    unique.forEach((id) => autofillNodeProps(id));
+  }, [manifestRequiredIssues]);
   const canUndo = historyState.pointer > 0;
   const canRedo = historyState.pointer < historyState.stack.length - 1;
   const saveStatusLabel = saving ? "Saving…" : isDirty ? "Unsaved changes" : "Draft saved";
   const saveStatusTime = lastSavedAt ? formatTime(lastSavedAt) : "Never saved";
+  const confirmDiscardChanges = useCallback(
+    (reason?: string) => {
+      if (!isDirty) return true;
+      const message = reason ?? "You have unsaved changes. Discard them and continue?";
+      return window.confirm(message);
+    },
+    [isDirty],
+  );
   const pipVaultValidationIssues = useMemo<PipVaultIssue[]>(() => {
     const issues: PipVaultIssue[] = [];
 
@@ -1741,6 +2270,12 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
       : pipVaultTask?.kind === "export" || pipVaultTask?.kind === "import"
         ? "backup"
         : null;
+  const pipVaultProgressValue = pipVaultTask?.progress;
+  const pipVaultProgressLabel = pipVaultTask
+    ? pipVaultTask.progress != null
+      ? `${pipVaultTask.label} (${Math.round(Math.min(100, pipVaultTask.progress))}%)`
+      : pipVaultTask.label
+    : null;
   const latestVaultAudit = useMemo(() => vaultAuditEvents[0] ?? null, [vaultAuditEvents]);
   const readRememberedPassword = useCallback((): string | null => {
     if (typeof window === "undefined") return null;
@@ -1819,6 +2354,14 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
   );
   const hasPropsSchema = Boolean(selectedCatalogItem?.propsSchema);
   const inspectorMode: PropsMode = hasPropsSchema && propsMode === "form" ? "form" : "json";
+  const walletPathValidation = useMemo<WalletFieldValidation>(
+    () => (walletMode === "path" && walletPathInput.trim() ? validateWalletPathInput(walletPathInput) : { ok: true }),
+    [walletMode, walletPathInput],
+  );
+  const walletJwkValidation = useMemo<WalletFieldValidation>(
+    () => (walletMode === "jwk" && walletJwkInput.trim() ? validateWalletJsonInput(walletJwkInput) : { ok: true }),
+    [walletJwkInput, walletMode],
+  );
 
   const effectiveModuleTx = useMemo(
     () =>
@@ -1845,6 +2388,58 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
   const canSpawn = useMemo(
     () => Boolean((manifestTxInput || pip?.manifestTx)?.trim()) && Boolean(effectiveModuleTx),
     [effectiveModuleTx, manifestTxInput, pip?.manifestTx],
+  );
+  const moduleTxValidation = useMemo(
+    () =>
+      validateModuleTxInput(
+        moduleTxInput || deployedModuleTx || getEnv("AO_MODULE_TX") || getEnv("VITE_AO_MODULE_TX") || "",
+        { allowEmpty: true },
+      ),
+    [deployedModuleTx, moduleTxInput],
+  );
+  const schedulerValidation = useMemo(
+    () => validateSchedulerInput(scheduler || getEnv("SCHEDULER") || getEnv("VITE_SCHEDULER") || ""),
+    [scheduler],
+  );
+  const moduleTxInlineError =
+    moduleTxError ?? (!moduleTxValidation.ok && moduleTxInput.trim() ? moduleTxValidation.reason : null);
+  const moduleTxInlineHint = moduleTxInlineError
+    ? null
+    : deployedModuleTx
+      ? `Cached module tx ${abbreviateTx(deployedModuleTx)}`
+      : "Autofills from the latest deploy, or read from env.";
+  const schedulerInlineError =
+    schedulerError ?? (scheduler && !schedulerValidation.ok ? schedulerValidation.reason : null);
+  const schedulerInlineHint = schedulerInlineError
+    ? null
+    : scheduler
+      ? "Looks like a process id"
+      : "Optional. Leave blank to use AO defaults.";
+  const renderTimeline = (
+    label: string,
+    steps: ActionStep[],
+    retryable: boolean,
+    onRetry: () => void,
+  ) => (
+    <div className="ao-timeline">
+      <div className="ao-timeline-head">
+        <span className="eyebrow">{label}</span>
+        {retryable ? (
+          <button className="ghost small" type="button" onClick={onRetry}>
+            Retry
+          </button>
+        ) : null}
+      </div>
+      <div className="ao-timeline-steps">
+        {steps.map((step) => (
+          <div key={step.id} className={`ao-timeline-step ${step.status}`}>
+            <div className="ao-step-label">{step.label}</div>
+            <div className="ao-step-detail">{step.detail ?? "Idle"}</div>
+            {step.at ? <div className="ao-step-time">{formatTimeShort(step.at)}</div> : null}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 
   const aoMiniLogRows = useMemo(() => aoLog.slice(0, 20), [aoLog]);
@@ -1998,9 +2593,13 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
     setHealthLoading(true);
     try {
       const results = await runHealthChecks(undefined, { offline: offlineMode });
-      setHealth((current) => mergeHealthResults(current, results));
+      let mergedResults: HealthStatus[] = [];
+      setHealth((current) => {
+        mergedResults = mergeHealthResults(current, results);
+        return mergedResults;
+      });
 
-      const snapshot = serializeHealthSnapshot(results);
+      const snapshot = serializeHealthSnapshot(mergedResults.length ? mergedResults : results);
       const id = await addHealthEvent(snapshot, HEALTH_HISTORY_STORE_LIMIT);
       setHealthEvents((current) => {
         const next = [snapshotToEvent(snapshot, id), ...current];
@@ -2024,7 +2623,7 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
 
         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
         const filename = `health-history-${stamp}.${format}`;
-        const content = format === "json" ? JSON.stringify(events, null, 2) : healthEventsToCsv(events);
+        const content = format === "json" ? healthEventsToJson(events) : healthEventsToCsv(events);
         const mime = format === "json" ? "application/json" : "text/csv";
         const blob = new Blob([content], { type: mime });
         const url = URL.createObjectURL(blob);
@@ -2105,6 +2704,28 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
     [pipVaultRememberUnlock],
   );
 
+  const runWithVaultProgress = useCallback(
+    async <T,>(kind: PipVaultTaskKind, label: string, task: () => Promise<T>) => {
+      setPipVaultTask({ kind, label, progress: 8 });
+      let current = 8;
+      const timer = window.setInterval(() => {
+        current = Math.min(94, current + 6 + Math.random() * 6);
+        setPipVaultTask((state) => (state?.kind === kind ? { ...state, progress: current } : state));
+      }, 200);
+
+      try {
+        const result = await task();
+        setPipVaultTask((state) => (state?.kind === kind ? { ...state, progress: 100 } : state));
+        await new Promise((resolve) => window.setTimeout(resolve, 180));
+        return result;
+      } finally {
+        window.clearInterval(timer);
+        setPipVaultTask(null);
+      }
+    },
+    [],
+  );
+
   const refreshPipVaultSnapshot = useCallback(async () => {
     const result = await describePipVault();
     if (result.ok) {
@@ -2154,6 +2775,17 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
     if (!element) return;
     element.focus({ preventScroll: true });
     element.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, []);
+
+  const scrollNodeIntoView = useCallback((nodeId: string) => {
+    if (typeof document === "undefined") return;
+    const escape = (globalThis as { CSS?: { escape?: (value: string) => string } }).CSS?.escape;
+    const selector = `[data-node-id=\"${escape ? escape(nodeId) : nodeId}\"]`;
+    const el = document.querySelector<HTMLElement>(selector);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.classList.add("flash-highlight");
+    window.setTimeout(() => el.classList.remove("flash-highlight"), 900);
   }, []);
 
   const focusWizardStep = useCallback(
@@ -2225,6 +2857,55 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
       }
     },
     [refreshVaultAudit],
+  );
+
+  const runVaultIntegrityScan = useCallback(
+    async (reason: "auto" | "manual" = "auto") => {
+      if (vaultIntegrityRunning) return;
+      if (pipVaultSnapshot?.mode === "password" && pipVaultSnapshot.locked) return;
+
+      setVaultIntegrityRunning(true);
+      const startedAt = new Date().toISOString();
+
+      try {
+        const result = await scanPipVaultIntegrity();
+        if (!result.ok) {
+          throw new Error(result.error);
+        }
+
+        await addVaultIntegrityEvent({
+          at: startedAt,
+          scanned: result.scanned,
+          failed: result.failed.length,
+          durationMs: result.durationMs,
+        });
+
+        const latest = await getLastVaultIntegrityEvent();
+        setVaultIntegrity(latest);
+
+        if (result.failed.length > 0) {
+          const sample = result.failed
+            .slice(0, 2)
+            .map((issue) => issue.id)
+            .filter(Boolean)
+            .join(", ");
+          const message = `Vault integrity issues (${result.failed.length})${sample ? `: ${sample}` : ""}`;
+          setPipVaultError(message);
+          flashStatus(message);
+        } else if (reason === "manual") {
+          flashStatus(`Vault integrity OK (${result.scanned} record${result.scanned === 1 ? "" : "s"})`);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Vault integrity scan failed";
+        if (reason === "manual") {
+          flashStatus(message);
+        }
+        setPipVaultError(message);
+      } finally {
+        setVaultIntegrityRunning(false);
+      }
+    },
+    [flashStatus, pipVaultSnapshot, vaultIntegrityRunning],
   );
 
   const refreshDraftHistory = useCallback(async (draftId: number | null) => {
@@ -2315,7 +2996,10 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
   }, [activeDraftId, refreshDraftHistory]);
 
   useEffect(() => {
-    fetchCatalog().then(setCatalog);
+    setCatalogLoading(true);
+    fetchCatalog()
+      .then(setCatalog)
+      .finally(() => setCatalogLoading(false));
     refreshDrafts(true);
   }, []);
 
@@ -2326,6 +3010,23 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
   useEffect(() => {
     void refreshVaultAudit();
   }, [refreshVaultAudit]);
+
+  useEffect(() => {
+    getLastVaultIntegrityEvent()
+      .then((event) => setVaultIntegrity(event))
+      .catch((err) => console.error("Failed to load vault integrity log", err));
+  }, []);
+
+  useEffect(() => {
+    if (!pipVaultSnapshot || pipVaultBusy) return;
+    if (pipVaultSnapshot.mode === "password" && pipVaultSnapshot.locked) return;
+
+    const fingerprint = `${pipVaultSnapshot.updatedAt ?? "none"}:${pipVaultSnapshot.recordCount}:${pipVaultSnapshot.mode}`;
+    if (lastIntegrityFingerprintRef.current === fingerprint) return;
+    lastIntegrityFingerprintRef.current = fingerprint;
+
+    void runVaultIntegrityScan("auto");
+  }, [pipVaultBusy, pipVaultSnapshot, runVaultIntegrityScan]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -2349,6 +3050,18 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
       (globalThis as any).fetch = original;
     };
   }, [offlineMode]);
+
+  useNeonCursorTrail(neonCursorEnabled);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(CURSOR_TRAIL_STORAGE_KEY, cursorTrailPref ? "on" : "off");
+  }, [cursorTrailPref]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    document.documentElement.setAttribute("data-cursor-trail", neonCursorEnabled ? "on" : "off");
+  }, [neonCursorEnabled]);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -2400,8 +3113,8 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
   }, [refreshHealth]);
 
   useEffect(() => {
-    if (healthAutoRefresh === "off") return;
-    const intervalMs = Number(healthAutoRefresh) * 1000;
+    const intervalMs = resolveAutoRefreshIntervalMs(healthAutoRefresh);
+    if (!intervalMs) return;
     const id = window.setInterval(() => {
       void refreshHealth();
     }, intervalMs);
@@ -2540,6 +3253,15 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
     [applySelection],
   );
 
+  const jumpToNode = useCallback(
+    (id: string | null) => {
+      if (!id) return;
+      selectSingleNode(id);
+      scrollNodeIntoView(id);
+    },
+    [scrollNodeIntoView, selectSingleNode],
+  );
+
   useEffect(() => {
     syncSelectionToManifest(manifest);
   }, [manifest.entry, manifest.nodes, syncSelectionToManifest]);
@@ -2666,7 +3388,7 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
     saveTimerRef.current = window.setTimeout(() => {
       saveTimerRef.current = null;
       void persistDraft("autosave");
-    }, 900);
+    }, AUTOSAVE_DEBOUNCE_MS);
 
     return () => {
       if (saveTimerRef.current !== null) {
@@ -2674,7 +3396,7 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
         saveTimerRef.current = null;
       }
     };
-  }, [isDirty, saving]);
+  }, [currentManifestSignature, isDirty, saving]);
 
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -2702,7 +3424,11 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
     }
   };
 
-  const startNewDraft = useCallback((message?: string) => {
+  const startNewDraft = useCallback((message?: string, options?: { force?: boolean }) => {
+    if (!options?.force && !confirmDiscardChanges("Start a new scratch draft? Unsaved changes will be lost.")) {
+      return false;
+    }
+
     const next = newManifest();
     adoptManifest(next, { resetHistory: true });
     setActiveDraftId(null);
@@ -2712,10 +3438,11 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
     if (message) {
       flashStatus(message);
     }
-  }, [adoptManifest, flashStatus]);
+    return true;
+  }, [adoptManifest, confirmDiscardChanges, flashStatus]);
 
   const persistDraft = useCallback(
-    async (mode: "manual" | "autosave" | "duplicate") => {
+    async (mode: DraftSaveMode) => {
       if (saveInFlightRef.current) return null;
 
       const snapshot = manifestRef.current;
@@ -2957,8 +3684,7 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
 
   function handleExportPipVaultRecords() {
     setPipVaultError(null);
-    setPipVaultTask({ kind: "records-export", label: "Exporting vault records…" });
-    try {
+    void runWithVaultProgress("records-export", "Exporting vault records…", async () => {
       const payload = {
         exportedAt: new Date().toISOString(),
         count: pipVaultRecords.length,
@@ -2972,10 +3698,20 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
       link.click();
       URL.revokeObjectURL(url);
       flashStatus(`Exported ${pipVaultRecords.length} record${pipVaultRecords.length === 1 ? "" : "s"}`);
-    } finally {
-      setPipVaultTask(null);
-    }
+    });
   }
+
+  const handleRunIntegrityScan = () => {
+    if (pipVaultLocked) {
+      const message = "Unlock the vault with its password first";
+      setPipVaultStatus(message);
+      setPipVaultError(message);
+      flashStatus(message);
+      return;
+    }
+
+    void runVaultIntegrityScan("manual");
+  };
 
   const handleClearPipVault = async () => {
     if (pipVaultLocked) {
@@ -3238,10 +3974,9 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
   const handleExportVaultBundle = async () => {
     const startedAt = new Date().toISOString();
     setPipVaultError(null);
-    setPipVaultTask({ kind: "export", label: "Exporting vault backup…" });
     setPipVaultBusy(true);
     try {
-      const result = await exportPipVaultBundle();
+      const result = await runWithVaultProgress("export", "Exporting vault backup…", async () => exportPipVaultBundle());
       if (!result.ok) {
         setPipVaultStatus(result.error);
         setPipVaultError(result.error);
@@ -3295,7 +4030,6 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
       });
     } finally {
       setPipVaultBusy(false);
-      setPipVaultTask(null);
     }
   };
 
@@ -3345,10 +4079,11 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
 
       setPipVaultPasswordError(null);
       setPipVaultError(null);
-      setPipVaultTask({ kind: "import", label: "Importing vault backup…" });
       setPipVaultBusy(true);
       try {
-        const result = await importPipVaultBundle(text, effectivePassword);
+        const result = await runWithVaultProgress("import", "Importing vault backup…", async () =>
+          importPipVaultBundle(text, effectivePassword),
+        );
         if (!result.ok) {
           setPipVaultStatus(result.error);
           setPipVaultError(result.error);
@@ -3373,7 +4108,6 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
         flashStatus(message);
       } finally {
         setPipVaultBusy(false);
-        setPipVaultTask(null);
       }
 
       input.value = "";
@@ -3411,6 +4145,34 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
     setWalletJwk(payload.jwk ?? null);
   };
 
+  const resetDeployTimeline = useCallback(
+    (detail?: string | null) =>
+      setDeployTimeline(
+        buildActionTimeline("deploy").map((step, index) => (index === 0 && detail ? { ...step, detail } : step)),
+      ),
+    [],
+  );
+
+  const resetSpawnTimeline = useCallback(
+    (detail?: string | null) =>
+      setSpawnTimeline(
+        buildActionTimeline("spawn").map((step, index) => (index === 0 && detail ? { ...step, detail } : step)),
+      ),
+    [],
+  );
+
+  const markDeployTimeline = useCallback(
+    (id: string, status: ActionStep["status"], detail?: string | null) =>
+      setDeployTimeline((current) => updateTimelineStep(current, id, status, detail)),
+    [],
+  );
+
+  const markSpawnTimeline = useCallback(
+    (id: string, status: ActionStep["status"], detail?: string | null) =>
+      setSpawnTimeline((current) => updateTimelineStep(current, id, status, detail)),
+    [],
+  );
+
   const readWalletForMode = async (): Promise<Record<string, unknown> | string | null> => {
     if (walletMode === "ipc") {
       if (walletJwk) return walletJwk;
@@ -3421,9 +4183,14 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
 
     if (walletMode === "path") {
       const pathValue = walletPathInput.trim();
-      if (!pathValue) {
-        setWalletFieldError("Enter a wallet file path");
+      const pathValidation = validateWalletPathInput(pathValue);
+      if (!pathValidation.ok) {
+        setWalletFieldError(pathValidation.reason);
+        setWalletNote(pathValidation.reason);
         return null;
+      }
+      if (pathValidation.hint) {
+        setWalletNote(pathValidation.hint);
       }
 
       const loaded = await fetchWalletFromPath(pathValue);
@@ -3441,15 +4208,24 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
       return loaded.wallet;
     }
 
+    const jwkValidation = validateWalletJsonInput(walletJwkInput);
+    if (!jwkValidation.ok) {
+      setWalletFieldError(jwkValidation.reason);
+      setWalletNote(jwkValidation.reason);
+      return null;
+    }
+
     const parsed = parseWalletJson(walletJwkInput);
     if (!parsed) {
-      setWalletFieldError("Paste a valid wallet JSON object");
+      const reason = "Wallet JSON could not be parsed";
+      setWalletFieldError(reason);
+      setWalletNote(reason);
       return null;
     }
 
     applyWalletSelection("jwk", {
       jwk: parsed,
-      note: "Using pasted wallet JSON",
+      note: jwkValidation.hint ?? "Using pasted wallet JSON",
     });
     return parsed;
   };
@@ -3572,16 +4348,20 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
   };
 
   const handleDeployModuleClick = async () => {
+    setDeployTransient(false);
     setDeployOutcome(null);
     setDeployStep(null);
     setModuleSourceError(null);
     setWalletFieldError(null);
+    resetDeployTimeline("Prepare deploy");
 
     if (offlineMode) {
       const message = "Offline mode is enabled; deploy is blocked";
       setDeployOutcome(message);
       setDeployState("error");
       setDeployStep(null);
+      setDeployTransient(true);
+      markDeployTimeline("deploy-deploy", "error", message);
       flashStatus(message);
       return;
     }
@@ -3590,25 +4370,33 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
       setModuleSourceError("Add module source before deploying");
       setDeployOutcome("Add module source before deploying");
       setDeployState("error");
+      markDeployTimeline("deploy-deploy", "error", "Add module source before deploying");
       flashStatus("Add module source before deploying");
       return;
     }
 
+    markDeployTimeline("deploy-wallet", "pending", "Validating wallet");
     const walletSource = await readWalletForMode();
     if (!walletSource) {
       setDeployState("error");
+      markDeployTimeline("deploy-wallet", "error", walletFieldError ?? "Wallet required");
       return;
     }
 
-      setDeployState("pending");
-      setDeployStep("Validating wallet");
-      setDeploying(true);
+    setDeployState("pending");
+    setDeployStep("Validating wallet");
+    setDeploying(true);
+    markDeployTimeline("deploy-wallet", "success", walletNote ?? "Wallet ready");
+    markDeployTimeline("deploy-signer", "pending", "Creating signer");
 
     try {
       setDeployStep("Creating signer");
       const { deployModule } = await loadAoDeployModule();
+      markDeployTimeline("deploy-signer", "success", "Signer ready");
+      markDeployTimeline("deploy-deploy", "pending", "Sending module to AO");
       const response = await deployModule(walletSource, moduleSource, [], { offline: offlineMode });
       recordAoLog("deploy", response.txId, response.placeholder ? "Placeholder" : "Success", response.raw ?? response);
+      setDeployTransient(Boolean(response.transient));
 
       if (response.txId) {
         setDeployedModuleTx(response.txId);
@@ -3624,13 +4412,19 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
       if (response.placeholder) {
         flashStatus(response.note ?? "Deploy requires wallet access");
         setDeployState("pending");
+        markDeployTimeline("deploy-deploy", "pending", response.note ?? "Deploy requires wallet access");
       } else {
         setDeployState("success");
         setDeployStep("Completed");
+        markDeployTimeline(
+          "deploy-deploy",
+          "success",
+          response.txId ? `Tx ${abbreviateTx(response.txId)}` : "Deploy dispatched",
+        );
         flashStatus(response.txId ? `Module deployed (${response.txId})` : "Module deploy complete");
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Module deploy failed";
+      const { message, transient } = classifyAoError(err);
       recordAoLog(
         "deploy",
         null,
@@ -3640,74 +4434,104 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
       setDeployOutcome(message);
       setDeployState("error");
       setDeployStep("Failed");
+      setDeployTransient(transient);
+      markDeployTimeline("deploy-deploy", "error", message);
       flashStatus(message);
     } finally {
       setDeploying(false);
     }
   };
 
-  const handleSpawnProcessClick = async () => {
+  const handleSpawnProcessClick = async (override?: { manifestTx?: string; moduleTx?: string; scheduler?: string }) => {
+    setSpawnTransient(false);
     setSpawnOutcome(null);
     setSpawnStep(null);
     setManifestTxError(null);
     setModuleTxError(null);
     setSchedulerError(null);
     setWalletFieldError(null);
+    resetSpawnTimeline("Prepare spawn");
 
     if (offlineMode) {
       const message = "Offline mode is enabled; spawn is blocked";
       setSpawnOutcome(message);
       setSpawnState("error");
       setSpawnStep(null);
+      setSpawnTransient(true);
+      markSpawnTimeline("spawn-spawn", "error", message);
       flashStatus(message);
       return;
     }
 
-    const manifestTx = manifestTxInput.trim() || pip?.manifestTx || "";
-    if (!manifestTx) {
-      setManifestTxError("Provide a manifestTx before spawning");
-      setSpawnOutcome("Provide a manifestTx before spawning");
+    const manifestCandidate = (override?.manifestTx ?? manifestTxInput)?.trim() || pip?.manifestTx || "";
+    const manifestValidation = validateAoId(manifestCandidate, { label: "manifestTx" });
+    if (!manifestValidation.ok) {
+      setManifestTxError(manifestValidation.reason);
+      setSpawnOutcome(manifestValidation.reason);
       setSpawnState("error");
-      flashStatus("Provide a manifestTx before spawning");
+      markSpawnTimeline("spawn-module", "error", manifestValidation.reason);
+      flashStatus(manifestValidation.reason);
       return;
     }
 
-    const moduleTx = effectiveModuleTx;
-    if (!moduleTx) {
-      setModuleTxError("Set AO_MODULE_TX or deploy a module first");
-      setSpawnOutcome("Set AO_MODULE_TX or deploy a module first");
+    const overrideModuleTx = (override?.moduleTx ?? "").trim();
+    const moduleTx = overrideModuleTx || effectiveModuleTx;
+    const moduleValidation = validateModuleTxInput(moduleTx, { allowEmpty: false });
+    if (!moduleValidation.ok) {
+      setModuleTxError(moduleValidation.reason);
+      setSpawnOutcome(moduleValidation.reason);
       setSpawnState("error");
-      flashStatus("Set AO_MODULE_TX or deploy a module first");
+      markSpawnTimeline("spawn-module", "error", moduleValidation.reason);
+      flashStatus(moduleValidation.reason);
+      return;
+    }
+
+    const schedulerCandidate = (override?.scheduler ?? scheduler).trim();
+    const schedulerCheck = validateSchedulerInput(schedulerCandidate || undefined);
+    if (!schedulerCheck.ok) {
+      setSchedulerError(schedulerCheck.reason);
+      setSpawnOutcome(schedulerCheck.reason);
+      setSpawnState("error");
+      markSpawnTimeline("spawn-module", "error", schedulerCheck.reason);
+      flashStatus(schedulerCheck.reason);
       return;
     }
 
     setModuleTxError(null);
+    markSpawnTimeline("spawn-wallet", "pending", "Validating wallet");
 
     const walletSource = await readWalletForMode();
     if (!walletSource) {
       setSpawnState("error");
+      markSpawnTimeline("spawn-wallet", "error", walletFieldError ?? "Wallet required");
       return;
     }
 
     setSpawnState("pending");
     setSpawnStep("Validating wallet");
     setSpawning(true);
+    markSpawnTimeline("spawn-wallet", "success", walletNote ?? "Wallet ready");
+    markSpawnTimeline("spawn-module", "pending", "Creating signer");
 
     try {
       setSpawnStep("Creating signer");
       const { spawnProcess } = await loadAoDeployModule();
+      markSpawnTimeline("spawn-module", "success", "Signer ready");
+      markSpawnTimeline("spawn-spawn", "pending", "Dispatching spawn");
       const response = await spawnProcess(
-        scheduler.trim() || undefined,
-        manifestTx,
-        moduleTx,
+        schedulerCandidate || undefined,
+        manifestValidation.value,
+        moduleValidation.value,
         walletSource,
         { offline: offlineMode },
       );
       recordAoLog("spawn", response.processId, response.placeholder ? "Placeholder" : "Success", response.raw ?? response);
+      setSpawnTransient(Boolean(response.transient));
 
       if (response.moduleTx) {
         setModuleTxInput(response.moduleTx);
         setModuleTxError(null);
+        setDeployedModuleTx(response.moduleTx);
       }
 
       setSpawnOutcome(
@@ -3715,18 +4539,35 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
           (response.processId ? `Spawned process: ${response.processId}` : "Spawn request sent"),
       );
 
+      if (response.processId) {
+        const snapshot: SpawnSnapshot = {
+          processId: response.processId,
+          manifestTx: manifestValidation.value,
+          moduleTx: response.moduleTx ?? moduleValidation.value,
+          scheduler: schedulerCandidate || undefined,
+          time: new Date().toISOString(),
+        };
+        setLastSpawnSnapshot(snapshot);
+      }
+
       if (response.placeholder) {
         flashStatus(response.note ?? "Spawn placeholder");
         setSpawnState("pending");
+        markSpawnTimeline("spawn-spawn", "pending", response.note ?? "Spawn placeholder");
       } else {
         setSpawnState("success");
         setSpawnStep("Completed");
+        markSpawnTimeline(
+          "spawn-spawn",
+          "success",
+          response.processId ? `PID ${abbreviateTx(response.processId)}` : "Spawn dispatched",
+        );
         flashStatus(
           response.processId ? `Spawned process ${response.processId}` : "Spawn request dispatched",
         );
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Spawn failed";
+      const { message, transient } = classifyAoError(err);
       recordAoLog(
         "spawn",
         null,
@@ -3736,16 +4577,49 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
       setSpawnOutcome(message);
       setSpawnState("error");
       setSpawnStep("Failed");
+      setSpawnTransient(transient);
+      markSpawnTimeline("spawn-spawn", "error", message);
       flashStatus(message);
-    } finally {
-      setSpawning(false);
-    }
+  } finally {
+    setSpawning(false);
+  }
+};
+
+  const handleUseCachedModuleTx = () => {
+    if (!deployedModuleTx) return;
+    setModuleTxInput(deployedModuleTx);
+    flashStatus(`Using cached module tx ${abbreviateTx(deployedModuleTx)}`);
+  };
+
+  const handleRespawnLast = () => {
+    if (!lastSpawnSnapshot) return;
+    setManifestTxInput(lastSpawnSnapshot.manifestTx);
+    setModuleTxInput(lastSpawnSnapshot.moduleTx);
+    setScheduler(lastSpawnSnapshot.scheduler ?? "");
+    void handleSpawnProcessClick({
+      manifestTx: lastSpawnSnapshot.manifestTx,
+      moduleTx: lastSpawnSnapshot.moduleTx,
+      scheduler: lastSpawnSnapshot.scheduler,
+    });
+  };
+
+  const handleRetryDeploy = () => {
+    void handleDeployModuleClick();
+  };
+
+  const handleRetrySpawn = () => {
+    void handleSpawnProcessClick();
   };
 
   const handleSearchChange = async (value: string) => {
     setSearch(value);
-    const result = await fetchCatalog(value);
-    setCatalog(result);
+    setCatalogLoading(true);
+    try {
+      const result = await fetchCatalog(value);
+      setCatalog(result);
+    } finally {
+      setCatalogLoading(false);
+    }
   };
 
   const toggleTypeFilter = (type: string) => {
@@ -3827,30 +4701,86 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
     event.dataTransfer.setData("application/x-blackcat-block", item.id);
     event.dataTransfer.setData("text/plain", item.id);
     setDraggedCatalogId(item.id);
-    setTreeDropTargetId(null);
+    setCatalogDragging(true);
+    setDraggedNodeId(null);
+    setTreeDropState(null);
   };
 
   const handleCatalogDragEnd = () => {
     setDraggedCatalogId(null);
+    setCatalogDragging(false);
     setCompositionDropActive(false);
-    setTreeDropTargetId(null);
+    setTreeDropState(null);
   };
+
+  const handleNodeDragStart = (id: string) => {
+    setDraggedNodeId(id);
+    setDraggedCatalogId(null);
+    setTreeDropState(null);
+  };
+
+  const handleNodeDragEnd = () => {
+    setDraggedNodeId(null);
+    setTreeDropState(null);
+    setCompositionDropActive(false);
+  };
+
+  const handleDropTargetChange = (id: string | null, placement: DropPlacement = "inside", mode: TreeDropMode = "catalog") => {
+    if (!id) {
+      setTreeDropState(null);
+      return;
+    }
+    setTreeDropState({ id, placement, mode });
+  };
+
+  const handleMoveNode = useCallback(
+    (sourceId: string, targetId: string | null, placement: DropPlacement) => {
+      const nextNodes = moveNodeWithinTree(manifestRef.current.nodes, sourceId, targetId, placement);
+      setTreeDropState(null);
+      setCompositionDropActive(false);
+      if (nextNodes === manifestRef.current.nodes) {
+        return;
+      }
+      const nextManifest = touch({ ...manifestRef.current, nodes: nextNodes });
+      setManifest(nextManifest);
+      syncSelectionToManifest(nextManifest, selectedNodeIds.length ? selectedNodeIds : [sourceId]);
+      flashStatus("Node moved");
+    },
+    [flashStatus, selectedNodeIds, syncSelectionToManifest],
+  );
 
   const handleCompositionDragOver = (event: React.DragEvent<HTMLElement>) => {
     event.preventDefault();
-    event.dataTransfer.dropEffect = "copy";
+    const types = Array.from(event.dataTransfer.types ?? []);
+    const nodeDrag = types.includes("application/x-darkmesh-node");
+    if (!catalogDragging) {
+      setCatalogDragging(true);
+    }
+    event.dataTransfer.dropEffect = nodeDrag ? "move" : "copy";
     setCompositionDropActive(true);
+    if (nodeDrag) {
+      handleDropTargetChange(null, "inside", "move");
+    }
   };
 
   const handleCompositionDragLeave = (event: React.DragEvent<HTMLElement>) => {
     if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
     setCompositionDropActive(false);
+    setCatalogDragging(false);
+    setTreeDropState(null);
   };
 
   const handleCompositionDrop = (event: React.DragEvent<HTMLElement>) => {
     event.preventDefault();
     setCompositionDropActive(false);
-    setTreeDropTargetId(null);
+    setCatalogDragging(false);
+    setTreeDropState(null);
+    const draggedNode = event.dataTransfer.getData("application/x-darkmesh-node");
+    if (draggedNode) {
+      handleMoveNode(draggedNode, null, "after");
+      setDraggedNodeId(null);
+      return;
+    }
     const itemId =
       event.dataTransfer.getData("application/x-blackcat-block") || event.dataTransfer.getData("text/plain");
     if (!itemId) return;
@@ -3864,15 +4794,71 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
     addFromCatalog(dropped);
   };
 
-  const handleTreeDrop = (targetId: string, itemId: string) => {
-    const dropped = catalog.find((entry) => entry.id === itemId) ?? seedCatalog.find((entry) => entry.id === itemId);
+  const handleTreeDrop = (targetId: string | null, payloadId: string, placement: DropPlacement, mode: TreeDropMode) => {
+    setTreeDropState(null);
+    setCompositionDropActive(false);
+    if (mode === "move") {
+      handleMoveNode(payloadId, targetId, placement);
+      setDraggedNodeId(null);
+      return;
+    }
+
+    const dropped = catalog.find((entry) => entry.id === payloadId) ?? seedCatalog.find((entry) => entry.id === payloadId);
     if (!dropped) {
       flashStatus("Dropped block not found");
       return;
     }
 
-    addChildFromCatalog(targetId, dropped);
+    const node = fromCatalog(dropped);
+    const parentIndex = buildParentIndex(manifestRef.current.nodes);
+    const targetMeta = targetId ? parentIndex.get(targetId) : null;
+    const nextNodes =
+      !targetId || !targetMeta
+        ? placement === "before"
+          ? [node, ...manifestRef.current.nodes]
+          : [...manifestRef.current.nodes, node]
+        : placement === "inside"
+          ? appendNodeToTree(manifestRef.current.nodes, targetId, node)
+          : insertNodeIntoTree(
+              manifestRef.current.nodes,
+              targetMeta.parentId ?? null,
+              node,
+              placement === "before" ? targetMeta.index : targetMeta.index + 1,
+            );
+
+    const nextManifest = touch({
+      ...manifestRef.current,
+      entry: manifestRef.current.entry ?? node.id,
+      nodes: nextNodes,
+    });
+    setManifest(nextManifest);
+    selectSingleNode(node.id);
+    flashStatus(`${dropped.name} added`);
   };
+
+  const handleKeyboardMove = useCallback(
+    (direction: "up" | "down") => {
+      const activeId = selectedNodeId;
+      if (!activeId) {
+        flashStatus("Select a node to move");
+        return;
+      }
+      const parentIndex = buildParentIndex(manifestRef.current.nodes);
+      const meta = parentIndex.get(activeId);
+      if (!meta) return;
+      const siblings =
+        meta.parentId ? findNodeById(manifestRef.current.nodes, meta.parentId)?.children ?? [] : manifestRef.current.nodes;
+      const targetIndex = direction === "up" ? meta.index - 1 : meta.index + 1;
+      const sibling = siblings[targetIndex];
+      if (!sibling) {
+        flashStatus(direction === "up" ? "Already at top" : "Already at bottom");
+        return;
+      }
+      const placement: DropPlacement = direction === "up" ? "before" : "after";
+      handleMoveNode(activeId, sibling.id, placement);
+    },
+    [flashStatus, handleMoveNode, selectedNodeId],
+  );
 
   const handleDeleteSelection = () => {
     if (!selectedNodeIds.length) {
@@ -4013,6 +4999,9 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
       return;
     }
     const id = Number(value);
+    if (!Number.isFinite(id)) return;
+    if (id === activeDraftId) return;
+    if (!confirmDiscardChanges("Load this draft and discard unsaved changes?")) return;
     const draft = await getDraft(id);
     if (draft) {
       adoptManifest(draft.document, { resetHistory: true });
@@ -4037,6 +5026,7 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
   };
 
   const handleRevertToRevision = (revision: DraftRevision) => {
+    if (!confirmDiscardChanges("Revert to this revision and discard unsaved changes?")) return;
     setRevertTargetId(revision.id);
     adoptManifest(revision.document);
     setActiveDraftId(revision.draftId);
@@ -4108,7 +5098,7 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
   };
 
   const handleCherryPick = useCallback(
-    (entry: DraftDiffEntry, action: "add" | "replace" | "remove") => {
+    (entry: DraftDiffEntry, action: "add" | "replace" | "remove", options?: { silent?: boolean }) => {
       let message = "";
       let nextSelected: string | null = primarySelectedId;
 
@@ -4167,7 +5157,7 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
         syncSelectionToManifest(manifestRef.current);
       }
 
-      if (message) {
+      if (message && !options?.silent) {
         flashStatus(message);
       }
     },
@@ -4260,6 +5250,13 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
     [closePalette, flashStatus],
   );
 
+  const themePaletteActions: CommandPaletteAction[] = themePresets.map((preset) => ({
+    id: `theme-${preset.id}`,
+    label: `Theme · ${preset.label}`,
+    description: preset.id === theme ? `${preset.description} · Active` : preset.description,
+    run: () => setTheme(preset.id),
+  }));
+
   const paletteActions: CommandPaletteAction[] = [
     {
       id: "workspace-studio",
@@ -4291,11 +5288,12 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
     },
     {
       id: "toggle-theme",
-      label: "Toggle cyberpunk",
+      label: "Toggle Light / Cyberpunk",
       description: theme === "cyberpunk" ? "Switch back to the light skin." : "Enable the cyberpunk skin.",
       shortcut: "Alt+C",
       run: toggleTheme,
     },
+    ...themePaletteActions,
     {
       id: "toggle-offline",
       label: offlineMode ? "Go online (disable offline)" : "Enable offline / air-gap",
@@ -4372,7 +5370,7 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
       id: "duplicate-draft",
       label: "Duplicate draft",
       description: "Save a copy of the current draft.",
-      shortcut: "Alt+N",
+      shortcut: "Alt+N or Cmd/Ctrl+Shift+D",
       run: () => void handleDuplicateDraft(),
     },
     {
@@ -4468,6 +5466,21 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
       ],
     },
     {
+      title: "Composition",
+      items: [
+        {
+          shortcut: "Alt+Arrow Up/Down",
+          action: "Move node",
+          description: "Reorder the primary selection among its siblings.",
+        },
+        {
+          shortcut: "Drag cards",
+          action: "Reorder / nest",
+          description: "Drag tree cards to move or nest blocks.",
+        },
+      ],
+    },
+    {
       title: "Palette controls",
       items: [
         {
@@ -4523,6 +5536,7 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
         (event.shiftKey && key === "/" && !event.metaKey && !event.ctrlKey && !event.altKey) || key === "?";
       const isUndoShortcut = key === "z" && (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey;
       const isRedoShortcut = key === "z" && (event.metaKey || event.ctrlKey) && event.shiftKey && !event.altKey;
+      const isDuplicateDraftShortcut = key === "d" && (event.metaKey || event.ctrlKey) && event.shiftKey && !event.altKey;
       const target = event.target as HTMLElement | null;
       const targetIsForm =
         target?.tagName === "INPUT" ||
@@ -4537,6 +5551,12 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
         } else {
           handleRedo();
         }
+        return;
+      }
+
+      if (isDuplicateDraftShortcut && !targetIsForm) {
+        event.preventDefault();
+        void handleDuplicateDraft();
         return;
       }
 
@@ -4603,7 +5623,7 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
           id: "duplicate-draft",
           label: "Duplicate draft",
           description: "Save a copy of the current draft.",
-          shortcut: "Alt+N",
+          shortcut: "Alt+N or Cmd/Ctrl+Shift+D",
           run: () => void handleDuplicateDraft(),
         });
         return;
@@ -4659,6 +5679,13 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
           shortcut: "Alt+O",
           run: () => setOfflineMode((current) => !current),
         });
+        return;
+      }
+
+      if (isAltShortcut && (key === "arrowup" || key === "arrowdown")) {
+        if (targetIsForm) return;
+        event.preventDefault();
+        handleKeyboardMove(key === "arrowup" ? "up" : "down");
         return;
       }
 
@@ -4719,6 +5746,7 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
     focusWizardStep,
     focusVaultField,
     focusHealthThreshold,
+    handleKeyboardMove,
   ]);
 
   useEffect(() => {
@@ -4735,11 +5763,13 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
 
   const hasHealthAlert =
     !offlineMode && healthSummary.failing.some((item) => item.status !== "offline");
+  const previewHologramActive = theme === "cyberpunk" && highEffects && workspace === "preview";
+  const hologramActive = previewHologramActive && !prefersReducedMotion;
 
   return (
     <div className="app-shell">
       <HeroCanvas theme={theme} highEffects={highEffects} />
-      <header className="top-bar">
+      <header className={`top-bar ${catalogDragging ? "dragging-block" : ""}`}>
         <div className="brand-area">
           <div className="brand">
             <div className="brand-dot" />
@@ -4753,19 +5783,66 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
               />
             </div>
           </div>
-          <label className="theme-toggle" title="Toggle theme">
+          <div className="theme-picker" title="Select a theme preset">
+            <div className="theme-picker-head">
+              <span className="eyebrow">Theme</span>
+              <span className="theme-picker-current">{getThemeLabel(theme)}</span>
+            </div>
+            <div className="theme-select">
+              <span className="theme-swatch" aria-hidden />
+              <select
+                id="theme-select"
+                value={theme}
+                onChange={(e) => setTheme(resolveTheme(e.target.value))}
+                aria-label="Theme preset"
+              >
+                {themePresets.map((preset) => (
+                  <option key={preset.id} value={preset.id}>
+                    {preset.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <label
+            className={`toggle effects-toggle ${prefersReducedMotion ? "disabled" : ""}`}
+            title={
+              prefersReducedMotion
+                ? "Disabled to respect your reduced-motion preference."
+                : "Toggle high visual effects (WebGL grid, holograms, cursor FX)."
+            }
+          >
             <input
               type="checkbox"
-              checked={theme === "cyberpunk"}
-              onChange={(e) => setTheme(e.target.checked ? "cyberpunk" : "light")}
-              aria-label="Toggle theme"
+              checked={highEffects}
+              onChange={(e) => setHighEffects(e.target.checked)}
+              disabled={prefersReducedMotion}
+              aria-pressed={highEffects}
+              aria-label="Toggle high visual effects"
             />
-            <span className="toggle-rail">
-              <span className="toggle-thumb" />
-            </span>
-            <span className="theme-toggle-label">
-              {theme === "cyberpunk" ? "Cyberpunk" : "Light"} mode
-            </span>
+            <span>{highEffects ? "FX on" : "FX off"}</span>
+          </label>
+          <label
+            className={`toggle cursor-trail-toggle ${prefersReducedMotion ? "disabled" : ""} ${offlineMode || !highEffects ? "paused" : ""}`}
+            title={
+              cursorTrailBlockedReason === "reduced motion"
+                ? "Disabled to respect your reduced-motion preference."
+                : cursorTrailBlockedReason === "offline mode"
+                  ? "Paused while offline / air-gap mode is enabled."
+                  : cursorTrailBlockedReason === "effects off"
+                    ? "High effects are turned off, so the trail is paused."
+                  : "Toggle the neon cursor trail."
+            }
+          >
+            <input
+              type="checkbox"
+              checked={cursorTrailPref && !prefersReducedMotion}
+              onChange={(e) => setCursorTrailPref(e.target.checked)}
+              disabled={prefersReducedMotion}
+              aria-pressed={cursorTrailPref}
+              aria-label="Toggle neon cursor trail"
+            />
+            <span>{cursorTrailLabel}</span>
           </label>
           <label className="toggle offline-toggle" title="Offline / air-gap mode blocks renderer network requests">
             <input
@@ -4851,10 +5928,11 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
                     <select
                       id="health-auto-refresh"
                       value={healthAutoRefresh}
-                      onChange={(e) => setHealthAutoRefresh(e.target.value as "off" | "30" | "60")}
+                      onChange={(e) => setHealthAutoRefresh(e.target.value as HealthAutoRefresh)}
                       aria-label="Health auto refresh cadence"
                     >
                       <option value="off">Off</option>
+                      <option value="10">10s</option>
                       <option value="30">30s</option>
                       <option value="60">60s</option>
                     </select>
@@ -5209,7 +6287,13 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
               <button className="ghost icon-lead" data-icon="⤓" onClick={handleExportManifest}>
                 Export manifest
               </button>
-              <button className="ghost icon-lead" data-icon="⧉" onClick={handleDuplicateDraft} disabled={saving}>
+              <button
+                className="ghost icon-lead"
+                data-icon="⧉"
+                onClick={handleDuplicateDraft}
+                disabled={saving}
+                title="Alt+N or Cmd/Ctrl+Shift+D"
+              >
                 Duplicate draft
               </button>
               <span
@@ -5336,9 +6420,16 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
         {pipVaultTask && (
           <div className="pip-vault-progress" role="status">
             <div className="pip-vault-progress-bar">
-              <span className={`fill ${pipVaultTask.kind}`} />
+              <span
+                className={`fill ${pipVaultTask.kind} ${pipVaultProgressValue != null ? "has-progress" : ""}`}
+                style={
+                  pipVaultProgressValue != null
+                    ? { width: `${Math.min(100, Math.max(6, pipVaultProgressValue))}%` }
+                    : undefined
+                }
+              />
             </div>
-            <div className="pip-vault-progress-label">{pipVaultTask.label}</div>
+            <div className="pip-vault-progress-label">{pipVaultProgressLabel ?? pipVaultTask.label}</div>
           </div>
         )}
         {pipVaultError && (
@@ -5431,6 +6522,20 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
                   {latestVaultAudit?.checksum ? `${latestVaultAudit.checksum.slice(0, 14)}…` : "—"}
                 </strong>
               </div>
+              <div>
+                <span>Size</span>
+                <strong className="mono">{formatBytes(latestVaultAudit?.bytes)}</strong>
+              </div>
+              <div>
+                <span>Integrity</span>
+                <strong className={vaultIntegrity?.failed ? "issue" : "mono"}>
+                  {vaultIntegrity
+                    ? vaultIntegrity.failed
+                      ? `${vaultIntegrity.failed} issue${vaultIntegrity.failed === 1 ? "" : "s"}`
+                      : "OK"
+                    : "Not scanned"}
+                </strong>
+              </div>
             </div>
             <div className="pip-vault-password-row">
               <div className={`pip-vault-password-input ${pipVaultPasswordError ? "has-error" : ""}`}>
@@ -5504,6 +6609,13 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
               </div>
             </div>
             <div className="pip-vault-actions">
+              <button
+                className="ghost"
+                onClick={handleRunIntegrityScan}
+                disabled={pipVaultBusy || pipVaultLocked || vaultIntegrityRunning}
+              >
+                {vaultIntegrityRunning ? "Scanning…" : "Scan integrity"}
+              </button>
               <button className="ghost" onClick={handleImportVaultBundle} disabled={pipVaultBusy}>
                 {pipVaultTask?.kind === "import" ? "Importing…" : "Import backup"}
               </button>
@@ -5797,7 +6909,7 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
               <h3>Blocks</h3>
             </div>
             <span className="pill">
-              {visibleCatalog.length}/{catalog.length}
+              {catalogLoading ? "Loading…" : `${visibleCatalog.length}/${catalog.length}`}
             </span>
           </div>
           <div className="input-wrap">
@@ -5841,53 +6953,101 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
                 onClick={() => {
                   setActiveTypes([]);
                   setActiveTags([]);
+                  setQuickShape(null);
                 }}
               >
                 Clear filters
               </button>
             )}
           </div>
-          <div className="catalog-list">
-            {visibleCatalog.map((item, index) => (
-              <div
-                key={item.id}
-                className={`catalog-item motion-stagger-item ${draggedCatalogId === item.id ? "is-dragging" : ""}`}
-                style={{ "--motion-index": index } as CSSProperties}
-                draggable
-                onDragStart={(event) => handleCatalogDragStart(item, event)}
-                onDragEnd={handleCatalogDragEnd}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    addFromCatalog(item);
-                  }
-                }}
-              >
-                <div>
-                  <BlockPlaceholder type={item.type} />
-                  <div className="item-title">{item.name}</div>
-                  <p className="item-summary">{item.summary}</p>
-                  <div className="tags">
-                    <span className="pill ghost">{item.type}</span>
-                    {item.tags?.map((tag) => (
-                      <span key={tag} className="pill ghost">
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-                <button className="primary small" onClick={() => addFromCatalog(item)} type="button">
-                  Add
+          <div className="quick-gallery">
+            <div className="quick-gallery-head">
+              <span className="filter-label">Quick shapes</span>
+              {quickShape ? (
+                <button className="chip reset small" type="button" onClick={() => setQuickShape(null)}>
+                  Clear shape
                 </button>
+              ) : (
+                <span className="hint">Filter by layout silhouette</span>
+              )}
+            </div>
+            <div className="quick-gallery-grid">
+              {quickShapeFilters.map((shape) => {
+                const active = quickShape === shape.id;
+                return (
+                  <button
+                    key={shape.id}
+                    className={`quick-card ${active ? "active" : ""}`}
+                    type="button"
+                    onClick={() => setQuickShape(active ? null : shape.id)}
+                  >
+                    <BlockPlaceholder type={shape.sampleType} />
+                    <div className="quick-card-meta">
+                      <strong>{shape.label}</strong>
+                      <span>{shape.hint}</span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <div className="catalog-list">
+            {catalogLoading ? (
+              <div className="catalog-skeleton" role="status" aria-live="polite">
+                {quickShapeFilters.slice(0, 3).map((shape, index) => (
+                  <div key={shape.id + index} className="catalog-skeleton-card">
+                    <BlockPlaceholder type={shape.sampleType} />
+                    <div className="catalog-skeleton-text">
+                      <LazySkeletonLine width="68%" />
+                      <LazySkeletonLine width="52%" />
+                    </div>
+                  </div>
+                ))}
               </div>
-            ))}
-            {visibleCatalog.length === 0 && (
-              <div className="empty catalog-empty">
-                <p>No blocks match your filters</p>
-                <span>Try clearing type or tag filters.</span>
-              </div>
+            ) : (
+              <>
+                {visibleCatalog.map((item, index) => (
+                  <div
+                    key={item.id}
+                    className={`catalog-item motion-stagger-item ${draggedCatalogId === item.id ? "is-dragging" : ""}`}
+                    style={{ "--motion-index": index } as CSSProperties}
+                    draggable
+                    onDragStart={(event) => handleCatalogDragStart(item, event)}
+                    onDragEnd={handleCatalogDragEnd}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        addFromCatalog(item);
+                      }
+                    }}
+                  >
+                    <div>
+                      <BlockPlaceholder type={item.type} />
+                      <div className="item-title">{item.name}</div>
+                      <p className="item-summary">{item.summary}</p>
+                      <div className="tags">
+                        <span className="pill ghost">{item.type}</span>
+                        {item.tags?.map((tag) => (
+                          <span key={tag} className="pill ghost">
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    <button className="primary small" onClick={() => addFromCatalog(item)} type="button">
+                      Add
+                    </button>
+                  </div>
+                ))}
+                {visibleCatalog.length === 0 && (
+                  <div className="empty catalog-empty">
+                    <p>No blocks match your filters</p>
+                    <span>Try clearing type, tag, or shape filters.</span>
+                  </div>
+                )}
+              </>
             )}
           </div>
         </aside>
@@ -5978,7 +7138,7 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
               <span className="pill ghost selection-pill">
                 {selectedNodeIds.length ? `${selectedNodeIds.length} selected` : "No selection"}
               </span>
-              <span className="hint">Shift/Ctrl-click in the tree to multi-select. Drag/drop still works.</span>
+              <span className="hint">Shift/Ctrl-click to multi-select. Drag to reorder or press Alt+Arrow to move.</span>
             </div>
             <div className="composition-actions">
               <button className="ghost small icon-lead" data-icon="↺" onClick={handleUndo} disabled={!canUndo} title="Cmd/Ctrl+Z">
@@ -5996,26 +7156,36 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
             </div>
           </div>
           <div
+            ref={previewSurfaceRef}
             className={`preview-surface ${compositionDropActive ? "drop-active" : ""}`}
             onDragOver={handleCompositionDragOver}
             onDragEnter={handleCompositionDragOver}
             onDragLeave={handleCompositionDragLeave}
             onDrop={handleCompositionDrop}
           >
-            {(!manifest.nodes.length || compositionDropActive) && (
-              <div className="composition-dropzone" aria-hidden>
-                <div className="dropzone-copy">
-                  <span className="dropzone-badge">Drop here</span>
-                  <strong>Build the composition by dragging blocks from the catalog.</strong>
-                  <p>Drop a block anywhere in this panel to add it to the manifest.</p>
-                </div>
-                <div className="dropzone-stack">
-                  <BlockPlaceholder type="block.hero" />
-                  <BlockPlaceholder type="block.featureGrid" />
-                  <BlockPlaceholder type="block.gallery" />
-                </div>
-              </div>
+            {hologramActive && (
+              <HologramBlocks
+                active={hologramActive}
+                hostRef={previewSurfaceRef}
+                prefersReducedMotion={prefersReducedMotion}
+              />
             )}
+            <div
+              className={`composition-dropzone ${manifest.nodes.length ? "inline" : ""} ${compositionDropActive ? "active" : ""}`}
+              role="region"
+              aria-label="Drop blocks to add to the composition"
+            >
+              <div className="dropzone-copy">
+                <span className="dropzone-badge">Drop here</span>
+                <strong>Build the composition by dragging blocks from the catalog.</strong>
+                <p>Drop a block anywhere in this panel to add it to the manifest.</p>
+              </div>
+              <div className="dropzone-stack">
+                <BlockPlaceholder type="block.hero" />
+                <BlockPlaceholder type="block.featureGrid" />
+                <BlockPlaceholder type="block.gallery" />
+              </div>
+            </div>
             {manifest.nodes.length > 0 && (
               <Suspense fallback={<ManifestRendererFallback />}>
                 <ManifestRenderer
@@ -6023,10 +7193,14 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
                   selectedIds={selectedNodeIds}
                   primarySelectedId={selectedNodeId}
                   onSelect={(id, meta) => handleSelectNode(id, meta)}
-                  dropTargetId={treeDropTargetId}
-                  onDropTargetChange={setTreeDropTargetId}
-                  onDropCatalogItem={handleTreeDrop}
+                  dropState={treeDropState}
+                  onDropTargetChange={handleDropTargetChange}
+                  onDropItem={handleTreeDrop}
+                  draggedNodeId={draggedNodeId}
+                  onNodeDragStart={handleNodeDragStart}
+                  onNodeDragEnd={handleNodeDragEnd}
                   diffHighlight={draftDiffOpen ? draftDiffHighlight : undefined}
+                  validation={treeValidation}
                 />
               </Suspense>
             )}
@@ -6198,6 +7372,14 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
                 </div>
               </div>
               <div className="props-actions">
+                <button
+                  className="ghost"
+                  onClick={() => selectedNodeId && autofillNodeProps(selectedNodeId)}
+                  type="button"
+                  disabled={!selectedNodeId || !selectedCatalogItem?.propsSchema}
+                >
+                  Fill missing defaults
+                </button>
                 <button className="ghost" onClick={resetPropsToDefaults} type="button">
                   Reset to defaults
                 </button>
@@ -6220,6 +7402,78 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
           </div>
         </aside>
       </div>
+
+      {showIssuesDock && (
+        <div className={`issues-dock ${issuesDockCollapsed ? "collapsed" : ""}`}>
+          <div className="issues-dock-head">
+            <div>
+              <p className="eyebrow">Validation</p>
+              <h4>
+                {manifestIssueCount} issue{manifestIssueCount === 1 ? "" : "s"}
+              </h4>
+              <p className="subtle">
+                {manifestRequiredIssueCount} required · {Math.max(0, manifestIssueCount - manifestRequiredIssueCount)} other
+              </p>
+            </div>
+            <div className="inline-actions">
+              <button className="ghost small" type="button" onClick={() => setIssuesDockCollapsed((state) => !state)}>
+                {issuesDockCollapsed ? "Expand" : "Collapse"}
+              </button>
+              <button
+                className="ghost small"
+                type="button"
+                onClick={autofillRequiredIssues}
+                disabled={!manifestRequiredIssueCount}
+              >
+                Fix required
+              </button>
+            </div>
+          </div>
+          {!issuesDockCollapsed && (
+            <div className="issues-list">
+              {manifestIssues.map((entry) => (
+                <div key={`${entry.nodeId}:${entry.issue.path}:${entry.issue.message}`} className="issue-row">
+                  <div
+                    className="issue-row-main"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => jumpToNode(entry.nodeId)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        jumpToNode(entry.nodeId);
+                      }
+                    }}
+                  >
+                    <div className="issue-node-meta">
+                      <span className="pill ghost">{entry.nodeType ?? "node"}</span>
+                      <strong>{entry.nodeTitle || entry.nodeId}</strong>
+                      <span className="mono subtle">{entry.issue.path || "root"}</span>
+                    </div>
+                    <p className="issue-message">{entry.issue.message}</p>
+                  </div>
+                  {entry.issue.code === "required" ? (
+                    <button
+                      className="ghost small"
+                      type="button"
+                      onClick={() => {
+                        autofillNodeProps(entry.nodeId);
+                        jumpToNode(entry.nodeId);
+                      }}
+                    >
+                      Fill default
+                    </button>
+                  ) : (
+                    <button className="ghost small" type="button" onClick={() => jumpToNode(entry.nodeId)}>
+                      Jump
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <Wizard
         ref={wizardRegionRef}
@@ -6388,7 +7642,17 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
                 IPC picker
               </button>
             </div>
-            {walletFieldError ? <p className="error field-error">{walletFieldError}</p> : <p className="subtle">{walletNote ?? "Choose IPC, path, or pasted JWK."}</p>}
+            {walletFieldError ? (
+              <p className="error field-error">{walletFieldError}</p>
+            ) : (
+              <p className="subtle">
+                {walletMode === "path"
+                  ? walletPathValidation.hint ?? walletNote ?? "Enter a wallet path or pick via IPC."
+                  : walletMode === "jwk"
+                    ? walletJwkValidation.hint ?? walletNote ?? "Paste wallet JSON or pick via IPC."
+                    : walletNote ?? "Choose IPC, path, or pasted JWK."}
+              </p>
+            )}
           </div>
 
           <div className="stack">
@@ -6448,7 +7712,22 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
                 </span>
               )}
             </div>
-            {deployedModuleTx && <p className="subtle mono">Latest module tx: {deployedModuleTx}</p>}
+            <div className="ao-cache-row">
+              <div className="pill ghost mono">
+                {deployedModuleTx ? `Cached module tx: ${abbreviateTx(deployedModuleTx)}` : "No module tx cached yet"}
+              </div>
+              <div className="inline-actions">
+                <button className="ghost small" type="button" onClick={handleUseCachedModuleTx} disabled={!deployedModuleTx}>
+                  Use cached tx
+                </button>
+                {deployState === "error" && deployTransient ? (
+                  <button className="ghost small" type="button" onClick={handleRetryDeploy}>
+                    Retry deploy
+                  </button>
+                ) : null}
+              </div>
+            </div>
+            {renderTimeline("Deploy status", deployTimeline, deployState === "error" && deployTransient, handleRetryDeploy)}
           </div>
 
           <div className="stack">
@@ -6490,7 +7769,11 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
                   setModuleTxError(null);
                 }}
               />
-              {moduleTxError ? <p className="error field-error">{moduleTxError}</p> : <p className="hint">Autofills from the latest deploy, or read from env.</p>}
+              {moduleTxInlineError ? (
+                <p className="error field-error">{moduleTxInlineError}</p>
+              ) : (
+                <p className="hint">{moduleTxInlineHint}</p>
+              )}
             </label>
             <label className="field">
               <span className="label-with-help">
@@ -6505,7 +7788,7 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
                   setSchedulerError(null);
                 }}
               />
-              {schedulerError ? <p className="error field-error">{schedulerError}</p> : <p className="hint">Optional. Leave blank to use AO defaults.</p>}
+              {schedulerInlineError ? <p className="error field-error">{schedulerInlineError}</p> : <p className="hint">{schedulerInlineHint}</p>}
             </label>
             <div className="inline-actions">
               <button
@@ -6530,6 +7813,24 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
                 </span>
               )}
             </div>
+            <div className="ao-cache-row">
+              <div className="pill ghost mono">
+                {lastSpawnSnapshot
+                  ? `Last PID: ${abbreviateTx(lastSpawnSnapshot.processId)}`
+                  : "No recent spawn recorded"}
+              </div>
+              <div className="inline-actions">
+                <button className="ghost small" type="button" onClick={handleRespawnLast} disabled={!lastSpawnSnapshot}>
+                  Respawn last
+                </button>
+                {spawnState === "error" && spawnTransient ? (
+                  <button className="ghost small" type="button" onClick={handleRetrySpawn}>
+                    Retry spawn
+                  </button>
+                ) : null}
+              </div>
+            </div>
+            {renderTimeline("Spawn status", spawnTimeline, spawnState === "error" && spawnTransient, handleRetrySpawn)}
             {!spawnOutcome && deployedModuleTx && (
               <p className="subtle mono">Spawn will use module tx: {deployedModuleTx}</p>
             )}
@@ -6644,6 +7945,7 @@ const [highEffects, setHighEffects] = useState<boolean>(() => {
               onClose={closeDraftDiffPanel}
               onSelectRight={handleSelectDraftDiffOption}
               onCherryPick={handleCherryPick}
+              onStatus={flashStatus}
             />
           </Suspense>
         </ErrorBoundary>

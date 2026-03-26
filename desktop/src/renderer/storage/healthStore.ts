@@ -106,6 +106,7 @@ export const healthEventsToCsv = (events: HealthEvent[]): string => {
     "averageLatencyMs",
     "failing",
     "checks",
+    "lastErrors",
   ];
 
   const rows = events.map((event) => {
@@ -118,6 +119,11 @@ export const healthEventsToCsv = (events: HealthEvent[]): string => {
       "";
 
     const checks = event.checks?.map((check) => `${check.id}:${check.status}`).join(" | ") ?? "";
+    const lastErrors =
+      event.checks
+        ?.map((check) => (check.lastError ? `${check.id}:${check.lastError}` : null))
+        .filter(Boolean)
+        .join(" | ") ?? "";
 
     return [
       event.id,
@@ -131,6 +137,7 @@ export const healthEventsToCsv = (events: HealthEvent[]): string => {
       event.averageLatencyMs ?? "",
       failing,
       checks,
+      lastErrors,
     ]
       .map(csvEscape)
       .join(",");
@@ -138,6 +145,8 @@ export const healthEventsToCsv = (events: HealthEvent[]): string => {
 
   return [headers.join(","), ...rows].join("\n");
 };
+
+export const healthEventsToJson = (events: HealthEvent[]): string => JSON.stringify(events, null, 2);
 
 export async function clearHealthEvents(): Promise<void> {
   await db.events.clear();

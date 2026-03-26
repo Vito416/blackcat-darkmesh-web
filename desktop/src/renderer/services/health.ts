@@ -315,13 +315,14 @@ const ping = async (
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : `${label} request failed`;
+    const latencyMs = Math.round(nowMs() - started);
     return makeError(
       id,
       label,
       url,
       checkedAt,
       isAbortError(err) ? timeoutDetail(timeoutMs) : message,
-      undefined,
+      latencyMs,
       headFailure
         ? `HEAD failed: ${headFailure}; GET failed: ${isAbortError(err) ? timeoutDetail(timeoutMs) : message}`
         : isAbortError(err)

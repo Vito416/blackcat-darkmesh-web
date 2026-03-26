@@ -10,6 +10,7 @@ export type DraftDiffOption = {
 };
 
 type CherryPickAction = "add" | "replace" | "remove";
+type CherryPickOptions = { silent?: boolean };
 
 interface DraftDiffPanelProps {
   open: boolean;
@@ -23,7 +24,7 @@ interface DraftDiffPanelProps {
   rightDetail?: string;
   onClose: () => void;
   onSelectRight: (value: string) => void;
-  onCherryPick: (entry: DraftDiffEntry, action: CherryPickAction) => void;
+  onCherryPick: (entry: DraftDiffEntry, action: CherryPickAction, options?: CherryPickOptions) => void;
   onStatus?: (message: string) => void;
 }
 
@@ -204,6 +205,81 @@ const DraftDiffPanel: React.FC<DraftDiffPanelProps> = ({
     { added: 0, changed: 0, removed: 0 },
   );
 
+  const sections = useMemo(
+    () => {
+      const map = new Map<string, DraftDiffEntry[]>();
+      entries.forEach((entry) => {
+        const key = entry.section || "root";
+        const bucket = map.get(key) ?? [];
+        bucket.push(entry);
+        map.set(key, bucket);
+      });
+
+      return Array.from(map.entries()).map(([name, groupEntries]) => ({
+        name,
+        entries: groupEntries,
+        counts: groupEntries.reduce(
+          (acc, entry) => {
+            acc[entry.kind] += 1;
+            return acc;
+          },
+          { added: 0, changed: 0, removed: 0 },
+        ),
+      }));
+    },
+    [entries],
+  );
+
+  const depthOf = useCallback((entry: DraftDiffEntry) => (entry.path ? entry.path.split(" / ").length : 1), []);
+
+  const applySection = useCallback(
+    (sectionName: string, sectionEntries: DraftDiffEntry[]) => {
+      if (!sectionEntries.length) return;
+
+      const additions = sectionEntries
+        .filter((entry) => entry.kind !== "removed")
+        .sort((a, b) => depthOf(a) - depthOf(b));
+      const removals = sectionEntries
+        .filter((entry) => entry.kind === "removed")
+        .sort((a, b) => depthOf(b) - depthOf(a));
+
+      const ordered = [...additions, ...removals];
+      ordered.forEach((entry) => onCherryPick(entry, getAction(entry.kind), { silent: true }));
+
+      if (onStatus) {
+        onStatus(`Applied ${ordered.length} change${ordered.length === 1 ? "" : "s"} from ${sectionName}`);
+      }
+    },
+    [depthOf, getAction, onCherryPick, onStatus],
+  );
+
+  const handleExportJson = useCallback(() => {
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      left: { label: leftLabel, detail: leftDetail },
+      right: { label: rightLabel ?? "No comparison selected", detail: rightDetail, value: rightValue },
+      counts,
+      sections: sections.map((section) => ({
+        name: section.name,
+        counts: section.counts,
+        entries: section.entries.map((entry) => ({
+          ...entry,
+          before: entry.before ?? null,
+          after: entry.after ?? null,
+        })),
+      })),
+    };
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `draft-diff-${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    onStatus?.("Draft diff exported");
+  }, [counts, leftDetail, leftLabel, rightDetail, rightLabel, rightValue, sections, onStatus]);
+
   const handleAction = (entry: DraftDiffEntry) => {
     const action: CherryPickAction =
       entry.kind === "added" ? "add" : entry.kind === "removed" ? "remove" : "replace";
@@ -230,9 +306,19 @@ const DraftDiffPanel: React.FC<DraftDiffPanelProps> = ({
             <h3>Cherry-pick changes</h3>
             <p className="hint">Compare the in-progress manifest against a saved draft or revision.</p>
           </div>
-          <button className="ghost" type="button" onClick={onClose}>
-            Close
-          </button>
+          <div className="draft-diff-head-actions">
+            <button
+              className="ghost"
+              type="button"
+              onClick={handleExportJson}
+              disabled={loading || !rightValue || entries.length === 0}
+            >
+              Export JSON
+            </button>
+            <button className="ghost" type="button" onClick={onClose}>
+              Close
+            </button>
+          </div>
         </header>
 
         <div className="draft-diff-sources">
@@ -286,60 +372,81 @@ const DraftDiffPanel: React.FC<DraftDiffPanelProps> = ({
               <span>The selected source matches the current manifest.</span>
             </div>
           ) : (
-            <div className="draft-diff-list">
-              {entries.map((entry) => {
-                const action =
-                  entry.kind === "added" ? "add" : entry.kind === "removed" ? "remove" : "replace";
-                const shortcut = getShortcutKey(entry.kind);
-                return (
-                  <article
-                    key={entry.id}
-                    ref={setRowRef(entry.id)}
-                    tabIndex={0}
-                    role="group"
-                    aria-selected={focusedId === entry.id}
-                    aria-keyshortcuts={shortcut.toUpperCase()}
-                    className={`draft-diff-row ${entry.kind} ${focusedId === entry.id ? "is-focused" : ""}`}
-                    onFocus={() => focusEntry(entry.id)}
-                    onClick={() => focusEntry(entry.id)}
-                  >
-                    <div className="draft-diff-row-head">
-                      <div className="diff-row-meta">
-                        <span className={`badge ${entry.kind}`}>{entry.kind}</span>
-                        <strong>{entry.title || "Untitled node"}</strong>
-                        <span className="pill ghost">{entry.type}</span>
-                      </div>
-                      <div className="diff-row-paths">
-                        <span className="mono">{entry.beforePath || entry.afterPath || "root"}</span>
-                        {entry.afterPath && entry.beforePath && entry.afterPath !== entry.beforePath ? (
-                          <span className="pill ghost">Moved</span>
-                        ) : null}
-                      </div>
+            <div className="draft-diff-sections">
+              {sections.map((section) => (
+                <div key={section.name} className="draft-diff-section">
+                  <div className="draft-diff-section-head">
+                    <div className="diff-row-meta">
+                      <span className="badge ghost">{section.name}</span>
+                      <span className="pill ghost">
+                        +{section.counts.added} ~{section.counts.changed} -{section.counts.removed}
+                      </span>
                     </div>
-                    <div className="draft-diff-row-foot">
-                      <div className="diff-id mono">{entry.id}</div>
-                      <div className="diff-row-actions">
-                        <button className="primary small" type="button" onClick={() => handleAction(entry)}>
-                          {actionLabel[action]}
-                        </button>
-                        <span className="key-hint" aria-hidden="true">
-                          <span className="keycap">{shortcut.toUpperCase()}</span>
-                          <span>Shortcut</span>
-                        </span>
-                        {entry.kind === "changed" && (
-                          <span className="pill ghost">
-                            {entry.before && entry.after && JSON.stringify(entry.before.props) !== JSON.stringify(entry.after.props)
-                              ? "Props changed"
-                              : "Node changed"}
-                          </span>
-                        )}
-                        {entry.kind === "removed" && <span className="pill ghost">Only in current draft</span>}
-                        {entry.kind === "added" && <span className="pill ghost">New in comparison</span>}
-                      </div>
-                    </div>
-                  </article>
-                );
-              })}
+                    <button
+                      className="ghost small"
+                      type="button"
+                      onClick={() => applySection(section.name, section.entries)}
+                    >
+                      Apply section
+                    </button>
+                  </div>
+                  <div className="draft-diff-list">
+                    {section.entries.map((entry) => {
+                      const action =
+                        entry.kind === "added" ? "add" : entry.kind === "removed" ? "remove" : "replace";
+                      const shortcut = getShortcutKey(entry.kind);
+                      return (
+                        <article
+                          key={entry.id}
+                          ref={setRowRef(entry.id)}
+                          tabIndex={0}
+                          role="group"
+                          aria-selected={focusedId === entry.id}
+                          aria-keyshortcuts={shortcut.toUpperCase()}
+                          className={`draft-diff-row ${entry.kind} ${focusedId === entry.id ? "is-focused" : ""}`}
+                          onFocus={() => focusEntry(entry.id)}
+                          onClick={() => focusEntry(entry.id)}
+                        >
+                          <div className="draft-diff-row-head">
+                            <div className="diff-row-meta">
+                              <span className={`badge ${entry.kind}`}>{entry.kind}</span>
+                              <strong>{entry.title || "Untitled node"}</strong>
+                              <span className="pill ghost">{entry.type}</span>
+                            </div>
+                            <div className="diff-row-paths">
+                              <span className="mono">{entry.beforePath || entry.afterPath || "root"}</span>
+                              {entry.afterPath && entry.beforePath && entry.afterPath !== entry.beforePath ? (
+                                <span className="pill ghost">Moved</span>
+                              ) : null}
+                            </div>
+                          </div>
+                          <div className="draft-diff-row-foot">
+                            <div className="diff-id mono">{entry.id}</div>
+                            <div className="diff-row-actions">
+                              <button className="primary small" type="button" onClick={() => handleAction(entry)}>
+                                {actionLabel[action]}
+                              </button>
+                              <span className="key-hint" aria-hidden="true">
+                                <span className="keycap">{shortcut.toUpperCase()}</span>
+                                <span>Shortcut</span>
+                              </span>
+                              {entry.kind === "changed" && (
+                                <span className="pill ghost">
+                                  {entry.before && entry.after && JSON.stringify(entry.before.props) !== JSON.stringify(entry.after.props)
+                                    ? "Props changed"
+                                    : "Node changed"}
+                                </span>
+                              )}
+                              {entry.kind === "removed" && <span className="pill ghost">Only in current draft</span>}
+                              {entry.kind === "added" && <span className="pill ghost">New in comparison</span>}
+                            </div>
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </div>

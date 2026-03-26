@@ -29,6 +29,13 @@ type PipVaultExportResult = {
   createdAt: string;
   recordCount: number;
 };
+type PipVaultIntegrityResult = {
+  ok: true;
+  scanned: number;
+  failed: { id: string; error: string }[];
+  durationMs: number;
+  recordCount: number;
+};
 
 const walletApi = {
   readWallet: async (walletPath: string): Promise<WalletResponse> => {
@@ -56,6 +63,8 @@ contextBridge.exposeInMainWorld("pipVault", {
   disablePasswordMode: () => ipcRenderer.invoke("pipVault:disablePassword"),
   exportVault: (): Promise<PipVaultExportResult> => ipcRenderer.invoke("pipVault:export"),
   importVault: (bundle: unknown, password?: string) => ipcRenderer.invoke("pipVault:import", bundle, password),
+  scanIntegrity: (password?: string): Promise<PipVaultIntegrityResult> =>
+    ipcRenderer.invoke("pipVault:scanIntegrity", password),
 });
 
 export {};

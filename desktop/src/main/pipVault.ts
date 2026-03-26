@@ -50,6 +50,11 @@ export interface VaultAuditEvent {
   filename?: string;
 }
 
+export type VaultIntegrityIssue = {
+  id: string;
+  error: string;
+};
+
 export type VaultKeyMode = "safeStorage" | "plain" | "password";
 
 interface VaultEnvelope {
@@ -493,35 +498,70 @@ export async function enableVaultPassword(password: string): Promise<{ ok: true;
   }
 
   const currentEnvelope = await ensureKeyEnvelope();
+  const store = normalizeVaultStore(await readVaultStore());
 
-  // If already password protected, treat this as an unlock/validation without rewriting the vault.
+  // If already password protected, either unlock (when locked) or rotate to the new password (when unlocked).
   if (currentEnvelope.mode === "password") {
-    const masterKey = await loadMasterKeyFromEnvelope(currentEnvelope, trimmed);
-    const store = normalizeVaultStore(await readVaultStore());
+    const hasUnlockedKey = Boolean(cachedMasterKey);
+    const currentMasterKey = hasUnlockedKey
+      ? (cachedMasterKey as Buffer)
+      : await loadMasterKeyFromEnvelope(currentEnvelope, trimmed);
 
-    if (store.records.length) {
-      // Validate password correctness against the first record without mutating disk.
-      try {
-        decrypt(masterKey, store.records[0]);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "Invalid vault password";
-        throw new Error(message === "Unsupported state or unable to authenticate data" ? "Invalid vault password" : message);
+    if (!hasUnlockedKey) {
+      if (store.records.length) {
+        // Validate password correctness against the first record without mutating disk.
+        try {
+          decrypt(currentMasterKey, store.records[0]);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "Invalid vault password";
+          throw new Error(message === "Unsupported state or unable to authenticate data" ? "Invalid vault password" : message);
+        }
       }
+
+      cacheMasterKey(currentMasterKey, currentEnvelope);
+
+      return {
+        ok: true,
+        mode: currentEnvelope.mode,
+        iterations: currentEnvelope.kdf?.iterations ?? KDF_ITERATIONS,
+        salt: currentEnvelope.kdf?.salt ?? "",
+        records: store.records.length,
+      };
     }
 
-    cacheMasterKey(masterKey, currentEnvelope);
+    // Rotate: re-encrypt vault with the new password while the current master key is in memory.
+    const salt = crypto.randomBytes(KDF_SALT_BYTES);
+    const derivedKey = derivePasswordKey(trimmed, salt, KDF_ITERATIONS);
+
+    const rewrappedRecords = store.records.map((record) => {
+      const pip = decrypt(currentMasterKey, record);
+      return encrypt(derivedKey, record.id, pip, record.createdAt, record.updatedAt);
+    });
+
+    const nextEnvelope: KeyEnvelopeV2 = {
+      version: 2,
+      mode: "password",
+      kdf: {
+        salt: encode(salt),
+        iterations: KDF_ITERATIONS,
+        digest: KDF_DIGEST,
+      },
+    };
+
+    await writeVaultStore({ version: 2, records: rewrappedRecords });
+    await writeJsonFile(keyPath(), nextEnvelope);
+    cacheMasterKey(derivedKey, nextEnvelope);
 
     return {
       ok: true,
-      mode: currentEnvelope.mode,
-      iterations: currentEnvelope.kdf?.iterations ?? KDF_ITERATIONS,
-      salt: currentEnvelope.kdf?.salt ?? "",
-      records: store.records.length,
+      mode: nextEnvelope.mode,
+      iterations: nextEnvelope.kdf!.iterations,
+      salt: nextEnvelope.kdf!.salt,
+      records: rewrappedRecords.length,
     };
   }
 
   const { key: currentMasterKey } = await loadMasterKey();
-  const store = normalizeVaultStore(await readVaultStore());
   const salt = crypto.randomBytes(KDF_SALT_BYTES);
   const derivedKey = derivePasswordKey(trimmed, salt, KDF_ITERATIONS);
 
@@ -656,4 +696,41 @@ export async function importPipVault(bundleInput: unknown, password?: string): P
   cacheMasterKey(masterKey, envelope);
 
   return { ok: true, mode: envelope.mode, records: store.records.length };
+}
+
+export async function scanVaultIntegrity(password?: string): Promise<{
+  ok: true;
+  scanned: number;
+  failed: VaultIntegrityIssue[];
+  durationMs: number;
+  recordCount: number;
+}> {
+  const started = Date.now();
+  const store = normalizeVaultStore(await readVaultStore());
+  if (!store.records.length) {
+    return { ok: true, scanned: 0, failed: [], durationMs: Date.now() - started, recordCount: 0 };
+  }
+
+  const { key: masterKey } = await loadMasterKey(password);
+  const failed: VaultIntegrityIssue[] = [];
+
+  for (const record of store.records) {
+    try {
+      decrypt(masterKey, record);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Decryption failed";
+      failed.push({
+        id: record.id,
+        error: message === "Unsupported state or unable to authenticate data" ? "Authentication failed" : message,
+      });
+    }
+  }
+
+  return {
+    ok: true,
+    scanned: store.records.length,
+    failed,
+    durationMs: Date.now() - started,
+    recordCount: store.records.length,
+  };
 }

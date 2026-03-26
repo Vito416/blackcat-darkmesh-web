@@ -13,7 +13,7 @@ type DraftInput =
   | (Omit<ManifestDraft, "updatedAt" | "createdAt"> & Partial<Pick<ManifestDraft, "id" | "createdAt" | "updatedAt">>);
 
 type DraftWriteResult = ManifestDraft;
-export type DraftSaveMode = "autosave" | "manual";
+export type DraftSaveMode = "autosave" | "manual" | "duplicate";
 
 type DraftRow = ManifestDraft & { schemaVersion: number; versionStamp: number };
 
@@ -244,10 +244,13 @@ export async function duplicateDraft(
   draft: Pick<ManifestDraft, "name" | "document">,
 ): Promise<DraftWriteResult> {
   const copyName = draft.name.endsWith(" (copy)") ? `${draft.name} 2` : `${draft.name} (copy)`;
-  return saveDraft({
-    name: copyName,
-    document: draft.document,
-  }, "manual");
+  return saveDraft(
+    {
+      name: copyName,
+      document: draft.document,
+    },
+    "duplicate",
+  );
 }
 
 export async function deleteDraft(id: number): Promise<void> {

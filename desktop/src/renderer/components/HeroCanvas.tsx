@@ -3,8 +3,10 @@ import * as THREE from "three";
 
 type HeroMode = "idle" | "webgl" | "fallback";
 
+type ThemeName = "light" | "cyberpunk" | "night-drive" | "vapor" | "synthwave" | "void";
+
 type HeroCanvasProps = {
-  theme: "light" | "cyberpunk";
+  theme: ThemeName;
   highEffects: boolean;
 };
 

@@ -25,6 +25,8 @@ type Tag = { name: string; value: string };
 
 type WalletSource = Record<string, unknown> | string | undefined;
 
+export const AO_ID_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+
 export type DeployResponse = {
   txId: string | null;
   tags: Tag[];
@@ -32,6 +34,7 @@ export type DeployResponse = {
   raw?: unknown;
   note?: string;
   walletPath?: string;
+  transient?: boolean;
 };
 
 export type SpawnResponse = {
@@ -42,7 +45,84 @@ export type SpawnResponse = {
   note?: string;
   walletPath?: string;
   moduleTx?: string;
+  transient?: boolean;
 };
+
+export type AoIdValidation = { ok: true; value: string } | { ok: false; reason: string } | { ok: true; value: "" };
+
+export type WalletFieldValidation = { ok: true; hint?: string } | { ok: false; reason: string };
+
+const TRANSIENT_ERROR_PATTERNS = [
+  /timeout/i,
+  /temporar/i,
+  /network/i,
+  /fetch failed/i,
+  /ECONN/i,
+  /ENOTFOUND/i,
+  /EAI_AGAIN/i,
+  /connection.*reset/i,
+];
+
+export const isLikelyAoId = (value?: string | null): boolean => AO_ID_PATTERN.test((value ?? "").trim());
+
+export function validateAoId(value?: string | null, options?: { allowEmpty?: boolean; label?: string }): AoIdValidation {
+  const label = options?.label ?? "transaction id";
+  const trimmed = (value ?? "").trim();
+
+  if (!trimmed) {
+    return options?.allowEmpty ? { ok: true, value: "" } : { ok: false, reason: `${label} is required` };
+  }
+
+  if (!AO_ID_PATTERN.test(trimmed)) {
+    return {
+      ok: false,
+      reason: `${label} should look like an Arweave/ao id (43 chars using letters, numbers, '-' or '_')`,
+    };
+  }
+
+  return { ok: true, value: trimmed };
+}
+
+export function validateWalletPathInput(path?: string | null): WalletFieldValidation {
+  const trimmed = (path ?? "").trim();
+  if (!trimmed) return { ok: false, reason: "Enter a wallet file path" };
+
+  if (!trimmed.includes("/")) {
+    return { ok: true, hint: "Relative path detected; absolute path is recommended" };
+  }
+
+  if (!trimmed.toLowerCase().endsWith(".json")) {
+    return { ok: true, hint: "Path does not end with .json; confirm it's a wallet key" };
+  }
+
+  return { ok: true, hint: "Looks like a wallet path" };
+}
+
+export function validateWalletJsonInput(input?: string | Record<string, unknown> | null): WalletFieldValidation {
+  if (!input) return { ok: false, reason: "Paste a wallet JWK JSON" };
+
+  const parsed = typeof input === "string" ? parseWalletJson(input) : input;
+  if (!parsed) return { ok: false, reason: "Wallet JSON must be valid JSON for a JWK" };
+
+  const looksLikeJwk = typeof (parsed as Record<string, unknown>).kty === "string" ||
+    typeof (parsed as Record<string, unknown>).n === "string";
+
+  return looksLikeJwk
+    ? { ok: true, hint: "Parsed wallet JSON" }
+    : { ok: true, hint: "Parsed JSON; ensure it includes JWK fields like kty" };
+}
+
+export const validateModuleTxInput = (value?: string | null, options?: { allowEmpty?: boolean }): AoIdValidation =>
+  validateAoId(value, { allowEmpty: options?.allowEmpty ?? false, label: "Module tx id" });
+
+export const validateSchedulerInput = (value?: string | null): AoIdValidation =>
+  validateAoId(value, { allowEmpty: true, label: "Scheduler process id" });
+
+export function classifyAoError(err: unknown): { message: string; transient: boolean } {
+  const message = err instanceof Error ? err.message : typeof err === "string" ? err : "Unknown error";
+  const transient = TRANSIENT_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+  return { message, transient };
+}
 
 type AoNetworkOptions = {
   offline?: boolean;
@@ -93,6 +173,7 @@ export async function deployModule(
       placeholder: true,
       note: "Offline mode is enabled; deploy is blocked",
       walletPath: wallet.path,
+      transient: true,
     };
   }
 
@@ -103,6 +184,7 @@ export async function deployModule(
       placeholder: true,
       note: wallet.note,
       walletPath: wallet.path,
+      transient: false,
     };
   }
 
@@ -158,6 +240,7 @@ export async function spawnProcess(
       note: "Set AO_MODULE_TX (or VITE_AO_MODULE_TX) before spawning",
       walletPath: wallet.path,
       moduleTx,
+      transient: false,
     };
   }
 
@@ -169,6 +252,7 @@ export async function spawnProcess(
       note: "Offline mode is enabled; spawn is blocked",
       walletPath: wallet.path,
       moduleTx,
+      transient: true,
     };
   }
 
@@ -180,6 +264,7 @@ export async function spawnProcess(
       note: wallet.note,
       walletPath: wallet.path,
       moduleTx,
+      transient: false,
     };
   }
 

@@ -15,9 +15,19 @@ export interface PropsDiffGroups {
   changed: PropsDiffEntry[];
 }
 
+export type PropsValidationCode =
+  | "required"
+  | "type"
+  | "enum"
+  | "minItems"
+  | "maxItems"
+  | "additional"
+  | "expression-empty";
+
 export interface PropsValidationIssue {
   path: string;
   message: string;
+  code?: PropsValidationCode;
 }
 
 export interface PropsValidationResult {
@@ -220,10 +230,18 @@ export const buildFormValue = (schema: PropsSchema | undefined, value: unknown):
 
   if (resolvedType === "array") {
     const source = Array.isArray(value)
-      ? value
+      ? [...value]
       : Array.isArray(schema.default)
-        ? schema.default
+        ? [...schema.default]
         : [];
+
+    const minItems = typeof schema.minItems === "number" ? schema.minItems : 0;
+    if (schema.items && source.length < minItems) {
+      const filler = buildFormValue(schema.items, undefined);
+      for (let i = source.length; i < minItems; i += 1) {
+        source.push(cloneValue(filler));
+      }
+    }
 
     return source.map((entry) => (schema.items ? buildFormValue(schema.items, entry) : cloneValue(entry)));
   }
@@ -243,7 +261,7 @@ export const validate = (schema: PropsSchema | undefined, value: unknown): Props
 
     if (isManifestExpression(currentValue)) {
       if (!currentValue.__expr.trim()) {
-        issues.push({ path, message: `${path || "Expression"} cannot be empty` });
+        issues.push({ path, message: `${path || "Expression"} cannot be empty`, code: "expression-empty" });
       }
       return;
     }
@@ -252,7 +270,7 @@ export const validate = (schema: PropsSchema | undefined, value: unknown): Props
 
     if (resolvedType === "object") {
       if (!isPlainObject(currentValue)) {
-        issues.push({ path, message: `${path || "Props"} must be an object` });
+        issues.push({ path, message: `${path || "Props"} must be an object`, code: "type" });
         return;
       }
 
@@ -264,6 +282,7 @@ export const validate = (schema: PropsSchema | undefined, value: unknown): Props
           issues.push({
             path: joinPath(path, requiredKey),
             message: `${joinPath(path, requiredKey) || requiredKey} is required`,
+            code: "required",
           });
         }
       }
@@ -276,6 +295,7 @@ export const validate = (schema: PropsSchema | undefined, value: unknown): Props
             issues.push({
               path: joinPath(path, key),
               message: `${joinPath(path, key)} is not allowed`,
+              code: "additional",
             });
           } else if (isPlainObject(currentSchema.additionalProperties)) {
             walk(currentSchema.additionalProperties, childValue, joinPath(path, key));
@@ -291,7 +311,7 @@ export const validate = (schema: PropsSchema | undefined, value: unknown): Props
 
     if (resolvedType === "array") {
       if (!Array.isArray(currentValue)) {
-        issues.push({ path, message: `${path || "Props"} must be an array` });
+        issues.push({ path, message: `${path || "Props"} must be an array`, code: "type" });
         return;
       }
 
@@ -299,6 +319,7 @@ export const validate = (schema: PropsSchema | undefined, value: unknown): Props
         issues.push({
           path,
           message: `${path || "Props"} needs at least ${currentSchema.minItems} item${currentSchema.minItems === 1 ? "" : "s"}`,
+          code: "minItems",
         });
       }
 
@@ -306,6 +327,7 @@ export const validate = (schema: PropsSchema | undefined, value: unknown): Props
         issues.push({
           path,
           message: `${path || "Props"} can have at most ${currentSchema.maxItems} item${currentSchema.maxItems === 1 ? "" : "s"}`,
+          code: "maxItems",
         });
       }
 
@@ -319,22 +341,22 @@ export const validate = (schema: PropsSchema | undefined, value: unknown): Props
 
     if (resolvedType === "string") {
       if (typeof currentValue !== "string") {
-        issues.push({ path, message: `${path || "Props"} must be a string` });
+        issues.push({ path, message: `${path || "Props"} must be a string`, code: "type" });
         return;
       }
     } else if (resolvedType === "number") {
       if (typeof currentValue !== "number" || Number.isNaN(currentValue) || !Number.isFinite(currentValue)) {
-        issues.push({ path, message: `${path || "Props"} must be a number` });
+        issues.push({ path, message: `${path || "Props"} must be a number`, code: "type" });
         return;
       }
     } else if (resolvedType === "boolean") {
       if (typeof currentValue !== "boolean") {
-        issues.push({ path, message: `${path || "Props"} must be a boolean` });
+        issues.push({ path, message: `${path || "Props"} must be a boolean`, code: "type" });
         return;
       }
     } else if (resolvedType === "null") {
       if (currentValue !== null) {
-        issues.push({ path, message: `${path || "Props"} must be null` });
+        issues.push({ path, message: `${path || "Props"} must be null`, code: "type" });
         return;
       }
     }
@@ -345,6 +367,7 @@ export const validate = (schema: PropsSchema | undefined, value: unknown): Props
         issues.push({
           path,
           message: `${path || "Props"} must match one of the allowed values`,
+          code: "enum",
         });
       }
     }

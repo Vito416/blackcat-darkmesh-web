@@ -10,6 +10,7 @@ import {
   enableVaultPassword,
   exportPipVault,
   importPipVault,
+  scanVaultIntegrity,
   listPipVaultRecords,
   readPipVault,
   readPipVaultRecord,
@@ -160,6 +161,11 @@ app.whenReady().then(() => {
   ipcMain.handle("pipVault:import", async (_event, bundle: unknown, password?: unknown) => {
     const pwd = typeof password === "string" ? password : undefined;
     return importPipVault(bundle, pwd);
+  });
+
+  ipcMain.handle("pipVault:scanIntegrity", async (_event, password?: unknown) => {
+    const pwd = typeof password === "string" ? password : undefined;
+    return scanVaultIntegrity(pwd);
   });
 
   ipcMain.handle("wallet:read", async (_event, walletPath: unknown) => {

@@ -55,8 +55,18 @@ declare global {
         password: string,
       ) => Promise<{ ok: true; mode: "safeStorage" | "plain" | "password"; iterations?: number; salt?: string; records?: number }>;
       disablePasswordMode: () => Promise<{ ok: true; mode: "safeStorage" | "plain" | "password" }>;
-      exportVault: () => Promise<{ ok: true; bundle: string }>;
+      exportVault: () => Promise<{
+        ok: true;
+        bundle: string;
+        checksum: string;
+        bytes: number;
+        createdAt: string;
+        recordCount: number;
+      }>;
       importVault: (bundle: unknown, password?: string) => Promise<{ ok: true; mode: string; records: number }>;
+      scanIntegrity: (
+        password?: string,
+      ) => Promise<{ ok: true; scanned: number; failed: { id: string; error: string }[]; durationMs: number; recordCount: number }>;
     };
   }
 }

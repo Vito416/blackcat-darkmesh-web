@@ -8,6 +8,8 @@ export interface DraftDiffEntry {
   type: string;
   kind: DraftDiffKind;
   parentId: string | null;
+  path: string;
+  section: string;
   before?: ManifestNode;
   after?: ManifestNode;
   beforePath?: string;
@@ -117,6 +119,10 @@ export const diffManifests = (
   ids.forEach((id) => {
     const before = leftIndex.get(id);
     const after = rightIndex.get(id);
+    const beforePath = before ? leftPathFor(id) : undefined;
+    const afterPath = after ? rightPathFor(id) : undefined;
+    const path = afterPath ?? beforePath ?? "root";
+    const section = (path.split(" / ")[0] || "root").trim();
 
     if (before && !after) {
       entries.push({
@@ -125,8 +131,10 @@ export const diffManifests = (
         type: before.node.type,
         kind: "removed",
         parentId: before.parentId,
+        path,
+        section,
         before: before.node,
-        beforePath: leftPathFor(id),
+        beforePath,
         beforeIndex: before.index,
       });
       return;
@@ -139,8 +147,10 @@ export const diffManifests = (
         type: after.node.type,
         kind: "added",
         parentId: after.parentId,
+        path,
+        section,
         after: after.node,
-        afterPath: rightPathFor(id),
+        afterPath,
         afterIndex: after.index,
       });
       return;
@@ -159,10 +169,12 @@ export const diffManifests = (
         type: after.node.type || before.node.type,
         kind: "changed",
         parentId: after.parentId,
+        path,
+        section,
         before: before.node,
         after: after.node,
-        beforePath: leftPathFor(id),
-        afterPath: rightPathFor(id),
+        beforePath,
+        afterPath,
         beforeIndex: before.index,
         afterIndex: after.index,
       });
@@ -173,9 +185,7 @@ export const diffManifests = (
   entries.sort((a, b) => {
     const kindDelta = sortOrder.indexOf(a.kind) - sortOrder.indexOf(b.kind);
     if (kindDelta !== 0) return kindDelta;
-    return (a.afterPath || a.beforePath || a.title || a.id).localeCompare(
-      b.afterPath || b.beforePath || b.title || b.id,
-    );
+    return (a.path || a.title || a.id).localeCompare(b.path || b.title || b.id);
   });
 
   const highlight: Record<string, DraftDiffKind> = {};

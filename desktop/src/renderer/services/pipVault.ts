@@ -41,6 +41,12 @@ export type PipVaultExportSuccess = {
 
 export type PipVaultExportResult = PipVaultExportSuccess | { ok: false; error: string };
 
+export type PipVaultIntegrityIssue = { id: string; error: string };
+
+export type PipVaultIntegrityResult =
+  | { ok: true; scanned: number; failed: PipVaultIntegrityIssue[]; durationMs: number; recordCount: number }
+  | { ok: false; error: string };
+
 const bridge = (): PipVaultBridge | undefined => {
   if (typeof window === "undefined") return undefined;
   return window.pipVault;
@@ -248,6 +254,23 @@ export async function importPipVaultBundle(
     return {
       ok: false,
       error: err instanceof Error ? err.message : "Unable to import PIP vault",
+    };
+  }
+}
+
+export async function scanPipVaultIntegrity(password?: string): Promise<PipVaultIntegrityResult> {
+  const api = bridge();
+  if (!api?.scanIntegrity) {
+    return { ok: false, error: "PIP vault IPC bridge is unavailable" };
+  }
+
+  try {
+    const result = await api.scanIntegrity(password);
+    return result as PipVaultIntegrityResult;
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Unable to scan PIP vault",
     };
   }
 }
