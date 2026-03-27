@@ -19,12 +19,13 @@ test.describe("AO deploy flows", () => {
 
     await page.getByTestId("ao-dry-run-toggle").check();
     await page.getByTestId("ao-deploy-btn").click();
-    await expect(page.getByTestId("ao-deploy-status")).toContainText(/dry-run|mock gateway/i);
+    await expect(page.getByTestId("ao-deploy-status")).toContainText(/dry-run|mock gateway|simulation/i);
     await expect(page.locator(".ao-mini-log-table tbody tr").first()).toContainText("deploy");
 
     await page.getByTestId("ao-dry-run-toggle").uncheck();
     await page.getByTestId("ao-deploy-btn").click();
-    await expect(page.getByTestId("ao-deploy-status")).toContainText(/deploy mock complete|module deployed/i);
+    await expect(page.getByTestId("ao-deploy-status")).toContainText(/deploy mock complete|module deployed|deploy request/i);
+    await expect(page.getByTestId("ao-deploy-status")).toHaveClass(/success/);
     await expect(page.getByTestId("ao-module-tx-input")).not.toHaveValue("");
     await expect(page.locator(".ao-mini-log-table tbody tr").first()).toContainText(/Success/i);
   });

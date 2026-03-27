@@ -18,8 +18,19 @@ const TRANSIENT_ERROR_PATTERNS = [
 
 export const isLikelyAoId = (value?: string | null): boolean => AO_ID_PATTERN.test((value ?? "").trim());
 
-export function validateAoId(value?: string | null, options?: { allowEmpty?: boolean; label?: string }): AoIdValidation {
-  const label = options?.label ?? "transaction id";
+export const normalizeEnvValue = (value?: string | null): string | undefined => {
+  const trimmed = (value ?? "").trim();
+  return trimmed || undefined;
+};
+
+const formatLabel = (label: string, sourceLabel?: string): string =>
+  sourceLabel ? `${label} (${sourceLabel})` : label;
+
+export function validateAoId(
+  value?: string | null,
+  options?: { allowEmpty?: boolean; label?: string; sourceLabel?: string },
+): AoIdValidation {
+  const label = formatLabel(options?.label ?? "transaction id", options?.sourceLabel);
   const trimmed = (value ?? "").trim();
 
   if (!trimmed) {
@@ -65,15 +76,26 @@ export function validateWalletJsonInput(input?: string | Record<string, unknown>
     : { ok: true, hint: "Parsed JSON; ensure it includes JWK fields like kty" };
 }
 
-export const validateModuleTxInput = (value?: string | null, options?: { allowEmpty?: boolean }): AoIdValidation =>
-  validateAoId(value, { allowEmpty: options?.allowEmpty ?? false, label: "Module tx id" });
+export const validateModuleTxInput = (
+  value?: string | null,
+  options?: { allowEmpty?: boolean; sourceLabel?: string },
+): AoIdValidation =>
+  validateAoId(value, { allowEmpty: options?.allowEmpty ?? false, label: "Module tx id", sourceLabel: options?.sourceLabel });
 
-export const validateSchedulerInput = (value?: string | null): AoIdValidation =>
-  validateAoId(value, { allowEmpty: true, label: "Scheduler process id" });
+export const validateSchedulerInput = (
+  value?: string | null,
+  options?: { allowEmpty?: boolean; sourceLabel?: string },
+): AoIdValidation =>
+  validateAoId(value, { allowEmpty: options?.allowEmpty ?? true, label: "Scheduler process id", sourceLabel: options?.sourceLabel });
+
+export const validateManifestTxInput = (
+  value?: string | null,
+  options?: { allowEmpty?: boolean; sourceLabel?: string },
+): AoIdValidation =>
+  validateAoId(value, { allowEmpty: options?.allowEmpty ?? false, label: "manifestTx", sourceLabel: options?.sourceLabel });
 
 export function classifyAoError(err: unknown): { message: string; transient: boolean } {
   const message = err instanceof Error ? err.message : typeof err === "string" ? err : "Unknown error";
   const transient = TRANSIENT_ERROR_PATTERNS.some((pattern) => pattern.test(message));
   return { message, transient };
 }
-

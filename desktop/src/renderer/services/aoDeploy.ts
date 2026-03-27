@@ -1,15 +1,23 @@
 import type { ManifestDocument } from "../types/manifest";
 import { fetchWalletFromPath, parseWalletJson } from "./wallet";
 import { resolveEnvWithSettings } from "../storage/settings";
+import {
+  normalizeEnvValue,
+  validateManifestTxInput,
+  validateModuleTxInput,
+  validateSchedulerInput,
+} from "./aoValidation";
 export {
   AO_ID_PATTERN,
   classifyAoError,
   isLikelyAoId,
   validateAoId,
+  validateManifestTxInput,
   validateModuleTxInput,
   validateSchedulerInput,
   validateWalletJsonInput,
   validateWalletPathInput,
+  normalizeEnvValue,
   type AoIdValidation,
   type WalletFieldValidation,
 } from "./aoValidation";
@@ -61,6 +69,26 @@ export type SpawnResponse = {
 
 type AoNetworkOptions = {
   offline?: boolean;
+};
+
+type EnvCandidate = { value?: string; source?: string; providedEmpty?: boolean };
+
+const pickEnvValue = (...keys: string[]): EnvCandidate => {
+  const empties: string[] = [];
+
+  for (const key of keys) {
+    const raw = getEnv(key);
+    if (raw === undefined) continue;
+
+    const normalized = normalizeEnvValue(raw);
+    if (normalized) {
+      return { value: normalized, source: key };
+    }
+
+    empties.push(key);
+  }
+
+  return empties.length ? { value: undefined, source: empties[0], providedEmpty: true } : {};
 };
 
 const baseConnect = async () => {
@@ -185,24 +213,79 @@ export async function spawnProcess(
   options?: AoNetworkOptions,
 ): Promise<SpawnResponse> {
   const wallet = await resolveWallet(walletOrPath);
-  const moduleTx = moduleOverride?.trim() ?? getEnv("AO_MODULE_TX") ?? getEnv("VITE_AO_MODULE_TX");
+  const envModuleTx = pickEnvValue("AO_MODULE_TX", "VITE_AO_MODULE_TX");
+  const moduleOverrideTrimmed = normalizeEnvValue(moduleOverride);
+  const moduleTxCandidate = moduleOverrideTrimmed ?? envModuleTx.value;
+  const moduleTxValidation = validateModuleTxInput(moduleTxCandidate, {
+    allowEmpty: false,
+    sourceLabel: moduleOverrideTrimmed ? undefined : envModuleTx.source ? `env ${envModuleTx.source}` : undefined,
+  });
+
+  const manifestCandidate = normalizeEnvValue(manifestTx);
+  const manifestValidation = validateManifestTxInput(manifestCandidate, { allowEmpty: false });
+
+  const envScheduler = pickEnvValue("SCHEDULER", "VITE_SCHEDULER");
+  const schedulerInput = normalizeEnvValue(scheduler);
+  const schedulerCandidate = schedulerInput ?? envScheduler.value;
+  const schedulerValidation = validateSchedulerInput(schedulerCandidate ?? "", {
+    allowEmpty: true,
+    sourceLabel:
+      !schedulerInput && schedulerCandidate && envScheduler.source ? `env ${envScheduler.source}` : undefined,
+  });
+
   const mergedTags = mergeTags(
     [
       { name: "Type", value: "Process" },
       { name: "Data-Protocol", value: "ao" },
     ],
     [
-      ...(scheduler ? [{ name: "Scheduler", value: scheduler }] : []),
-      ...(manifestTx ? [{ name: "Manifest", value: manifestTx }] : []),
+      ...(schedulerValidation.ok && schedulerValidation.value
+        ? [{ name: "Scheduler", value: schedulerValidation.value }]
+        : []),
+      ...(manifestValidation.ok && manifestValidation.value ? [{ name: "Manifest", value: manifestValidation.value }] : []),
     ],
   );
 
-  if (!moduleTx) {
+  if (!moduleTxValidation.ok) {
+    const reason = !moduleTxCandidate
+      ? envModuleTx.source
+        ? `${moduleTxValidation.reason}; set ${envModuleTx.source} or pass a module tx`
+        : `${moduleTxValidation.reason}; set AO_MODULE_TX or provide a module tx`
+      : envModuleTx.providedEmpty
+        ? `${moduleTxValidation.reason}; ${envModuleTx.source} is set but empty`
+        : moduleTxValidation.reason;
+
     return {
       processId: null,
       tags: mergedTags,
       placeholder: true,
-      note: "Set AO_MODULE_TX (or VITE_AO_MODULE_TX) before spawning",
+      note: reason,
+      walletPath: wallet.path,
+      moduleTx: moduleTxCandidate ?? undefined,
+      transient: false,
+    };
+  }
+
+  const moduleTx = moduleTxValidation.value;
+
+  if (!manifestValidation.ok) {
+    return {
+      processId: null,
+      tags: mergedTags,
+      placeholder: true,
+      note: manifestValidation.reason,
+      walletPath: wallet.path,
+      moduleTx,
+      transient: false,
+    };
+  }
+
+  if (!schedulerValidation.ok) {
+    return {
+      processId: null,
+      tags: mergedTags,
+      placeholder: true,
+      note: schedulerValidation.reason,
       walletPath: wallet.path,
       moduleTx,
       transient: false,
@@ -244,7 +327,7 @@ export async function spawnProcess(
 
   const raw = await spawn({
     module: moduleTx,
-    scheduler,
+    scheduler: schedulerValidation.value || undefined,
     signer,
     tags: mergedTags,
   });
