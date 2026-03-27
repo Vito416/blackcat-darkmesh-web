@@ -28,8 +28,16 @@
   --glass-border-strong: rgba(14, 165, 233, 0.16);
   --glass-glow: 0 16px 40px rgba(15, 23, 42, 0.08);
   --neon-gradient: linear-gradient(120deg, rgba(var(--accent-rgb), 0.8), rgba(var(--accent-strong-rgb), 0.8));
+  --glass-blur: 14px;
+  --glass-saturation: 160%;
   --focus-glow: 0 0 0 2px rgba(var(--accent-rgb), 0.35), 0 0 0 5px rgba(var(--accent-rgb), 0.2);
+  --focus-glow-strong: 0 0 0 2px rgba(var(--accent-rgb), 0.45), 0 0 0 8px rgba(var(--accent-rgb), 0.18), 0 18px 40px rgba(var(--accent-rgb), 0.18);
   --hover-glow: 0 12px 28px rgba(var(--accent-rgb), 0.16);
+  --glass-sheen: linear-gradient(135deg, rgba(255, 255, 255, 0.5) 0%, rgba(14, 165, 233, 0.12) 42%, rgba(34, 197, 94, 0.12) 100%);
+  --holo-grid: repeating-linear-gradient(90deg, rgba(var(--accent-rgb), 0.12) 0 1px, transparent 1px 26px),
+    repeating-linear-gradient(0deg, rgba(var(--accent-strong-rgb), 0.08) 0 1px, transparent 1px 22px),
+    radial-gradient(120% 80% at 18% 22%, rgba(var(--accent-rgb), 0.16), transparent 46%),
+    radial-gradient(100% 80% at 82% 12%, rgba(var(--accent-strong-rgb), 0.14), transparent 42%);
 
   --shadow-soft: 0 22px 60px rgba(15, 23, 42, 0.12);
   --shadow-card: 0 12px 32px rgba(15, 23, 42, 0.1);
@@ -120,73 +128,100 @@
   --page-noise-strength: 0.1;
 }
 
-:root[data-theme="cyberpunk"] {
-  --bg: #040815;
-  --bg-soft: #0a1228;
-  --surface: rgba(10, 16, 34, 0.9);
-  --surface-muted: rgba(8, 14, 30, 0.78);
-  --ink-strong: #e8f6ff;
-  --ink-muted: #9bb7e6;
-  --ink-soft: #7b90c2;
+:root[data-theme=\"cyberpunk\"] {
+  --bg: #030814;
+  --bg-soft: #071225;
+  --surface: rgba(8, 14, 28, 0.9);
+  --surface-muted: rgba(6, 10, 24, 0.82);
+  --ink-strong: #e7f6ff;
+  --ink-muted: #9fc0ff;
+  --ink-soft: #7b91c7;
 
-  --accent: #00eaff;
-  --accent-strong: #ff2ddf;
-  --accent-rgb: 0, 234, 255;
-  --accent-strong-rgb: 255, 45, 223;
+  --accent: #2ff5ff;
+  --accent-strong: #ff45e6;
+  --accent-rgb: 47, 245, 255;
+  --accent-strong-rgb: 255, 69, 230;
   --warn: #ffb347;
   --warn-rgb: 255, 179, 71;
-  --border: rgba(0, 234, 255, 0.24);
-  --border-strong: rgba(255, 45, 223, 0.22);
+  --border: rgba(47, 245, 255, 0.28);
+  --border-strong: rgba(255, 69, 230, 0.24);
 
-  --glass-bg: rgba(10, 16, 34, 0.78);
-  --glass-bg-strong: rgba(8, 14, 30, 0.82);
-  --glass-border: rgba(0, 234, 255, 0.28);
-  --glass-border-strong: rgba(255, 45, 223, 0.24);
-  --glass-glow: 0 22px 54px rgba(0, 0, 0, 0.6), 0 0 28px rgba(0, 234, 255, 0.2);
-  --neon-gradient: linear-gradient(125deg, #00eaff 0%, #ff2ddf 100%);
-  --focus-glow: 0 0 0 1px rgba(0, 234, 255, 0.5), 0 0 0 6px rgba(255, 45, 223, 0.22), 0 0 26px rgba(0, 234, 255, 0.32);
-  --hover-glow: 0 14px 36px rgba(0, 234, 255, 0.22), 0 0 18px rgba(255, 45, 223, 0.16);
+  --glass-bg: rgba(6, 10, 20, 0.82);
+  --glass-bg-strong: rgba(4, 8, 18, 0.88);
+  --glass-border: rgba(47, 245, 255, 0.32);
+  --glass-border-strong: rgba(255, 69, 230, 0.26);
+  --glass-glow: 0 22px 56px rgba(0, 0, 0, 0.66), 0 0 36px rgba(47, 245, 255, 0.25), 0 0 22px rgba(255, 69, 230, 0.18);
+  --neon-gradient: linear-gradient(132deg, #2ff5ff 0%, #6fd8ff 34%, #ff45e6 100%);
+  --focus-glow: 0 0 0 1px rgba(47, 245, 255, 0.55), 0 0 0 7px rgba(255, 69, 230, 0.25), 0 0 36px rgba(47, 245, 255, 0.32);
+  --focus-glow-strong: 0 0 0 1px rgba(47, 245, 255, 0.6), 0 0 0 9px rgba(255, 69, 230, 0.28), 0 18px 48px rgba(47, 245, 255, 0.28);
+  --hover-glow: 0 14px 36px rgba(47, 245, 255, 0.22), 0 0 20px rgba(255, 69, 230, 0.16);
+  --glass-sheen: linear-gradient(125deg, rgba(47, 245, 255, 0.18), rgba(255, 69, 230, 0.12), rgba(47, 245, 255, 0.2));
+  --holo-grid: repeating-linear-gradient(90deg, rgba(47, 245, 255, 0.18) 0 1px, transparent 1px 20px),
+    repeating-linear-gradient(0deg, rgba(255, 69, 230, 0.16) 0 1px, transparent 1px 18px),
+    radial-gradient(140% 90% at 16% 18%, rgba(47, 245, 255, 0.2), transparent 42%),
+    radial-gradient(120% 80% at 82% 12%, rgba(255, 69, 230, 0.16), transparent 44%);
 
-  --shadow-soft: 0 30px 78px rgba(0, 0, 0, 0.65);
-  --shadow-card: 0 18px 46px rgba(0, 0, 0, 0.55);
+  --shadow-soft: 0 30px 82px rgba(0, 0, 0, 0.68);
+  --shadow-card: 0 18px 48px rgba(0, 0, 0, 0.58);
+  --shadow-depth-1: 0 18px 46px rgba(0, 0, 0, 0.6);
+  --shadow-depth-2: 0 24px 64px rgba(0, 0, 0, 0.65);
+  --shadow-depth-3: 0 34px 92px rgba(0, 0, 0, 0.72);
 
-  --page-bg: radial-gradient(150% 150% at 12% 18%, rgba(0, 234, 255, 0.16) 0%, rgba(4, 7, 21, 0.95) 36%, #02040d 100%),
-    radial-gradient(110% 90% at 86% 10%, rgba(255, 45, 223, 0.14) 0%, rgba(2, 4, 12, 0.9) 52%);
-  --topbar-bg: linear-gradient(145deg, rgba(10, 16, 36, 0.82), rgba(6, 10, 24, 0.9));
-  --top-actions-bg: rgba(10, 16, 32, 0.72);
-  --health-card-bg: linear-gradient(160deg, rgba(12, 18, 38, 0.86) 0%, rgba(6, 10, 26, 0.9) 100%);
-  --panel-bg: linear-gradient(180deg, rgba(8, 14, 30, 0.9), rgba(6, 10, 24, 0.92));
-  --panel-overlay: linear-gradient(120deg, rgba(0, 234, 255, 0.18), rgba(255, 45, 223, 0.16));
-  --card-bg: linear-gradient(145deg, rgba(12, 18, 36, 0.88), rgba(8, 12, 28, 0.9));
-  --preview-bg: linear-gradient(160deg, rgba(10, 16, 34, 0.88), rgba(8, 12, 26, 0.92));
-  --palette-bg: rgba(5, 8, 18, 0.92);
-  --palette-border: rgba(0, 234, 255, 0.36);
-  --palette-shadow: 0 38px 120px rgba(0, 0, 0, 0.72);
-  --palette-backdrop: rgba(2, 4, 12, 0.88);
+  --page-bg: radial-gradient(150% 150% at 14% 16%, rgba(47, 245, 255, 0.22) 0%, rgba(3, 6, 16, 0.94) 38%, #01040c 100%),
+    radial-gradient(120% 96% at 86% 12%, rgba(255, 69, 230, 0.18) 0%, rgba(3, 5, 14, 0.92) 48%);
+  --topbar-bg: linear-gradient(148deg, rgba(6, 10, 22, 0.92), rgba(4, 8, 18, 0.94));
+  --top-actions-bg: rgba(6, 10, 20, 0.8);
+  --health-card-bg: linear-gradient(160deg, rgba(8, 12, 24, 0.9) 0%, rgba(4, 8, 18, 0.92) 100%);
+  --panel-bg: linear-gradient(184deg, rgba(6, 10, 22, 0.9), rgba(4, 8, 18, 0.94));
+  --panel-overlay: linear-gradient(128deg, rgba(47, 245, 255, 0.2), rgba(255, 69, 230, 0.16));
+  --card-bg: linear-gradient(146deg, rgba(10, 14, 28, 0.9), rgba(6, 10, 22, 0.94));
+  --preview-bg: linear-gradient(166deg, rgba(8, 12, 26, 0.9), rgba(4, 8, 18, 0.94));
+  --palette-bg: rgba(4, 6, 14, 0.94);
+  --palette-border: rgba(47, 245, 255, 0.34);
+  --palette-shadow: 0 38px 118px rgba(0, 0, 0, 0.76);
+  --palette-backdrop: rgba(2, 4, 10, 0.9);
   --palette-item-bg: rgba(255, 255, 255, 0.04);
-  --palette-item-hover: rgba(0, 234, 255, 0.18);
-  --palette-item-active: rgba(255, 45, 223, 0.2);
-  --palette-kbd-bg: rgba(0, 0, 0, 0.42);
-  --palette-kbd-border: rgba(0, 234, 255, 0.32);
-  --palette-caret: #7cfaff;
-  --palette-caret-glow: rgba(255, 45, 223, 0.26);
-  --pill-bg: rgba(0, 234, 255, 0.18);
-  --pill-accent-bg: rgba(255, 45, 223, 0.2);
+  --palette-item-hover: rgba(47, 245, 255, 0.18);
+  --palette-item-active: rgba(255, 69, 230, 0.2);
+  --palette-kbd-bg: rgba(0, 0, 0, 0.46);
+  --palette-kbd-border: rgba(47, 245, 255, 0.3);
+  --palette-caret: #94f4ff;
+  --palette-caret-glow: rgba(255, 69, 230, 0.24);
+  --pill-bg: rgba(47, 245, 255, 0.18);
+  --pill-accent-bg: rgba(255, 69, 230, 0.18);
   --warn-soft: rgba(var(--warn-rgb), 0.16);
-  --pill-border: rgba(0, 234, 255, 0.38);
-  --pill-text: #e2e9ff;
-  --scroll-thumb: rgba(0, 234, 255, 0.36);
-  --brand-glow: rgba(0, 234, 255, 0.32);
-  --selection: rgba(255, 45, 223, 0.24);
-  --accent-wash: rgba(0, 234, 255, 0.14);
-  --accent-ring: rgba(0, 234, 255, 0.48);
-  --primary-shadow: 0 14px 36px rgba(0, 234, 255, 0.36);
-  --primary-shadow-hover: 0 18px 46px rgba(255, 45, 223, 0.42);
-  --status-bar-bg: linear-gradient(120deg, #00eaff, #ff2ddf);
+  --pill-border: rgba(47, 245, 255, 0.36);
+  --pill-text: #e5f3ff;
+  --scroll-thumb: rgba(47, 245, 255, 0.3);
+  --brand-glow: rgba(47, 245, 255, 0.28);
+  --selection: rgba(255, 69, 230, 0.24);
+  --accent-wash: rgba(47, 245, 255, 0.14);
+  --accent-ring: rgba(47, 245, 255, 0.52);
+  --primary-shadow: 0 16px 40px rgba(47, 245, 255, 0.32);
+  --primary-shadow-hover: 0 20px 50px rgba(255, 69, 230, 0.36);
+  --status-bar-bg: linear-gradient(126deg, #2ff5ff, #6fd8ff, #ff45e6);
 
-  --code-bg: #0b152a;
-  --code-border: #1d2b4a;
-  --code-ink: #e8f6ff;
+  --code-bg: #0a1120;
+  --code-border: #152034;
+  --code-ink: #e7f6ff;
+
+  --texture-noise: radial-gradient(140% 120% at 16% 22%, rgba(47, 245, 255, 0.18), transparent 46%),
+    radial-gradient(120% 120% at 74% 14%, rgba(255, 69, 230, 0.16), transparent 50%),
+    linear-gradient(120deg, rgba(255, 255, 255, 0.06), transparent 32%);
+  --texture-noise-strong: radial-gradient(130% 110% at 22% 30%, rgba(47, 245, 255, 0.22), transparent 48%),
+    radial-gradient(120% 100% at 70% 70%, rgba(255, 69, 230, 0.12), transparent 60%);
+  --page-noise-strength: 0.2;
+
+  --fx-roughness: 0.28;
+  --fx-metalness: 0.22;
+  --fx-emissive-boost: 0.22;
+  --fx-env-intensity: 0.32;
+  --fx-fresnel: 0.44;
+
+  --glass-blur: 16px;
+  --glass-saturation: 165%;
+  --glow-pulse: 0 0 26px rgba(var(--accent-rgb), 0.26);
+  --glow-pulse-strong: 0 0 34px rgba(var(--accent-strong-rgb), 0.28);
 }
 
 
@@ -217,7 +252,13 @@
   --neon-gradient: linear-gradient(125deg, #3fe0c2 0%, #ff9f5a 100%);
   --focus-glow: 0 0 0 1px rgba(63, 224, 194, 0.5), 0 0 0 6px rgba(255, 159, 90, 0.22),
     0 0 24px rgba(63, 224, 194, 0.26);
+  --focus-glow-strong: 0 0 0 1px rgba(63, 224, 194, 0.52), 0 0 0 8px rgba(255, 159, 90, 0.22), 0 14px 38px rgba(63, 224, 194, 0.26);
   --hover-glow: 0 14px 34px rgba(63, 224, 194, 0.18), 0 0 18px rgba(255, 159, 90, 0.16);
+  --glass-sheen: linear-gradient(125deg, rgba(63, 224, 194, 0.2), rgba(255, 159, 90, 0.16), rgba(63, 224, 194, 0.16));
+  --holo-grid: repeating-linear-gradient(90deg, rgba(63, 224, 194, 0.14) 0 1px, transparent 1px 24px),
+    repeating-linear-gradient(0deg, rgba(255, 159, 90, 0.12) 0 1px, transparent 1px 20px),
+    radial-gradient(140% 90% at 18% 18%, rgba(63, 224, 194, 0.18), transparent 38%),
+    radial-gradient(120% 80% at 82% 12%, rgba(255, 159, 90, 0.16), transparent 42%);
 
   --shadow-soft: 0 28px 76px rgba(0, 0, 0, 0.62);
   --shadow-card: 0 18px 46px rgba(0, 0, 0, 0.54);
@@ -497,14 +538,44 @@ body::before {
   transition: opacity var(--motion-duration-slow) var(--motion-ease-decelerate);
 }
 
+:root body::after,
+:root[data-theme="cyberpunk"] body::after,
+:root[data-theme="night-drive"] body::after,
+:root[data-theme="void"] body::after,
+:root[data-theme="synthwave"] body::after,
+:root[data-theme="neon-wasteland"] body::after,
+:root[data-theme="neon-wasteland-v2"] body::after,
+:root[data-theme="hologrid-noir"] body::after,
+:root[data-theme="solarized-void"] body::after {
+  content: "";
+  position: fixed;
+  inset: -8%;
+  pointer-events: none;
+  background: var(--holo-grid);
+  mix-blend-mode: screen;
+  opacity: 0.3;
+  filter: drop-shadow(0 0 22px rgba(var(--accent-rgb), 0.2));
+  z-index: 0;
+  transition: opacity var(--motion-duration-slow) var(--motion-ease-decelerate), filter var(--motion-duration-slow) var(--motion-ease-decelerate);
+}
+
 :root[data-high-effects="off"] body::before {
   opacity: calc(var(--page-noise-strength, 0.12) * 0.55);
+}
+
+:root[data-high-effects="off"] body::after {
+  opacity: 0.16;
+  filter: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
   body::before {
     opacity: 0.06;
     filter: saturate(0.6);
+  }
+  body::after {
+    opacity: 0.12;
+    filter: none;
   }
 }
 
@@ -531,6 +602,56 @@ body::before {
 
 ::selection {
   background: var(--selection);
+}
+
+.neon-hover-glow {
+  position: relative;
+  isolation: isolate;
+  transition:
+    transform var(--motion-duration-fast) var(--motion-ease-standard),
+    box-shadow var(--motion-duration-fast) var(--motion-ease-standard),
+    filter var(--motion-duration-fast) var(--motion-ease-standard);
+}
+
+.neon-hover-glow::after {
+  content: "";
+  position: absolute;
+  inset: -18px;
+  border-radius: inherit;
+  background: var(--neon-hover-gradient, var(--neon-gradient-aurora));
+  opacity: 0;
+  filter: blur(26px);
+  z-index: -1;
+  pointer-events: none;
+  transition: opacity var(--motion-duration-fast) var(--motion-ease-standard);
+}
+
+.neon-hover-glow:hover,
+.neon-hover-glow:focus-visible {
+  transform: translateY(-1px);
+  box-shadow: var(--hover-glow);
+  filter: drop-shadow(0 12px 28px rgba(var(--accent-rgb), 0.18));
+}
+
+.neon-hover-glow:hover::after,
+.neon-hover-glow:focus-visible::after {
+  opacity: 0.7;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .neon-hover-glow {
+    transition: box-shadow 160ms ease;
+  }
+
+  .neon-hover-glow:hover,
+  .neon-hover-glow:focus-visible {
+    transform: none;
+    filter: none;
+  }
+
+  .neon-hover-glow::after {
+    transition: opacity 160ms ease;
+  }
 }
 
 .cursor-trail-layer {
@@ -698,7 +819,7 @@ body::before {
     0 0 0 1px rgba(var(--accent-rgb), 0.12),
     0 14px 44px rgba(0, 0, 0, 0.35),
     0 0 42px rgba(var(--accent-strong-rgb), 0.2);
-  backdrop-filter: blur(14px) saturate(160%);
+  backdrop-filter: blur(var(--glass-blur, 14px)) saturate(var(--glass-saturation, 160%));
   mask-image: radial-gradient(110% 70% at 50% 50%, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.2));
   opacity: 0.68;
 }
@@ -1892,8 +2013,8 @@ button:active {
 }
 
 button:focus-visible {
-  outline: 2px solid var(--accent-ring);
-  outline-offset: 1px;
+  outline: 2px solid transparent;
+  box-shadow: var(--focus-glow-strong, var(--focus-glow));
 }
 
 :root[data-high-effects="on"] button:hover {
@@ -1967,7 +2088,7 @@ button[disabled] {
 
 :root:is([data-theme="cyberpunk"], [data-theme="neon-wasteland"], [data-theme="neon-wasteland-v2"], [data-theme="hologrid-noir"], [data-theme="solarized-void"]) button:focus-visible {
   outline: none;
-  box-shadow: var(--focus-glow);
+  box-shadow: var(--focus-glow-strong, var(--focus-glow));
 }
 
 :root:is([data-theme="cyberpunk"], [data-theme="neon-wasteland"], [data-theme="neon-wasteland-v2"], [data-theme="hologrid-noir"], [data-theme="solarized-void"]) button.primary {
@@ -2086,9 +2207,9 @@ button[disabled] {
 .pip-vault-card:focus-visible,
 .stack:focus-visible,
 .focus-ring:focus-visible {
-  outline: 3px solid var(--accent-ring);
-  outline-offset: 3px;
-  box-shadow: 0 0 0 6px rgba(var(--accent-rgb), 0.14);
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  box-shadow: var(--focus-glow-strong, var(--focus-glow));
 }
 
 :root:is([data-theme="cyberpunk"], [data-theme="neon-wasteland"], [data-theme="neon-wasteland-v2"], [data-theme="hologrid-noir"], [data-theme="solarized-void"]) .panel:focus-visible,
@@ -2097,7 +2218,7 @@ button[disabled] {
 :root:is([data-theme="cyberpunk"], [data-theme="neon-wasteland"], [data-theme="neon-wasteland-v2"], [data-theme="hologrid-noir"], [data-theme="solarized-void"]) .stack:focus-visible,
 :root:is([data-theme="cyberpunk"], [data-theme="neon-wasteland"], [data-theme="neon-wasteland-v2"], [data-theme="hologrid-noir"], [data-theme="solarized-void"]) .focus-ring:focus-visible {
   outline: none;
-  box-shadow: var(--focus-glow);
+  box-shadow: var(--focus-glow-strong, var(--focus-glow));
 }
 
 .panel:focus-within {
@@ -2149,6 +2270,30 @@ button[disabled] {
   overflow: hidden;
 }
 
+.panel::before,
+.health-card::before,
+.pip-vault-card::before,
+.catalog-item::before,
+.preview-card::before,
+.tree-card::before,
+.ao-log-panel::before,
+.composition-toolbar::before,
+.composition-dropzone::before,
+.empty::before {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  border-radius: inherit;
+  background: var(--glass-sheen);
+  mix-blend-mode: screen;
+  opacity: 0.4;
+  pointer-events: none;
+  filter: blur(0.35px);
+  transition:
+    opacity var(--motion-duration-fast) var(--motion-ease-standard),
+    filter var(--motion-duration-fast) var(--motion-ease-standard);
+}
+
 .panel::after {
   content: "";
   position: absolute;
@@ -2171,7 +2316,9 @@ button[disabled] {
 :root:is([data-theme="cyberpunk"], [data-theme="neon-wasteland"], [data-theme="neon-wasteland-v2"], [data-theme="hologrid-noir"], [data-theme="solarized-void"]) .pip-vault-card,
 :root:is([data-theme="cyberpunk"], [data-theme="neon-wasteland"], [data-theme="neon-wasteland-v2"], [data-theme="hologrid-noir"], [data-theme="solarized-void"]) .catalog-item,
 :root:is([data-theme="cyberpunk"], [data-theme="neon-wasteland"], [data-theme="neon-wasteland-v2"], [data-theme="hologrid-noir"], [data-theme="solarized-void"]) .preview-card,
+:root:is([data-theme="cyberpunk"], [data-theme="neon-wasteland"], [data-theme="neon-wasteland-v2"], [data-theme="hologrid-noir"], [data-theme="solarized-void"]) .quick-card,
 :root:is([data-theme="cyberpunk"], [data-theme="neon-wasteland"], [data-theme="neon-wasteland-v2"], [data-theme="hologrid-noir"], [data-theme="solarized-void"]) .tree-card,
+:root:is([data-theme="cyberpunk"], [data-theme="neon-wasteland"], [data-theme="neon-wasteland-v2"], [data-theme="hologrid-noir"], [data-theme="solarized-void"]) .manifest-preview-card,
 :root:is([data-theme="cyberpunk"], [data-theme="neon-wasteland"], [data-theme="neon-wasteland-v2"], [data-theme="hologrid-noir"], [data-theme="solarized-void"]) .ao-log-panel,
 :root:is([data-theme="cyberpunk"], [data-theme="neon-wasteland"], [data-theme="neon-wasteland-v2"], [data-theme="hologrid-noir"], [data-theme="solarized-void"]) .composition-toolbar,
 :root:is([data-theme="cyberpunk"], [data-theme="neon-wasteland"], [data-theme="neon-wasteland-v2"], [data-theme="hologrid-noir"], [data-theme="solarized-void"]) .composition-dropzone,
@@ -2190,20 +2337,68 @@ button[disabled] {
   opacity: 0.45;
 }
 
+:root[data-high-effects="on"] .panel::before,
+:root[data-high-effects="on"] .health-card::before,
+:root[data-high-effects="on"] .pip-vault-card::before,
+:root[data-high-effects="on"] .catalog-item::before,
+:root[data-high-effects="on"] .preview-card::before,
+:root[data-high-effects="on"] .quick-card::before,
+:root[data-high-effects="on"] .tree-card::before,
+:root[data-high-effects="on"] .manifest-preview-card::before,
+:root[data-high-effects="on"] .ao-log-panel::before,
+:root[data-high-effects="on"] .composition-toolbar::before,
+:root[data-high-effects="on"] .composition-dropzone::before,
+:root[data-high-effects="on"] .empty::before {
+  opacity: 0.6;
+  filter: drop-shadow(0 0 18px var(--brand-glow));
+}
+
+:root[data-high-effects="off"] .panel::before,
+:root[data-high-effects="off"] .health-card::before,
+:root[data-high-effects="off"] .pip-vault-card::before,
+:root[data-high-effects="off"] .catalog-item::before,
+:root[data-high-effects="off"] .preview-card::before,
+:root[data-high-effects="off"] .quick-card::before,
+:root[data-high-effects="off"] .tree-card::before,
+:root[data-high-effects="off"] .manifest-preview-card::before,
+:root[data-high-effects="off"] .ao-log-panel::before,
+:root[data-high-effects="off"] .composition-toolbar::before,
+:root[data-high-effects="off"] .composition-dropzone::before,
+:root[data-high-effects="off"] .empty::before {
+  opacity: 0.24;
+  filter: none;
+}
+
 .panel,
 .health-card,
 .pip-vault-card,
 .catalog-item,
 .preview-card,
+.quick-card,
 .tree-card,
+.manifest-preview-card,
 .ao-log-panel,
 .composition-toolbar,
 .composition-dropzone,
 .empty {
+  --lift: 0px;
   box-shadow: var(--shadow-depth-1, var(--shadow-card));
+  transform: translate3d(0, var(--lift, 0px), 0);
   transition:
     transform var(--motion-duration-fast) var(--motion-ease-standard),
     box-shadow var(--motion-duration-fast) var(--motion-ease-standard);
+}
+
+.catalog-item,
+.preview-card,
+.quick-card,
+.tree-card,
+.manifest-preview-card {
+  --tilt-x: 0deg;
+  --tilt-y: 0deg;
+  transform: translate3d(0, var(--lift, 0px), 0) rotateX(var(--tilt-x, 0deg)) rotateY(var(--tilt-y, 0deg));
+  transform-style: preserve-3d;
+  will-change: transform;
 }
 
 :root[data-high-effects="on"] .panel:hover,
@@ -2211,12 +2406,14 @@ button[disabled] {
 :root[data-high-effects="on"] .pip-vault-card:hover,
 :root[data-high-effects="on"] .catalog-item:hover,
 :root[data-high-effects="on"] .preview-card:hover,
+:root[data-high-effects="on"] .quick-card:hover,
 :root[data-high-effects="on"] .tree-card:hover,
+:root[data-high-effects="on"] .manifest-preview-card:hover,
 :root[data-high-effects="on"] .ao-log-panel:hover,
 :root[data-high-effects="on"] .composition-toolbar:hover,
 :root[data-high-effects="on"] .composition-dropzone:hover,
 :root[data-high-effects="on"] .empty:hover {
-  transform: translateY(-3px);
+  --lift: -3px;
   box-shadow: var(--shadow-depth-2, var(--shadow-soft));
 }
 
@@ -2225,12 +2422,14 @@ button[disabled] {
 :root[data-high-effects="on"] .pip-vault-card:active,
 :root[data-high-effects="on"] .catalog-item:active,
 :root[data-high-effects="on"] .preview-card:active,
+:root[data-high-effects="on"] .quick-card:active,
 :root[data-high-effects="on"] .tree-card:active,
+:root[data-high-effects="on"] .manifest-preview-card:active,
 :root[data-high-effects="on"] .ao-log-panel:active,
 :root[data-high-effects="on"] .composition-toolbar:active,
 :root[data-high-effects="on"] .composition-dropzone:active,
 :root[data-high-effects="on"] .empty:active {
-  transform: translateY(-1px);
+  --lift: -1px;
   box-shadow: var(--shadow-depth-1, var(--shadow-card));
 }
 
@@ -2239,7 +2438,9 @@ button[disabled] {
 :root[data-high-effects="off"] .pip-vault-card,
 :root[data-high-effects="off"] .catalog-item,
 :root[data-high-effects="off"] .preview-card,
+:root[data-high-effects="off"] .quick-card,
 :root[data-high-effects="off"] .tree-card,
+:root[data-high-effects="off"] .manifest-preview-card,
 :root[data-high-effects="off"] .ao-log-panel,
 :root[data-high-effects="off"] .composition-toolbar,
 :root[data-high-effects="off"] .composition-dropzone,
@@ -2252,7 +2453,9 @@ button[disabled] {
 :root[data-high-effects="off"] .pip-vault-card:hover,
 :root[data-high-effects="off"] .catalog-item:hover,
 :root[data-high-effects="off"] .preview-card:hover,
+:root[data-high-effects="off"] .quick-card:hover,
 :root[data-high-effects="off"] .tree-card:hover,
+:root[data-high-effects="off"] .manifest-preview-card:hover,
 :root[data-high-effects="off"] .ao-log-panel:hover,
 :root[data-high-effects="off"] .composition-toolbar:hover,
 :root[data-high-effects="off"] .composition-dropzone:hover,
@@ -2266,14 +2469,34 @@ button[disabled] {
   .pip-vault-card,
   .catalog-item,
   .preview-card,
+  .quick-card,
   .tree-card,
+  .manifest-preview-card,
   .ao-log-panel,
   .composition-toolbar,
   .composition-dropzone,
   .empty {
+    --lift: 0px;
+    --tilt-x: 0deg;
+    --tilt-y: 0deg;
     transition: none;
     transform: none !important;
     box-shadow: var(--shadow-card);
+  }
+  .panel::before,
+  .health-card::before,
+  .pip-vault-card::before,
+  .catalog-item::before,
+  .preview-card::before,
+  .quick-card::before,
+  .tree-card::before,
+  .manifest-preview-card::before,
+  .ao-log-panel::before,
+  .composition-toolbar::before,
+  .composition-dropzone::before,
+  .empty::before {
+    opacity: 0.18;
+    filter: none;
   }
 }
 

@@ -7,6 +7,9 @@
   --shadow-depth-3: 0 26px 72px rgba(5, 10, 25, 0.38);
   --glow-pulse: 0 0 22px rgba(var(--accent-rgb), 0.22);
   --glow-pulse-strong: 0 0 30px rgba(var(--accent-strong-rgb), 0.28);
+  --neon-gradient-aurora: linear-gradient(128deg, #53f0ff 0%, #7d6bff 48%, #ff4ccf 100%);
+  --neon-gradient-circuit: linear-gradient(124deg, #7efb6b 0%, #2fd6ff 46%, #5f7dff 100%);
+  --neon-gradient-nightfall: linear-gradient(132deg, #ff7bed 0%, #ffa14b 45%, #7af7e3 100%);
   --page-noise-strength: 0.12;
   --fx-roughness: 0.36;
   --fx-metalness: 0.14;
