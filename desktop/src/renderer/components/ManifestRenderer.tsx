@@ -31,6 +31,9 @@ interface ManifestRendererProps {
   diffHighlight?: Record<string, DraftDiffKind>;
   validation?: Record<string, NodeValidationBadge>;
   onApplyDefaults?: (nodeId: string) => void;
+  reviewMode?: boolean;
+  commentCounts?: Map<string, { total: number; open: number }>;
+  onRequestComment?: (nodeId: string) => void;
 }
 
 const formatValue = (value: ManifestValue): string => {
@@ -125,6 +128,9 @@ const RenderBranch: React.FC<{
   diffHighlight?: Record<string, DraftDiffKind>;
   validation?: Record<string, NodeValidationBadge>;
   onApplyDefaults?: (nodeId: string) => void;
+  reviewMode?: boolean;
+  commentCounts?: Map<string, { total: number; open: number }>;
+  onRequestComment?: (nodeId: string) => void;
 }> = ({
   node,
   entryId,
@@ -141,6 +147,9 @@ const RenderBranch: React.FC<{
   diffHighlight,
   validation,
   onApplyDefaults,
+  reviewMode,
+  commentCounts,
+  onRequestComment,
 }) => {
   const isSelected = selectedIds?.has(node.id) ?? false;
   const isPrimary = primarySelectedId === node.id;
@@ -158,6 +167,8 @@ const RenderBranch: React.FC<{
     : 0;
   const hasSchema = nodeValidation?.hasSchema ?? true;
   const canApplyDefaults = Boolean(onApplyDefaults && hasSchema);
+  const commentCount = commentCounts?.get(node.id);
+  const hasOpenComments = (commentCount?.open ?? 0) > 0;
 
   const getDragMode = (event: React.DragEvent<HTMLElement>): DropMode | null => {
     const types = Array.from(event.dataTransfer.types ?? []);
@@ -200,7 +211,7 @@ const RenderBranch: React.FC<{
   return (
     <div className="tree-branch">
       <article
-        className={`tree-card ${isSelected ? "selected" : ""} ${isSelected && !isPrimary ? "selected-secondary" : ""} ${isPrimary ? "primary-selected" : ""} ${isDropTarget ? `drop-target drop-${dropPlacement ?? "inside"}` : ""} ${blockedMoveTarget ? "drop-blocked" : ""} ${highlightKind ? `diff-${highlightKind}` : ""}`}
+        className={`tree-card ${isSelected ? "selected" : ""} ${isSelected && !isPrimary ? "selected-secondary" : ""} ${isPrimary ? "primary-selected" : ""} ${isDropTarget ? `drop-target drop-${dropPlacement ?? "inside"}` : ""} ${blockedMoveTarget ? "drop-blocked" : ""} ${highlightKind ? `diff-${highlightKind}` : ""} ${hasOpenComments ? "has-review" : ""}`}
         data-node-id={node.id}
         onClick={(event) =>
           onSelect?.(node.id, { shiftKey: event.shiftKey, metaKey: event.metaKey, ctrlKey: event.ctrlKey })
@@ -305,6 +316,11 @@ const RenderBranch: React.FC<{
               </span>
             )}
             {missingRequired > 0 && <span className="pill warn" title="Required props missing">{missingRequired} req</span>}
+            {commentCount && (
+              <span className={`pill ${commentCount.open ? "accent" : "ghost"}`} title="Pinned review comments">
+                🗨 {commentCount.open}/{commentCount.total}
+              </span>
+            )}
           </div>
           <div className="node-meta-actions">
             <span className="node-id">{node.id}</span>
@@ -320,6 +336,20 @@ const RenderBranch: React.FC<{
                 onMouseDown={(event) => event.stopPropagation()}
               >
                 Apply defaults
+              </button>
+            )}
+            {reviewMode && onRequestComment && (
+              <button
+                type="button"
+                className="ghost small node-quick-action"
+                title="Add a review comment"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onRequestComment(node.id);
+                }}
+                onMouseDown={(event) => event.stopPropagation()}
+              >
+                Comment
               </button>
             )}
           </div>
@@ -366,6 +396,9 @@ const RenderBranch: React.FC<{
               diffHighlight={diffHighlight}
               validation={validation}
               onApplyDefaults={onApplyDefaults}
+              reviewMode={reviewMode}
+              commentCounts={commentCounts}
+              onRequestComment={onRequestComment}
             />
           ))}
         </div>
@@ -388,6 +421,9 @@ const ManifestRenderer: React.FC<ManifestRendererProps> = ({
   diffHighlight,
   validation,
   onApplyDefaults,
+  reviewMode,
+  commentCounts,
+  onRequestComment,
 }) => {
   const selectedIdSet = useMemo(() => new Set(selectedIds ?? []), [selectedIds]);
   const { roots, orphans } = useMemo(() => {
@@ -467,6 +503,9 @@ const ManifestRenderer: React.FC<ManifestRendererProps> = ({
           diffHighlight={diffHighlight}
           validation={validation}
           onApplyDefaults={onApplyDefaults}
+          reviewMode={reviewMode}
+          commentCounts={commentCounts}
+          onRequestComment={onRequestComment}
         />
       ))}
 
@@ -491,6 +530,9 @@ const ManifestRenderer: React.FC<ManifestRendererProps> = ({
                 onNodeDragEnd={onNodeDragEnd}
                 validation={validation}
                 onApplyDefaults={onApplyDefaults}
+                reviewMode={reviewMode}
+                commentCounts={commentCounts}
+                onRequestComment={onRequestComment}
               />
             ))}
           </div>

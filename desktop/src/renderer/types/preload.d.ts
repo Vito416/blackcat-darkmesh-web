@@ -31,7 +31,17 @@ declare global {
         iterations?: number;
         salt?: string;
         locked: boolean;
+        lockedAt?: string;
         recordCount: number;
+        kdf?: {
+          algorithm: "pbkdf2" | "argon2id";
+          iterations?: number;
+          salt?: string;
+          memoryKiB?: number;
+          parallelism?: number;
+          digest?: string;
+          version?: number;
+        };
       }>;
       list: () => Promise<
         | {
@@ -62,6 +72,15 @@ declare global {
         bytes: number;
         createdAt: string;
         recordCount: number;
+        kdf?: {
+          algorithm: "pbkdf2" | "argon2id";
+          iterations?: number;
+          salt?: string;
+          memoryKiB?: number;
+          parallelism?: number;
+          digest?: string;
+          version?: number;
+        };
       }>;
       importVault: (bundle: unknown, password?: string) => Promise<{ ok: true; mode: string; records: number }>;
       scanIntegrity: (

@@ -1,16 +1,14 @@
 import React from "react";
 
-type WizardProps = {
+type WizardProps = React.HTMLAttributes<HTMLElement> & {
   children: React.ReactNode;
   open: boolean;
   labelledBy: string;
   describedBy?: string;
-  className?: string;
-  style?: React.CSSProperties;
 };
 
 const Wizard = React.forwardRef<HTMLElement, WizardProps>(
-  ({ children, open, labelledBy, describedBy, className, style }, ref) => {
+  ({ children, open, labelledBy, describedBy, className, style, ...rest }, ref) => {
     const mergedStyle = open ? style : { ...(style ?? {}), display: "none" };
 
     return (
@@ -22,6 +20,7 @@ const Wizard = React.forwardRef<HTMLElement, WizardProps>(
         aria-describedby={describedBy}
         tabIndex={-1}
         style={mergedStyle}
+        {...rest}
       >
         {children}
       </section>

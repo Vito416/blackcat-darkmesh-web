@@ -113,6 +113,13 @@ const KEY_SIZE = 32;
 const KDF_ITERATIONS = 100_000;
 const KDF_DIGEST = "sha256";
 const KDF_SALT_BYTES = 16;
+type KdfMeta = {
+  algorithm: "pbkdf2";
+  iterations: number;
+  salt?: string;
+  digest: typeof KDF_DIGEST;
+  version: number;
+};
 
 const vaultPath = () => path.join(app.getPath("userData"), VAULT_FILENAME);
 const keyPath = () => path.join(app.getPath("userData"), KEY_FILENAME);
@@ -470,6 +477,7 @@ export async function describePipVault(): Promise<{
   locked: boolean;
   lockedAt?: string;
   recordCount: number;
+  kdf: KdfMeta;
 }> {
   const envelope = normalizeKeyEnvelope(await readJsonFile<AnyKeyEnvelope>(keyPath()));
   const store = normalizeVaultStore(await readVaultStore());
@@ -480,6 +488,13 @@ export async function describePipVault(): Promise<{
 
   const mode: VaultKeyMode = envelope?.mode ?? (safeStorage.isEncryptionAvailable() ? "safeStorage" : "plain");
   const locked = mode === "password" && !cachedMasterKey;
+  const kdf: KdfMeta = {
+    algorithm: "pbkdf2",
+    iterations: envelope?.kdf?.iterations ?? KDF_ITERATIONS,
+    salt: envelope?.kdf?.salt,
+    digest: envelope?.kdf?.digest ?? KDF_DIGEST,
+    version: 1,
+  };
 
   return {
     exists: store.records.length > 0,
@@ -492,6 +507,7 @@ export async function describePipVault(): Promise<{
     locked,
     lockedAt: locked ? lastLockAt ?? undefined : undefined,
     recordCount: store.records.length,
+    kdf,
   };
 }
 
@@ -634,10 +650,18 @@ export async function exportPipVault(): Promise<{
   bytes: number;
   createdAt: string;
   recordCount: number;
+  kdf: KdfMeta;
 }> {
   const envelope = await ensureKeyEnvelope();
   const store = normalizeVaultStore(await readVaultStore());
   const createdAt = nowIso();
+  const kdf: KdfMeta = {
+    algorithm: "pbkdf2",
+    iterations: envelope.kdf?.iterations ?? KDF_ITERATIONS,
+    salt: envelope.kdf?.salt,
+    digest: envelope.kdf?.digest ?? KDF_DIGEST,
+    version: 1,
+  };
 
   const bundle: VaultBackupBundle = {
     format: "pip-vault-bundle",
@@ -652,7 +676,7 @@ export async function exportPipVault(): Promise<{
   const checksum = sha256(serialized);
   const bytes = Buffer.byteLength(serialized, "utf-8");
 
-  return { ok: true, bundle: serialized, checksum, bytes, createdAt, recordCount: store.records.length };
+  return { ok: true, bundle: serialized, checksum, bytes, createdAt, recordCount: store.records.length, kdf };
 }
 
 const parseBundleInput = (bundleInput: unknown): VaultBackupBundle => {

@@ -1,4 +1,5 @@
 import Dexie, { Table } from "dexie";
+import type { PipVaultIntegrityIssue } from "../services/pipVault";
 
 export type VaultIntegrityEvent = {
   id: number;
@@ -7,6 +8,7 @@ export type VaultIntegrityEvent = {
   failed: number;
   durationMs: number;
   recordCount?: number;
+  issues?: PipVaultIntegrityIssue[];
 };
 
 type VaultIntegrityRow = Omit<VaultIntegrityEvent, "id"> & { id?: number };
@@ -33,6 +35,7 @@ const stripRow = (row: VaultIntegrityRow): VaultIntegrityEvent => ({
   ...row,
   id: row.id ?? 0,
   recordCount: row.recordCount,
+  issues: row.issues ?? [],
 });
 
 const enforceLimit = async (limit: number) => {

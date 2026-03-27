@@ -1,3 +1,5 @@
+import type { LocaleKey } from "../locales";
+
 export type UserSettings = {
   gatewayUrl?: string;
   workerUrl?: string;
@@ -6,6 +8,7 @@ export type UserSettings = {
   walletJson?: string;
   sampleLoaded?: boolean;
   completedAt?: string;
+  locale?: LocaleKey;
 };
 
 const SETTINGS_STORAGE_KEY = "darkmesh-user-settings";

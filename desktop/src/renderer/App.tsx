@@ -3,6 +3,7 @@ import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState, typ
 import "./styles.css";
 import ErrorBoundary from "./components/ErrorBoundary";
 import type { DraftDiffOption } from "./components/DraftDiffPanel";
+import CyberBlockPreview from "./components/CyberBlockPreview";
 import { fetchCatalog, catalogItems as seedCatalog } from "./services/catalog";
 import whatsNewData from "./whats-new.json";
 import {
@@ -33,6 +34,8 @@ import {
   inspectVaultBundle,
   lockPipVault,
   scanPipVaultIntegrity,
+  type PipVaultIntegrityIssue,
+  type PipVaultKdfMeta,
   type PipVaultRecord,
 } from "./services/pipVault";
 import type { PipDocument } from "./services/pipValidation";
@@ -112,6 +115,8 @@ import {
   listDraftRevisions,
   loadDraftSource,
   saveDraft,
+  DraftVersionConflictError,
+  type DraftRevisionTag,
   type DraftRevision,
   type DraftSaveMode,
   type DraftSource,
@@ -139,6 +144,7 @@ import {
   VAULT_INTEGRITY_WIZARD_LIMIT,
   type VaultIntegrityEvent,
 } from "./storage/vaultIntegrity";
+import { loadAoProfiles, rememberProfile } from "./storage/aoProfiles";
 import {
   hasStoredSettings,
   loadSettings,
@@ -158,7 +164,7 @@ import {
   type WalletFieldValidation,
 } from "./services/aoDeploy";
 import VaultCrystal, { type VaultCrystalPulse, type VaultCrystalState } from "./components/VaultCrystal";
-import CommandPalette, { type CommandPaletteAction } from "./components/CommandPalette";
+import CommandPalette, { type CommandPaletteAction, type CommandPaletteSection } from "./components/CommandPalette";
 import {
   diff,
   groupDiffEntries,
@@ -170,8 +176,9 @@ import {
   type PropsDiffEntry,
   type PropsValidationIssue,
 } from "./utils/propsInspector";
+import { aoLogToCsv } from "./utils/aoLog";
 import { diffManifests, type DraftDiffEntry, type DraftDiffKind } from "./utils/draftDiff";
-import HotkeyOverlay, { type HotkeyOverlaySection } from "./components/HotkeyOverlay";
+import HotkeyOverlay, { type HotkeyOverlayGroup, type HotkeyOverlaySection } from "./components/HotkeyOverlay";
 import HeroCanvas from "./components/HeroCanvas";
 import HologramBlocks from "./components/HologramBlocks";
 import useNeonCursorTrail from "./hooks/useNeonCursorTrail";
@@ -179,13 +186,56 @@ import useFocusTrap from "./hooks/useFocusTrap";
 import Vault from "./components/Vault";
 import Wizard from "./components/Wizard";
 import { validatePipDocument } from "./services/pipValidation";
-import { DEFAULT_LOCALE, getMessages, I18nContext, makeTranslator, resolveLocale, type LocaleKey } from "./locales";
+import {
+  DEFAULT_LOCALE,
+  getMessages,
+  I18nContext,
+  makeTranslator,
+  resolveLocale,
+  type HotkeyScope,
+  type HotkeyTarget,
+  type LocaleKey,
+} from "./locales";
+import themeTokenConfig from "./theme/tokens.json";
+import type {
+  AoDeployProfile,
+  AoLogContext,
+  AoLogMetrics,
+  AoLogSeverity,
+  AoMiniLogEntry,
+  AoProfileSnapshot,
+  AoWalletMode as WalletMode,
+  SpawnSnapshot,
+} from "./types/ao";
 
 type WhatsNewEntry = {
   version: string;
   date: string;
   highlights: string[];
 };
+
+type ReviewComment = {
+  id: string;
+  manifestId: string;
+  nodeId: string;
+  text: string;
+  author?: string;
+  createdAt: string;
+  resolvedAt?: string | null;
+};
+
+type AutosavePreset = "fast" | "balanced" | "relaxed";
+
+const AUTOSAVE_PRESETS: Record<AutosavePreset, number> = {
+  fast: 800,
+  balanced: 1200,
+  relaxed: 2400,
+};
+
+const AUTOSAVE_STORAGE_KEY = "darkmesh-autosave-delay";
+const REVIEW_STORAGE_KEY = "darkmesh-review-comments";
+const DRAFT_DIFF_DOCKED_KEY = "darkmesh-draft-diff-docked";
+const REVIEW_MODE_KEY = "darkmesh-review-mode";
 
 const HelpTip = ({ copy, label }: { copy: string; label?: string }) => (
   <button type="button" className="help-tip" title={copy} aria-label={label ?? copy}>
@@ -233,6 +283,8 @@ const fromCatalog = (item: CatalogItem): ManifestNode => ({
   children: [],
 });
 
+const tokenThemeMeta = new Map((themeTokenConfig.themes ?? []).map((theme) => [theme.id, theme]));
+
 const themePresets = [
   {
     id: "light",
@@ -245,14 +297,19 @@ const themePresets = [
     description: "Neon grid with electric cyan and magenta glow.",
   },
   {
-    id: "neon-wasteland",
-    label: "Neon Wasteland",
-    description: "Toxic lime, ultraviolet plasma, and smoked-glass panels.",
+    id: "neon-wasteland-v2",
+    label: tokenThemeMeta.get("neon-wasteland-v2")?.label ?? "Neon Wasteland v2",
+    description: tokenThemeMeta.get("neon-wasteland-v2")?.description ?? "Acid rain plasma, violet storms, smoked glass chassis.",
+  },
+  {
+    id: "hologrid-noir",
+    label: tokenThemeMeta.get("hologrid-noir")?.label ?? "Hologrid Noir",
+    description: tokenThemeMeta.get("hologrid-noir")?.description ?? "Noir glass with holographic cyan/violet grid glow.",
   },
   {
     id: "solarized-void",
-    label: "Solarized Void",
-    description: "Solar flare gold over abyssal teal with aurora haze.",
+    label: tokenThemeMeta.get("solarized-void")?.label ?? "Solarized Void",
+    description: tokenThemeMeta.get("solarized-void")?.description ?? "Aurora teal, solar gold, and soft abyss gradients.",
   },
   {
     id: "night-drive",
@@ -279,11 +336,16 @@ const themePresets = [
 type Theme = (typeof themePresets)[number]["id"];
 
 const themePresetMap = new Map(themePresets.map((preset) => [preset.id, preset]));
-const neonThemes: Theme[] = ["cyberpunk", "neon-wasteland", "solarized-void"];
+const neonThemes: Theme[] = ["cyberpunk", "neon-wasteland-v2", "hologrid-noir", "solarized-void"];
+const LEGACY_THEME_MAP: Partial<Record<string, Theme>> = {
+  "neon-wasteland": "neon-wasteland-v2",
+};
 const DEFAULT_THEME: Theme = "light";
 
-const resolveTheme = (value: string | null): Theme =>
-  (value && themePresetMap.has(value as Theme) ? (value as Theme) : DEFAULT_THEME);
+const resolveTheme = (value: string | null): Theme => {
+  const normalized = value && (LEGACY_THEME_MAP[value] ?? value);
+  return normalized && themePresetMap.has(normalized as Theme) ? (normalized as Theme) : DEFAULT_THEME;
+};
 
 const getThemeLabel = (value: Theme): string => themePresetMap.get(value)?.label ?? "Light";
 
@@ -356,7 +418,7 @@ const normalizeText = (value: unknown) => (typeof value === "string" ? value.tri
 const formatTimeShort = (iso?: string) =>
   iso ? new Date(iso).toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit" }) : "—";
 
-const AUTOSAVE_DEBOUNCE_MS = 1200;
+const DEFAULT_AUTOSAVE_MS = AUTOSAVE_PRESETS.balanced;
 
 const formatDraftSaveMode = (mode: DraftSaveMode) => {
   if (mode === "autosave") return "Autosave";
@@ -574,7 +636,6 @@ type FileBridgeResult = {
 };
 
 type Workspace = "data" | "ao" | "studio" | "preview";
-type WalletMode = "ipc" | "path" | "jwk";
 type TaskState = "idle" | "pending" | "success" | "error";
 type ActionStep = {
   id: string;
@@ -582,47 +643,6 @@ type ActionStep = {
   status: TaskState | "idle";
   detail?: string | null;
   at?: string;
-};
-export type AoLogSeverity = "success" | "warning" | "error" | "info";
-export type AoLogContext = {
-  manifestTx?: string;
-  moduleTx?: string;
-  scheduler?: string;
-  transient?: boolean;
-};
-export type AoLogSparkline = {
-  path: string;
-  points: { x: number; y: number; value: number }[];
-  width: number;
-  height: number;
-  min: number;
-  max: number;
-  latest: number;
-};
-export type AoLogMetrics = {
-  successRate: number | null;
-  averageLatency: number | null;
-  sparkline: AoLogSparkline | null;
-  counts: Record<AoLogSeverity | "all", number>;
-};
-export type AoMiniLogEntry = {
-  kind: "deploy" | "spawn";
-  id: string | null;
-  status: string;
-  time: string;
-  href: string | null;
-  severity: AoLogSeverity;
-  durationMs?: number;
-  context?: AoLogContext;
-  payload?: unknown;
-  raw?: string;
-};
-type SpawnSnapshot = {
-  processId: string;
-  manifestTx: string;
-  moduleTx: string;
-  scheduler?: string;
-  time: string;
 };
 type PipVaultSnapshot = {
   exists: boolean;
@@ -635,12 +655,15 @@ type PipVaultSnapshot = {
   locked: boolean;
   lockedAt?: string;
   recordCount: number;
+  kdf?: PipVaultKdfMeta;
 };
 type PipVaultIssue = {
   field: string;
   message: string;
   severity: "error" | "warn";
 };
+type PipVaultKdfProfile = PipVaultKdfMeta & { version?: number };
+type BreachCheckStatus = "idle" | "checking" | "clear" | "maybe";
 
 type VaultImportOptions = {
   useVaultPassword?: boolean;
@@ -660,6 +683,8 @@ const THEME_STORAGE_KEY = "darkmesh-theme";
 const OFFLINE_STORAGE_KEY = "darkmesh-offline-mode";
 const CURSOR_TRAIL_STORAGE_KEY = "darkmesh-cursor-trail";
 const LOCALE_STORAGE_KEY = "darkmesh-locale";
+const PALETTE_RECENTS_STORAGE_KEY = "darkmesh-palette-recents";
+const PALETTE_RECENTS_LIMIT = 8;
 const OFFLINE_FETCH_ERROR = "Offline mode is enabled; network requests are blocked";
 const HEALTH_AUTO_REFRESH_STORAGE_KEY = "health-auto-refresh";
 type HealthAutoRefresh = "off" | "10" | "30" | "60";
@@ -669,6 +694,7 @@ const PIP_VAULT_REMEMBER_PASSWORD_KEY = "pip-vault-remember-password";
 const PIP_VAULT_AUTO_LOCK_KEY = "pip-vault-auto-lock-minutes";
 const DEFAULT_PIP_VAULT_AUTO_LOCK_MINUTES = 15;
 const PIP_VAULT_HARDWARE_PLACEHOLDER_KEY = "pip-vault-hardware-placeholder";
+const PIP_VAULT_KDF_PREF_KEY = "pip-vault-kdf-profile";
 const HEALTH_NOTIFY_STORAGE_KEY = "health-sla-notify";
 const HEALTH_SLA_FAILURE_STORAGE_KEY = "health-sla-failure";
 const HEALTH_SLA_LATENCY_STORAGE_KEY = "health-sla-latency";
@@ -698,6 +724,59 @@ const resolveAutoRefreshIntervalMs = (value: HealthAutoRefresh): number | null =
   return Number(value) * 1000;
 };
 
+const loadPaletteRecents = (): string[] => {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(PALETTE_RECENTS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : [];
+  } catch {
+    return [];
+  }
+};
+
+const DEFAULT_ARGON2_PROFILE: PipVaultKdfProfile = {
+  algorithm: "argon2id",
+  iterations: 3,
+  memoryKiB: 64 * 1024,
+  parallelism: 1,
+  version: 1,
+};
+
+const loadKdfProfile = (): PipVaultKdfProfile => {
+  if (typeof window === "undefined") return DEFAULT_ARGON2_PROFILE;
+  try {
+    const raw = window.localStorage.getItem(PIP_VAULT_KDF_PREF_KEY);
+    if (!raw) return DEFAULT_ARGON2_PROFILE;
+    const parsed = JSON.parse(raw) as PipVaultKdfProfile;
+    if (!parsed || typeof parsed !== "object" || !parsed.algorithm) return DEFAULT_ARGON2_PROFILE;
+    return {
+      ...DEFAULT_ARGON2_PROFILE,
+      ...parsed,
+    };
+  } catch {
+    return DEFAULT_ARGON2_PROFILE;
+  }
+};
+
+const persistKdfProfile = (profile: PipVaultKdfProfile): PipVaultKdfProfile => {
+  const normalized: PipVaultKdfProfile = {
+    ...DEFAULT_ARGON2_PROFILE,
+    ...profile,
+    algorithm: profile.algorithm ?? "argon2id",
+  };
+
+  if (typeof window !== "undefined") {
+    try {
+      window.localStorage.setItem(PIP_VAULT_KDF_PREF_KEY, JSON.stringify(normalized));
+    } catch {
+      // ignore storage persistence issues
+    }
+  }
+
+  return normalized;
+};
+
 declare global {
   interface Window {
     desktop?: {
@@ -720,6 +799,15 @@ declare global {
         locked: boolean;
         lockedAt?: string;
         recordCount: number;
+        kdf?: {
+          algorithm: "pbkdf2" | "argon2id";
+          iterations?: number;
+          salt?: string;
+          memoryKiB?: number;
+          parallelism?: number;
+          digest?: string;
+          version?: number;
+        };
       }>;
       list: () => Promise<{ exists: boolean; records: PipVaultRecord[] }>;
       loadRecord: (id: string) => Promise<{ exists: boolean; updatedAt?: string; pip?: Record<string, unknown> }>;
@@ -739,6 +827,15 @@ declare global {
         bytes: number;
         createdAt: string;
         recordCount: number;
+        kdf?: {
+          algorithm: "pbkdf2" | "argon2id";
+          iterations?: number;
+          salt?: string;
+          memoryKiB?: number;
+          parallelism?: number;
+          digest?: string;
+          version?: number;
+        };
       }>;
       importVault: (bundle: string | ArrayBuffer, password?: string) => Promise<{
         ok: true;
@@ -1325,6 +1422,7 @@ type PropsMode = "form" | "json";
 type DropPlacement = "before" | "after" | "inside";
 type TreeDropMode = "catalog" | "move";
 type TreeDropState = { id: string | null; placement: DropPlacement; mode: TreeDropMode | null };
+type DropGhostOverlay = { rect: DOMRect; placement: DropPlacement; label: string; type: string; mode: TreeDropMode | null };
 type NodeValidationSummary = {
   id: string;
   title?: string;
@@ -2027,7 +2125,10 @@ const DraftDiffPanelFallback: React.FC<{
 function App() {
   const [locale, setLocale] = useState<LocaleKey>(() => {
     if (typeof window === "undefined") return DEFAULT_LOCALE;
-    return resolveLocale(window.localStorage.getItem(LOCALE_STORAGE_KEY));
+    const settingsLocale = loadSettings().locale;
+    const storedLocale = window.localStorage.getItem(LOCALE_STORAGE_KEY);
+    const navigatorLocale = typeof navigator !== "undefined" ? navigator.language : undefined;
+    return resolveLocale(settingsLocale ?? storedLocale ?? navigatorLocale);
   });
   const messages = useMemo(() => getMessages(locale), [locale]);
   const t = useMemo(() => makeTranslator(messages), [messages]);
@@ -2063,6 +2164,18 @@ function App() {
   const [draftHistory, setDraftHistory] = useState<DraftRevision[]>([]);
   const [activeDraftId, setActiveDraftId] = useState<number | null>(null);
   const [savedSignature, setSavedSignature] = useState<string>(() => manifestSignature(initialManifest));
+  const [savedVersionStamp, setSavedVersionStamp] = useState<number | null>(null);
+  const [autosaveDelayMs, setAutosaveDelayMs] = useState<number>(() => {
+    if (typeof window === "undefined") return DEFAULT_AUTOSAVE_MS;
+    const stored = Number(window.localStorage.getItem(AUTOSAVE_STORAGE_KEY));
+    return Number.isFinite(stored) && stored >= 400 ? stored : DEFAULT_AUTOSAVE_MS;
+  });
+  const [autosavePreset, setAutosavePreset] = useState<AutosavePreset>(() => {
+    if (typeof window === "undefined") return "balanced";
+    const stored = Number(window.localStorage.getItem(AUTOSAVE_STORAGE_KEY));
+    const match = (Object.entries(AUTOSAVE_PRESETS) as [AutosavePreset, number][]).find(([, value]) => value === stored);
+    return match ? match[0] : "balanced";
+  });
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const flashStatus = useCallback((message: string) => {
@@ -2072,14 +2185,25 @@ function App() {
   const [saving, setSaving] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [revertTargetId, setRevertTargetId] = useState<number | null>(null);
+  const [draftConflict, setDraftConflict] = useState<{ message: string; latest?: ManifestDraft | null } | null>(null);
   const [draftDiffOpen, setDraftDiffOpen] = useState(false);
   const [draftDiffLoading, setDraftDiffLoading] = useState(false);
+  const [draftDiffDocked, setDraftDiffDocked] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(DRAFT_DIFF_DOCKED_KEY) === "1";
+  });
   const [draftDiffRightRef, setDraftDiffRightRef] = useState<DraftSourceRef | null>(null);
   const [draftDiffRight, setDraftDiffRight] = useState<DraftSource | null>(null);
   const [draftDiffEntries, setDraftDiffEntries] = useState<DraftDiffEntry[]>([]);
   const [draftDiffHighlight, setDraftDiffHighlight] = useState<Record<string, DraftDiffKind>>({});
   const [pip, setPip] = useState<PipDocument | null>(null);
   const [remoteError, setRemoteError] = useState<string | null>(null);
+  const [reviewMode, setReviewMode] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(REVIEW_MODE_KEY) === "1";
+  });
+  const [reviewComments, setReviewComments] = useState<ReviewComment[]>([]);
+  const [reviewDraft, setReviewDraft] = useState("");
   const [loadingManifest, setLoadingManifest] = useState(false);
   const [pipVaultStatus, setPipVaultStatus] = useState<string | null>(null);
   const [pipVaultBusy, setPipVaultBusy] = useState(false);
@@ -2087,14 +2211,17 @@ function App() {
   const [pipVaultRecords, setPipVaultRecords] = useState<PipVaultRecord[]>([]);
   const [vaultIntegrity, setVaultIntegrity] = useState<VaultIntegrityEvent | null>(null);
   const [vaultIntegrityRunning, setVaultIntegrityRunning] = useState(false);
+  const [vaultIntegrityIssues, setVaultIntegrityIssues] = useState<PipVaultIntegrityIssue[]>([]);
   const [vaultAuditEvents, setVaultAuditEvents] = useState<VaultAuditEvent[]>([]);
   const [vaultAuditLoading, setVaultAuditLoading] = useState(false);
   const [vaultAuditExporting, setVaultAuditExporting] = useState<"csv" | "json" | null>(null);
   const [pipVaultFilter, setPipVaultFilter] = useState("");
   const [pipVaultRecordsLoading, setPipVaultRecordsLoading] = useState(false);
   const [pipVaultPassword, setPipVaultPassword] = useState("");
+  const [pipVaultKdfProfile, setPipVaultKdfProfile] = useState<PipVaultKdfProfile>(() => loadKdfProfile());
   const [pipVaultError, setPipVaultError] = useState<string | null>(null);
   const [pipVaultPasswordError, setPipVaultPasswordError] = useState<string | null>(null);
+  const [pipVaultBreachStatus, setPipVaultBreachStatus] = useState<BreachCheckStatus>("idle");
   type PipVaultTaskKind = "import" | "export" | "unlock" | "records-export" | "integrity";
   const [pipVaultTask, setPipVaultTask] = useState<{
     kind: PipVaultTaskKind;
@@ -2186,7 +2313,9 @@ function App() {
   const [spawnStep, setSpawnStep] = useState<string | null>(null);
   const [deployedModuleTx, setDeployedModuleTx] = useState<string | null>(() => loadLastModuleTx());
   const [lastSpawnSnapshot, setLastSpawnSnapshot] = useState<SpawnSnapshot | null>(() => loadLastSpawnSnapshot());
+  const [deployDryRun, setDeployDryRun] = useState(false);
   const [aoLog, setAoLog] = useState<AoMiniLogEntry[]>([]);
+  const [aoLogTailing, setAoLogTailing] = useState(true);
   const [pinnedAoIds, setPinnedAoIds] = useState<string[]>(() => {
     if (typeof window === "undefined") return [];
     try {
@@ -2197,6 +2326,12 @@ function App() {
       return [];
     }
   });
+  const [aoProfiles, setAoProfiles] = useState<AoDeployProfile[]>(() => loadAoProfiles());
+  const [activeProfileId, setActiveProfileId] = useState<string | null>(() => {
+    const initial = loadAoProfiles();
+    return initial[0]?.id ?? null;
+  });
+  const [profileNameDraft, setProfileNameDraft] = useState("");
   const [moduleSourceError, setModuleSourceError] = useState<string | null>(null);
   const [moduleTxError, setModuleTxError] = useState<string | null>(null);
   const [manifestTxError, setManifestTxError] = useState<string | null>(null);
@@ -2204,11 +2339,17 @@ function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [paletteIndex, setPaletteIndex] = useState(0);
+  const [paletteRecents, setPaletteRecents] = useState<string[]>(() => loadPaletteRecents());
   const [hotkeyOverlayOpen, setHotkeyOverlayOpen] = useState(false);
+  const [hotkeyScopeFilter, setHotkeyScopeFilter] = useState<"active" | "all">("active");
+  const [hotkeyPrintable, setHotkeyPrintable] = useState(false);
+  const [hotkeyLearnMode, setHotkeyLearnMode] = useState(false);
+  const [hotkeyActiveTarget, setHotkeyActiveTarget] = useState<HotkeyTarget | null>(null);
   const [compositionDropActive, setCompositionDropActive] = useState(false);
   const [treeDropState, setTreeDropState] = useState<TreeDropState | null>(null);
   const [draggedNodeId, setDraggedNodeId] = useState<string | null>(null);
   const [draggedCatalogId, setDraggedCatalogId] = useState<string | null>(null);
+  const [dropGhost, setDropGhost] = useState<DropGhostOverlay | null>(null);
   const [catalogDragging, setCatalogDragging] = useState(false);
   const [whatsNewOpen, setWhatsNewOpen] = useState(false);
   const [issuesDockCollapsed, setIssuesDockCollapsed] = useState(false);
@@ -2240,6 +2381,7 @@ function App() {
   const originalFetchRef = useRef<typeof fetch | undefined>((globalThis as any).fetch);
   const manifestRef = useRef(manifest);
   const activeDraftIdRef = useRef(activeDraftId);
+  const savedVersionStampRef = useRef<number | null>(savedVersionStamp);
   const autofillNodePropsRef = useRef<(targetId: string) => void>(() => {});
   const saveTimerRef = useRef<number | null>(null);
   const saveInFlightRef = useRef(false);
@@ -2250,6 +2392,7 @@ function App() {
   const lastHealthNotificationRef = useRef<string | null>(null);
   const historySuppressedRef = useRef(false);
   const lastIntegrityFingerprintRef = useRef<string | null>(null);
+  const aoProfilesRef = useRef<AoDeployProfile[]>(aoProfiles);
   const previewSurfaceRef = useRef<HTMLDivElement>(null);
   const wizardRegionRef = useRef<HTMLElement>(null);
   const vaultRegionRef = useRef<HTMLElement>(null);
@@ -2268,10 +2411,64 @@ function App() {
   const vaultModeCancelRef = useRef<HTMLButtonElement>(null);
   const vaultWizardDialogRef = useRef<HTMLDivElement>(null);
   const vaultWizardCloseRef = useRef<HTMLButtonElement>(null);
+  const commentInputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     manifestRef.current = manifest;
   }, [manifest]);
+
+  useEffect(() => {
+    savedVersionStampRef.current = savedVersionStamp;
+  }, [savedVersionStamp]);
+
+  useEffect(() => {
+    aoProfilesRef.current = aoProfiles;
+  }, [aoProfiles]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(AUTOSAVE_STORAGE_KEY, String(autosaveDelayMs));
+    const match = (Object.entries(AUTOSAVE_PRESETS) as [AutosavePreset, number][]).find(([, value]) => value === autosaveDelayMs);
+    if (match && match[0] !== autosavePreset) {
+      setAutosavePreset(match[0]);
+    } else if (!match && autosavePreset !== "balanced") {
+      setAutosavePreset("balanced");
+    }
+  }, [autosaveDelayMs, autosavePreset]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(DRAFT_DIFF_DOCKED_KEY, draftDiffDocked ? "1" : "0");
+  }, [draftDiffDocked]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(REVIEW_MODE_KEY, reviewMode ? "1" : "0");
+  }, [reviewMode]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const store = JSON.parse(window.localStorage.getItem(REVIEW_STORAGE_KEY) ?? "{}") as Record<string, ReviewComment[]>;
+      const stored = Array.isArray(store?.[manifest.id]) ? store[manifest.id] : [];
+      setReviewComments(stored);
+    } catch {
+      setReviewComments([]);
+    }
+  }, [manifest.id]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const storeRaw = window.localStorage.getItem(REVIEW_STORAGE_KEY);
+    let store: Record<string, ReviewComment[]> = {};
+    try {
+      store = storeRaw ? JSON.parse(storeRaw) : {};
+    } catch {
+      store = {};
+    }
+    store[manifest.id] = reviewComments;
+    window.localStorage.setItem(REVIEW_STORAGE_KEY, JSON.stringify(store));
+  }, [manifest.id, reviewComments]);
 
   useEffect(() => {
     if (typeof document === "undefined") return;
@@ -2280,6 +2477,54 @@ function App() {
       document.documentElement.classList.remove("catalog-dragging");
     };
   }, [catalogDragging]);
+
+  useEffect(() => {
+    const applyGhost = () => {
+      if (!treeDropState?.id || (!draggedCatalogId && !draggedNodeId)) {
+        setDropGhost(null);
+        return;
+      }
+      const host = previewSurfaceRef.current;
+      if (!host) {
+        setDropGhost(null);
+        return;
+      }
+      const safeId = treeDropState.id.replace(/(["\\])/g, "\\$1");
+      const target = host.querySelector<HTMLElement>(`.tree-card[data-node-id="${safeId}"]`);
+      if (!target) {
+        setDropGhost(null);
+        return;
+      }
+      const hostRect = host.getBoundingClientRect();
+      const rect = target.getBoundingClientRect();
+      const source =
+        draggedCatalogId != null
+          ? catalog.find((entry) => entry.id === draggedCatalogId) ?? seedCatalog.find((entry) => entry.id === draggedCatalogId)
+          : findNodeById(manifestRef.current.nodes, draggedNodeId);
+      const type =
+        (source as CatalogItem | ManifestNode | undefined)?.type ??
+        (typeof source === "object" && source && "type" in source ? (source as { type?: string }).type : null) ??
+        "block.hero";
+      const label =
+        (source as CatalogItem | undefined)?.name ??
+        (source as ManifestNode | undefined)?.title ??
+        (source as { id?: string } | undefined)?.id ??
+        "Block";
+
+      setDropGhost({
+        rect: new DOMRect(rect.left - hostRect.left, rect.top - hostRect.top, rect.width, rect.height),
+        placement: treeDropState.placement,
+        label,
+        type,
+        mode: treeDropState.mode ?? null,
+      });
+    };
+
+    applyGhost();
+    if (!treeDropState?.id || (!draggedCatalogId && !draggedNodeId)) return;
+    window.addEventListener("resize", applyGhost);
+    return () => window.removeEventListener("resize", applyGhost);
+  }, [catalog, draggedCatalogId, draggedNodeId, treeDropState]);
 
   useEffect(() => {
     activeDraftIdRef.current = activeDraftId;
@@ -2314,6 +2559,18 @@ function App() {
   }, [manifest]);
 
   const manifestOrder = useMemo(() => flattenManifestOrder(manifest), [manifest]);
+  useEffect(() => {
+    if (!reviewComments.length) return;
+    const nodeSet = new Set(manifestOrder);
+    const pruned = reviewComments.filter((comment) => nodeSet.has(comment.nodeId));
+    if (pruned.length !== reviewComments.length) {
+      setReviewComments(pruned);
+    }
+  }, [manifestOrder, reviewComments]);
+  const activeProfile = useMemo(
+    () => aoProfiles.find((profile) => profile.id === activeProfileId) ?? null,
+    [aoProfiles, activeProfileId],
+  );
   const primarySelectedId = selectedNodeIds.length ? selectedNodeIds[0] : null;
   const selectedNodeSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds]);
   const selectedNodeId: string | null = primarySelectedId;
@@ -2321,6 +2578,21 @@ function App() {
     () => (selectedNodeId ? findNodeById(manifest.nodes, selectedNodeId) : null),
     [manifest.nodes, selectedNodeId],
   );
+  const selectedNodeComments = useMemo(
+    () => reviewComments.filter((comment) => comment.nodeId === selectedNodeId),
+    [reviewComments, selectedNodeId],
+  );
+  const reviewCounts = useMemo(() => {
+    const map = new Map<string, { total: number; open: number }>();
+    reviewComments.forEach((comment) => {
+      const bucket = map.get(comment.nodeId) ?? { total: 0, open: 0 };
+      bucket.total += 1;
+      if (!comment.resolvedAt) bucket.open += 1;
+      map.set(comment.nodeId, bucket);
+    });
+    return map;
+  }, [reviewComments]);
+  const openReviewCount = useMemo(() => reviewComments.filter((comment) => !comment.resolvedAt).length, [reviewComments]);
   const selectedCatalogItem = useMemo(
     () =>
       catalog.find((item) => item.type === selectedNode?.type) ??
@@ -2501,15 +2773,19 @@ function App() {
   }, [manifestRequiredIssues]);
   const canUndo = historyState.pointer > 0;
   const canRedo = historyState.pointer < historyState.stack.length - 1;
-  const saveStatusLabel = saving ? "Saving…" : isDirty ? "Unsaved changes" : "Draft saved";
-  const saveStatusTime = lastSavedAt ? formatTime(lastSavedAt) : "Never saved";
+  const saveStatusLabel = draftConflict ? "Conflict detected" : saving ? "Saving…" : isDirty ? "Unsaved changes" : "Draft saved";
+  const saveStatusTime = draftConflict
+    ? "Resolve conflict"
+    : lastSavedAt
+      ? formatTime(lastSavedAt)
+      : "Never saved";
   const confirmDiscardChanges = useCallback(
     (reason?: string) => {
-      if (!isDirty) return true;
+      if (!isDirty && !draftConflict) return true;
       const message = reason ?? "You have unsaved changes. Discard them and continue?";
       return window.confirm(message);
     },
-    [isDirty],
+    [draftConflict, isDirty],
   );
   const pipVaultValidationIssues = useMemo<PipVaultIssue[]>(() => {
     const issues: PipVaultIssue[] = [];
@@ -2589,10 +2865,40 @@ function App() {
     }
   }, []);
   const pipVaultPasswordStrength = useMemo(() => evaluatePasswordStrength(pipVaultPassword), [pipVaultPassword]);
+  const pipVaultStrengthClass = pipVaultPasswordStrength.score ? `score-${pipVaultPasswordStrength.score}` : "";
   const rememberedVaultPassword = useMemo(
     () => (pipVaultRememberUnlock ? readRememberedPassword() : null),
     [pipVaultRememberUnlock, pipVaultPassword, readRememberedPassword],
   );
+  const breachStatusLabel =
+    pipVaultBreachStatus === "checking"
+      ? "Checking…"
+      : pipVaultBreachStatus === "clear"
+        ? "No breach signal"
+        : pipVaultBreachStatus === "maybe"
+          ? "Potential breach"
+          : "Not checked";
+  const breachStatusTone =
+    pipVaultBreachStatus === "clear" ? "accent" : pipVaultBreachStatus === "maybe" ? "issue" : "ghost";
+  const vaultKdfLabel = useMemo(
+    () => (pipVaultSnapshot?.kdf?.algorithm === "argon2id" ? "Argon2id" : "PBKDF2"),
+    [pipVaultSnapshot?.kdf?.algorithm],
+  );
+  const vaultKdfDetail = useMemo(() => {
+    const kdf = pipVaultSnapshot?.kdf;
+    if (kdf?.algorithm === "argon2id") {
+      const mem = kdf.memoryKiB ? `${Math.round(kdf.memoryKiB / 1024)} MiB` : "memory?";
+      const passes = kdf.iterations ?? pipVaultSnapshot?.iterations;
+      const lanes = kdf.parallelism ? ` · p=${kdf.parallelism}` : "";
+      return `${mem} · t=${passes ?? "?"}${lanes}`;
+    }
+    const iterations = kdf?.iterations ?? pipVaultSnapshot?.iterations;
+    return iterations ? `${iterations} · PBKDF2` : "PBKDF2";
+  }, [pipVaultSnapshot?.iterations, pipVaultSnapshot?.kdf]);
+  const kdfProfile = pipVaultKdfProfile ?? DEFAULT_ARGON2_PROFILE;
+  const kdfMemory = kdfProfile.memoryKiB ?? DEFAULT_ARGON2_PROFILE.memoryKiB ?? 0;
+  const kdfIterations = kdfProfile.iterations ?? DEFAULT_ARGON2_PROFILE.iterations ?? 0;
+  const kdfParallelism = kdfProfile.parallelism ?? DEFAULT_ARGON2_PROFILE.parallelism ?? 1;
   const filteredPipVaultRecords = useMemo(() => {
     const query = pipVaultFilter.trim().toLowerCase();
     if (!query) return pipVaultRecords;
@@ -2663,6 +2969,18 @@ function App() {
     () => (walletMode === "jwk" && walletJwkInput.trim() ? validateWalletJsonInput(walletJwkInput) : { ok: true }),
     [walletJwkInput, walletMode],
   );
+  const walletInlineError =
+    walletFieldError ??
+    (walletMode === "path" && walletPathInput.trim() && !walletPathValidation.ok ? walletPathValidation.reason : null) ??
+    (walletMode === "jwk" && walletJwkInput.trim() && !walletJwkValidation.ok ? walletJwkValidation.reason : null);
+  const walletInlineHint = walletInlineError
+    ? null
+    : walletMode === "path"
+      ? (walletPathValidation.ok ? walletPathValidation.hint : null) ?? walletNote ?? "Enter a wallet path or pick via IPC."
+      : walletMode === "jwk"
+        ? (walletJwkValidation.ok ? walletJwkValidation.hint : null) ?? walletNote ?? "Paste wallet JSON or pick via IPC."
+        : walletNote ??
+          (walletPath || walletJwk ? "Wallet ready" : "Choose IPC, path, or pasted JWK. IPC picker preferred.");
 
   const effectiveModuleTx = useMemo(
     () =>
@@ -2686,10 +3004,6 @@ function App() {
 
   const manifestGqlExplorerUrl = "https://arweave.net/graphql";
 
-  const canSpawn = useMemo(
-    () => Boolean((manifestTxInput || pip?.manifestTx)?.trim()) && Boolean(effectiveModuleTx),
-    [effectiveModuleTx, manifestTxInput, pip?.manifestTx],
-  );
   const moduleTxValidation = useMemo(
     () =>
       validateModuleTxInput(
@@ -2716,6 +3030,54 @@ function App() {
     : scheduler
       ? "Looks like a process id"
       : "Optional. Leave blank to use AO defaults.";
+  const wizardValidation = useMemo(
+    () => [
+      {
+        id: "wallet",
+        label: "Wallet",
+        status: walletInlineError ? "error" : walletMode === "ipc" && !walletPath && !walletJwk ? "warn" : "success",
+        detail:
+          walletInlineError ??
+          (walletMode === "ipc"
+            ? walletPath || walletJwk
+              ? walletNote ?? "IPC wallet ready"
+              : "Pick wallet via IPC"
+            : walletInlineHint ?? walletNote ?? "Wallet ready"),
+      },
+      {
+        id: "moduleTx",
+        label: "Module tx",
+        status: moduleTxInlineError ? "error" : effectiveModuleTx ? "success" : "warn",
+        detail: moduleTxInlineError ?? (effectiveModuleTx ? abbreviateTx(effectiveModuleTx) : "Missing module tx"),
+      },
+      {
+        id: "scheduler",
+        label: "Scheduler",
+        status: schedulerInlineError ? "error" : scheduler ? "success" : "info",
+        detail: schedulerInlineError ?? (scheduler ? "Scheduler provided" : "Optional"),
+      },
+    ],
+    [
+      effectiveModuleTx,
+      moduleTxInlineError,
+      scheduler,
+      schedulerInlineError,
+      walletInlineError,
+      walletInlineHint,
+      walletJwk,
+      walletMode,
+      walletNote,
+      walletPath,
+    ],
+  );
+  const canSpawn = useMemo(
+    () =>
+      Boolean((manifestTxInput || pip?.manifestTx)?.trim()) &&
+      Boolean(effectiveModuleTx) &&
+      moduleTxValidation.ok &&
+      schedulerValidation.ok,
+    [effectiveModuleTx, manifestTxInput, moduleTxValidation.ok, pip?.manifestTx, schedulerValidation.ok],
+  );
   const renderTimeline = (
     label: string,
     steps: ActionStep[],
@@ -3231,9 +3593,21 @@ function App() {
     window.setTimeout(() => el.classList.remove("flash-highlight"), 900);
   }, []);
 
+  const switchWorkspace = useCallback(
+    (next: Workspace, options?: { force?: boolean }) => {
+      if (next === workspace) return true;
+      if (!options?.force && !confirmDiscardChanges("Switch workspace and discard unsaved changes?")) {
+        return false;
+      }
+      setWorkspace(next);
+      return true;
+    },
+    [confirmDiscardChanges, workspace],
+  );
+
   const focusWizardStep = useCallback(
     (step: "wallet" | "module" | "spawn") => {
-      setWorkspace("ao");
+      if (!switchWorkspace("ao")) return;
       window.setTimeout(() => {
         wizardRegionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
         const target =
@@ -3245,24 +3619,24 @@ function App() {
         focusElement(target);
       }, 20);
     },
-    [focusElement],
+    [focusElement, switchWorkspace],
   );
 
   const focusVaultField = useCallback(
     (field: "password" | "filter") => {
-      setWorkspace("data");
+      if (!switchWorkspace("data")) return;
       window.setTimeout(() => {
         vaultRegionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
         const target = field === "password" ? vaultPasswordRef.current : vaultFilterRef.current;
         focusElement(target);
       }, 20);
     },
-    [focusElement],
+    [focusElement, switchWorkspace],
   );
 
   const focusHealthThreshold = useCallback(
     (field: "failure" | "latency") => {
-      setWorkspace("ao");
+      if (!switchWorkspace("ao")) return;
       setHealthExpanded(true);
       window.setTimeout(() => {
         healthCardRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -3270,7 +3644,7 @@ function App() {
         focusElement(target);
       }, 20);
     },
-    [focusElement],
+    [focusElement, switchWorkspace],
   );
 
   const refreshVaultAudit = useCallback(
@@ -3320,12 +3694,14 @@ function App() {
           throw new Error(result.error);
         }
 
+        setVaultIntegrityIssues(result.failed);
         await addVaultIntegrityEvent({
           at: startedAt,
           scanned: result.scanned,
           failed: result.failed.length,
           durationMs: result.durationMs,
           recordCount: result.recordCount,
+          issues: result.failed,
         });
 
         const latest = await getLastVaultIntegrityEvent();
@@ -3450,13 +3826,18 @@ function App() {
   );
 
   const openDraftDiffPanel = useCallback(
-    async (ref?: DraftSourceRef | null) => {
+    async (ref?: DraftSourceRef | null, options?: { dock?: boolean }) => {
       setDraftDiffOpen(true);
+      if (options?.dock != null) {
+        setDraftDiffDocked(options.dock);
+      } else {
+        setDraftDiffDocked(false);
+      }
       const targetRef = ref ?? draftDiffRightRef ?? getDefaultDraftDiffRef();
       setDraftDiffRightRef(targetRef ?? null);
       await loadDraftDiffSource(targetRef ?? null);
     },
-    [draftDiffRightRef, getDefaultDraftDiffRef, loadDraftDiffSource],
+    [draftDiffRightRef, getDefaultDraftDiffRef, loadDraftDiffSource, setDraftDiffDocked],
   );
 
   const closeDraftDiffPanel = useCallback(() => {
@@ -3511,7 +3892,10 @@ function App() {
 
   useEffect(() => {
     getLastVaultIntegrityEvent()
-      .then((event) => setVaultIntegrity(event))
+      .then((event) => {
+        setVaultIntegrity(event);
+        setVaultIntegrityIssues(event?.issues ?? []);
+      })
       .catch((err) => console.error("Failed to load vault integrity log", err));
   }, []);
 
@@ -3555,6 +3939,10 @@ function App() {
   ]);
 
   useEffect(() => () => stopVaultAutoLock(), [stopVaultAutoLock]);
+
+  useEffect(() => {
+    setPipVaultBreachStatus("idle");
+  }, [pipVaultPassword]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -3613,9 +4001,36 @@ function App() {
   }, [highEffects]);
 
   useEffect(() => {
+    if (typeof document === "undefined") return;
+    if (hotkeyPrintable) {
+      document.body.setAttribute("data-hotkey-print", "on");
+    } else {
+      document.body.removeAttribute("data-hotkey-print");
+    }
+    return () => {
+      document.body.removeAttribute("data-hotkey-print");
+    };
+  }, [hotkeyPrintable]);
+
+  useEffect(() => {
+    if (prefersReducedMotion && highEffects) {
+      setHighEffects(false);
+    }
+  }, [highEffects, prefersReducedMotion]);
+
+  useEffect(() => {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(AO_PINNED_IDS_STORAGE_KEY, JSON.stringify(pinnedAoIds));
   }, [pinnedAoIds]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(PALETTE_RECENTS_STORAGE_KEY, JSON.stringify(paletteRecents));
+    } catch {
+      // ignore storage errors
+    }
+  }, [paletteRecents]);
 
   useEffect(() => {
     void refreshHealthHistory();
@@ -3731,6 +4146,10 @@ function App() {
       setPropsFormDraft({});
     }
   }, [propsFormValue, selectedNode]);
+
+  useEffect(() => {
+    setReviewDraft("");
+  }, [selectedNodeId]);
 
   useEffect(() => {
     const raw = propsDraft.trim();
@@ -3915,41 +4334,15 @@ function App() {
   }, [paletteOpen]);
 
   useEffect(() => {
-    if (!isDirty || saving) {
-      if (saveTimerRef.current !== null) {
-        window.clearTimeout(saveTimerRef.current);
-        saveTimerRef.current = null;
-      }
-      return;
-    }
-
-    if (saveTimerRef.current !== null) {
-      window.clearTimeout(saveTimerRef.current);
-    }
-
-    saveTimerRef.current = window.setTimeout(() => {
-      saveTimerRef.current = null;
-      void persistDraft("autosave");
-    }, AUTOSAVE_DEBOUNCE_MS);
-
-    return () => {
-      if (saveTimerRef.current !== null) {
-        window.clearTimeout(saveTimerRef.current);
-        saveTimerRef.current = null;
-      }
-    };
-  }, [currentManifestSignature, isDirty, saving]);
-
-  useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (!isDirty && !saving) return;
+      if (!isDirty && !saving && !draftConflict) return;
       event.preventDefault();
       event.returnValue = "";
     };
 
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, [isDirty, saving]);
+  }, [draftConflict, isDirty, saving]);
 
   const refreshDrafts = async (loadLatest?: boolean) => {
     const all = await listDrafts();
@@ -3960,7 +4353,9 @@ function App() {
       adoptManifest(latest.document, { resetHistory: true });
       setActiveDraftId(latest.id ?? null);
       setSavedSignature(manifestSignature(latest.document));
+      setSavedVersionStamp(latest.versionStamp ?? null);
       setLastSavedAt(latest.updatedAt);
+      setDraftConflict(null);
       void refreshDraftHistory(latest.id ?? null);
       flashStatus("Loaded latest draft");
     }
@@ -3976,7 +4371,10 @@ function App() {
     setActiveDraftId(null);
     setDraftHistory([]);
     setSavedSignature(manifestSignature(next));
+    setSavedVersionStamp(null);
     setLastSavedAt(null);
+    setDraftConflict(null);
+    setReviewDraft("");
     if (message) {
       flashStatus(message);
     }
@@ -3984,16 +4382,32 @@ function App() {
   }, [adoptManifest, confirmDiscardChanges, flashStatus]);
 
   const persistDraft = useCallback(
-    async (mode: DraftSaveMode) => {
+    async (
+      mode: DraftSaveMode,
+      options?: {
+        force?: boolean;
+        revisionTag?: DraftRevisionTag;
+        revisionNote?: string;
+        name?: string;
+        targetId?: number | null;
+      },
+    ) => {
       if (saveInFlightRef.current) return null;
 
       const snapshot = manifestRef.current;
       const snapshotSignature = manifestSignature(snapshot);
+      const desiredName = options?.name?.trim() || snapshot.name;
+      const nextSnapshot = options?.name ? touch({ ...snapshot, name: desiredName }) : snapshot;
+      const effectiveTargetId =
+        mode === "duplicate" ? null : options?.targetId === undefined ? activeDraftIdRef.current : options.targetId;
+      const expectedVersion =
+        mode === "duplicate" || effectiveTargetId == null ? undefined : savedVersionStampRef.current ?? undefined;
+
       const draftInput = {
-        id: mode === "duplicate" ? undefined : activeDraftIdRef.current ?? undefined,
-        name: snapshot.name,
-        document: snapshot,
-        createdAt: snapshot.metadata.createdAt,
+        id: mode === "duplicate" || effectiveTargetId == null ? undefined : effectiveTargetId ?? undefined,
+        name: desiredName,
+        document: nextSnapshot,
+        createdAt: nextSnapshot.metadata.createdAt,
       };
 
       saveInFlightRef.current = true;
@@ -4002,32 +4416,49 @@ function App() {
       try {
         const saved =
           mode === "duplicate"
-            ? await duplicateDraft({ name: snapshot.name, document: snapshot })
-            : await saveDraft(draftInput, mode);
+            ? await duplicateDraft({ name: desiredName, document: nextSnapshot })
+            : await saveDraft(draftInput, mode, {
+                expectedVersionStamp: expectedVersion,
+                force: options?.force,
+                revisionTag: options?.revisionTag,
+                revisionNote: options?.revisionNote,
+              });
 
         setDrafts((current) => upsertDraftRow(current, saved));
         setActiveDraftId(saved.id ?? null);
         setSavedSignature(manifestSignature(saved.document));
+        setSavedVersionStamp(saved.versionStamp ?? null);
         setLastSavedAt(saved.updatedAt);
+        setDraftConflict(null);
         void refreshDraftHistory(saved.id ?? null);
 
-        if (mode === "duplicate" || manifestSignature(manifestRef.current) === snapshotSignature) {
-          adoptManifest(saved.document, { resetHistory: mode === "duplicate" });
+        const shouldAdopt =
+          mode === "duplicate" || options?.targetId === null || manifestSignature(manifestRef.current) === snapshotSignature;
+
+        if (shouldAdopt) {
+          adoptManifest(saved.document, { resetHistory: mode === "duplicate" || options?.targetId === null });
         }
 
-        if (mode === "manual") {
+        if (mode === "manual" && !options?.revisionTag) {
           flashStatus("Draft saved to IndexedDB");
         } else if (mode === "duplicate") {
           flashStatus("Draft duplicated");
+        } else if (options?.revisionTag === "restore-point") {
+          flashStatus("Restore point captured");
         }
 
         return saved;
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Draft save failed";
-        if (mode !== "autosave") {
-          flashStatus(message);
+        if (err instanceof DraftVersionConflictError) {
+          setDraftConflict({ message: err.message, latest: err.latest ?? null });
+          flashStatus("Draft conflict: updated elsewhere");
         } else {
-          flashStatus(`Autosave failed: ${message}`);
+          const message = err instanceof Error ? err.message : "Draft save failed";
+          if (mode !== "autosave") {
+            flashStatus(message);
+          } else {
+            flashStatus(`Autosave failed: ${message}`);
+          }
         }
         return null;
       } finally {
@@ -4037,6 +4468,33 @@ function App() {
     },
     [adoptManifest, flashStatus, refreshDraftHistory],
   );
+
+  useEffect(() => {
+    if (!isDirty || saving || draftConflict) {
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      return;
+    }
+
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+    }
+
+    const delay = Math.max(400, autosaveDelayMs);
+    saveTimerRef.current = window.setTimeout(() => {
+      saveTimerRef.current = null;
+      void persistDraft("autosave");
+    }, delay);
+
+    return () => {
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+    };
+  }, [autosaveDelayMs, draftConflict, isDirty, persistDraft, saving]);
 
   const handleLoadPip = () => {
     const raw = window.prompt("Paste PIP JSON (must include manifestTx) or a manifest txid");
@@ -4284,6 +4742,32 @@ function App() {
     ).finally(() => setPipVaultBusy(false));
   }
 
+  const handleSaveKdfProfile = useCallback(() => {
+    const saved = persistKdfProfile(pipVaultKdfProfile);
+    setPipVaultKdfProfile(saved);
+    setPipVaultStatus(`Saved ${saved.algorithm} tuning (UI stub)`);
+    flashStatus("KDF tuning stored for upcoming Argon2id support");
+  }, [flashStatus, pipVaultKdfProfile]);
+
+  const handleBreachCheck = useCallback(() => {
+    if (!pipVaultPassword.trim()) {
+      setPipVaultBreachStatus("idle");
+      flashStatus("Enter a password first");
+      return;
+    }
+    setPipVaultBreachStatus("checking");
+    window.setTimeout(() => {
+      const weakPattern = COMMON_PASSWORD_PATTERNS.some((regex) => regex.test(pipVaultPassword));
+      const short = pipVaultPassword.length < 12;
+      const status: BreachCheckStatus = weakPattern || short ? "maybe" : "clear";
+      setPipVaultBreachStatus(status);
+      const message =
+        status === "clear" ? "No breach indicators found (stub only)" : "Password may be weak or previously breached (stub)";
+      setPipVaultStatus(message);
+      flashStatus(message);
+    }, 420);
+  }, [flashStatus, pipVaultPassword]);
+
   const handleRunIntegrityScan = () => {
     if (pipVaultLocked) {
       const message = "Unlock the vault with its password first";
@@ -4435,6 +4919,38 @@ function App() {
     }
   };
 
+  const handleRepairVaultIssue = async (issue: PipVaultIntegrityIssue) => {
+    if (pipVaultLocked) {
+      const message = "Unlock the vault with its password first";
+      setPipVaultStatus(message);
+      setPipVaultError(message);
+      flashStatus(message);
+      return;
+    }
+
+    if (!window.confirm(`Attempt repair by deleting record ${issue.id}?`)) {
+      return;
+    }
+
+    setPipVaultBusy(true);
+    try {
+      const result = await deletePipVaultRecordStorage(issue.id);
+      if (!result.ok) {
+        setPipVaultStatus(result.error);
+        setPipVaultError(result.error);
+        flashStatus(result.error);
+        return;
+      }
+
+      flashStatus("Record removed; re-scanning integrity");
+      await refreshPipVaultSnapshot();
+      await refreshPipVaultRecords();
+      void runVaultIntegrityScan("manual");
+    } finally {
+      setPipVaultBusy(false);
+    }
+  };
+
   const runEnableVaultPassword = useCallback(
     async (password: string, options?: { auto?: boolean }) => {
       const trimmed = password.trim();
@@ -4477,11 +4993,12 @@ function App() {
               ? "Vault unlocked"
               : "Password rotated"
             : "Password mode enabled";
+        const kdfNote = pipVaultKdfProfile.algorithm === "argon2id" ? " · Argon2id tuning saved (UI only)" : "";
         const statusMessage = options?.auto ? `${message} (remembered)` : message;
-        setPipVaultStatus(statusMessage);
+        setPipVaultStatus(`${statusMessage}${kdfNote}`);
         setPipVaultError(null);
         if (!options?.auto) {
-          flashStatus(message);
+          flashStatus(`${message}${kdfNote}`);
         }
         lastVaultLockReasonRef.current = null;
         rememberPasswordForSession(trimmed);
@@ -4510,6 +5027,7 @@ function App() {
       rememberPasswordForSession,
       refreshPipVaultSnapshot,
       refreshPipVaultRecords,
+      pipVaultKdfProfile.algorithm,
     ],
   );
 
@@ -5103,7 +5621,16 @@ function App() {
     setWalletFieldError(null);
     resetDeployTimeline("Prepare deploy");
 
-    if (offlineMode) {
+    if (!moduleSource.trim()) {
+      setModuleSourceError("Add module source before deploying");
+      setDeployOutcome("Add module source before deploying");
+      setDeployState("error");
+      markDeployTimeline("deploy-deploy", "error", "Add module source before deploying");
+      flashStatus("Add module source before deploying");
+      return;
+    }
+
+    if (offlineMode && !deployDryRun) {
       const message = "Offline mode is enabled; deploy is blocked";
       setDeployOutcome(message);
       setDeployState("error");
@@ -5111,15 +5638,6 @@ function App() {
       setDeployTransient(true);
       markDeployTimeline("deploy-deploy", "error", message);
       flashStatus(message);
-      return;
-    }
-
-    if (!moduleSource.trim()) {
-      setModuleSourceError("Add module source before deploying");
-      setDeployOutcome("Add module source before deploying");
-      setDeployState("error");
-      markDeployTimeline("deploy-deploy", "error", "Add module source before deploying");
-      flashStatus("Add module source before deploying");
       return;
     }
 
@@ -5132,31 +5650,37 @@ function App() {
     }
 
     setDeployState("pending");
-    setDeployStep("Validating wallet");
+    setDeployStep(deployDryRun ? "Dry-run" : "Validating wallet");
     setDeploying(true);
     markDeployTimeline("deploy-wallet", "success", walletNote ?? "Wallet ready");
-    markDeployTimeline("deploy-signer", "pending", "Creating signer");
+    markDeployTimeline("deploy-signer", "pending", deployDryRun ? "Mock signer" : "Creating signer");
+
+    const walletPathHint = walletMode === "path" ? walletPath ?? walletPathInput : undefined;
 
     try {
-      setDeployStep("Creating signer");
-      const { deployModule } = await loadAoDeployModule();
-      markDeployTimeline("deploy-signer", "success", "Signer ready");
-      markDeployTimeline("deploy-deploy", "pending", "Sending module to AO");
-      const response = await deployModule(walletSource, moduleSource, [], { offline: offlineMode });
+      setDeployStep(deployDryRun ? "Dry-run" : "Creating signer");
+      const { deployModule, simulateDeployModule } = await loadAoDeployModule();
+      markDeployTimeline("deploy-signer", "success", deployDryRun ? "Mock signer ready" : "Signer ready");
+      markDeployTimeline("deploy-deploy", "pending", deployDryRun ? "Simulating deploy" : "Sending module to AO");
+      const response = deployDryRun
+        ? await simulateDeployModule(moduleSource, [], walletPathHint)
+        : await deployModule(walletSource, moduleSource, [], { offline: offlineMode });
       recordAoLog(
         "deploy",
         response.txId,
-        response.placeholder ? "Placeholder" : "Success",
+        deployDryRun ? "Dry-run" : response.placeholder ? "Placeholder" : "Success",
         response.raw ?? response,
         {
           moduleTx: response.txId ?? (moduleTxInput || deployedModuleTx) ?? undefined,
           transient: Boolean(response.transient),
+          dryRun: deployDryRun,
+          profileId: activeProfileId ?? undefined,
         },
         { durationMs: performance.now() - deployStartedAt },
       );
       setDeployTransient(Boolean(response.transient));
 
-      if (response.txId) {
+      if (!deployDryRun && response.txId) {
         setDeployedModuleTx(response.txId);
         setModuleTxInput(response.txId);
         setModuleTxError(null);
@@ -5164,22 +5688,63 @@ function App() {
 
       setDeployOutcome(
         response.note ??
-          (response.txId ? `Module deployed: ${response.txId}` : "Module deploy request sent"),
+          (deployDryRun
+            ? "Dry-run simulation complete"
+            : response.txId
+              ? `Module deployed: ${response.txId}`
+              : "Module deploy request sent"),
       );
 
-      if (response.placeholder) {
+      if (response.placeholder && !deployDryRun) {
         flashStatus(response.note ?? "Deploy requires wallet access");
         setDeployState("pending");
         markDeployTimeline("deploy-deploy", "pending", response.note ?? "Deploy requires wallet access");
       } else {
         setDeployState("success");
-        setDeployStep("Completed");
+        setDeployStep(deployDryRun ? "Dry-run" : "Completed");
         markDeployTimeline(
           "deploy-deploy",
           "success",
-          response.txId ? `Tx ${abbreviateTx(response.txId)}` : "Deploy dispatched",
+          deployDryRun
+            ? "Dry-run (mock gateway)"
+            : response.txId
+              ? `Tx ${abbreviateTx(response.txId)}`
+              : "Deploy dispatched",
         );
-        flashStatus(response.txId ? `Module deployed (${response.txId})` : "Module deploy complete");
+        flashStatus(
+          deployDryRun
+            ? "Dry-run simulated (no network call)"
+            : response.txId
+              ? `Module deployed (${response.txId})`
+              : "Module deploy complete",
+        );
+      }
+
+      if (!deployDryRun && response.txId) {
+        snapshotProfile({
+          label: profileNameDraft || undefined,
+          walletMode,
+          walletPath: walletPathHint ?? null,
+          moduleTx: response.txId,
+          manifestTx: manifestTxInput.trim() || pip?.manifestTx?.trim() || null,
+          scheduler: scheduler.trim() || null,
+          dryRun: false,
+          lastKind: "deploy",
+        });
+        if (profileNameDraft) {
+          setProfileNameDraft("");
+        }
+      } else if (deployDryRun) {
+        snapshotProfile({
+          label: profileNameDraft || undefined,
+          walletMode,
+          walletPath: walletPathHint ?? null,
+          moduleTx: null,
+          manifestTx: manifestTxInput.trim() || pip?.manifestTx?.trim() || null,
+          scheduler: scheduler.trim() || null,
+          dryRun: true,
+          lastKind: "deploy",
+        });
       }
     } catch (err) {
       const { message, transient } = classifyAoError(err);
@@ -5188,7 +5753,12 @@ function App() {
         null,
         "Error",
         err instanceof Error ? { message: err.message } : { error: String(err) },
-        { moduleTx: moduleTxInput || deployedModuleTx || undefined, transient },
+        {
+          moduleTx: moduleTxInput || deployedModuleTx || undefined,
+          transient,
+          dryRun: deployDryRun,
+          profileId: activeProfileId ?? undefined,
+        },
         { durationMs: performance.now() - deployStartedAt },
       );
       setDeployOutcome(message);
@@ -5258,6 +5828,7 @@ function App() {
       return;
     }
 
+    const walletPathHint = walletMode === "path" ? walletPath ?? walletPathInput : null;
     setModuleTxError(null);
     markSpawnTimeline("spawn-wallet", "pending", "Validating wallet");
 
@@ -5296,6 +5867,7 @@ function App() {
           moduleTx: response.moduleTx ?? moduleValidation.value,
           scheduler: schedulerCandidate || undefined,
           transient: Boolean(response.transient),
+          profileId: activeProfileId ?? undefined,
         },
         { durationMs: performance.now() - spawnStartedAt },
       );
@@ -5321,6 +5893,19 @@ function App() {
           time: new Date().toISOString(),
         };
         setLastSpawnSnapshot(snapshot);
+        snapshotProfile({
+          label: profileNameDraft || undefined,
+          walletMode,
+          walletPath: walletPathHint,
+          moduleTx: response.moduleTx ?? moduleValidation.value,
+          manifestTx: manifestValidation.value,
+          scheduler: schedulerCandidate || null,
+          dryRun: false,
+          lastKind: "spawn",
+        });
+        if (profileNameDraft) {
+          setProfileNameDraft("");
+        }
       }
 
       if (response.placeholder) {
@@ -5346,7 +5931,13 @@ function App() {
         null,
         "Error",
         err instanceof Error ? { message: err.message } : { error: String(err) },
-        { manifestTx: manifestCandidate, moduleTx, scheduler: schedulerCandidate || undefined, transient },
+        {
+          manifestTx: manifestCandidate,
+          moduleTx,
+          scheduler: schedulerCandidate || undefined,
+          transient,
+          profileId: activeProfileId ?? undefined,
+        },
         { durationMs: performance.now() - spawnStartedAt },
       );
       setSpawnOutcome(message);
@@ -5486,6 +6077,7 @@ function App() {
     setCatalogDragging(false);
     setCompositionDropActive(false);
     setTreeDropState(null);
+    setDropGhost(null);
   };
 
   const handleNodeDragStart = (id: string) => {
@@ -5498,11 +6090,13 @@ function App() {
     setDraggedNodeId(null);
     setTreeDropState(null);
     setCompositionDropActive(false);
+    setDropGhost(null);
   };
 
   const handleDropTargetChange = (id: string | null, placement: DropPlacement = "inside", mode: TreeDropMode = "catalog") => {
     if (!id) {
       setTreeDropState(null);
+      setDropGhost(null);
       return;
     }
     setTreeDropState({ id, placement, mode });
@@ -5531,11 +6125,37 @@ function App() {
     if (!catalogDragging) {
       setCatalogDragging(true);
     }
+    const dragMode: TreeDropMode = nodeDrag ? "move" : "catalog";
     event.dataTransfer.dropEffect = nodeDrag ? "move" : "copy";
     setCompositionDropActive(true);
-    if (nodeDrag) {
-      handleDropTargetChange(null, "inside", "move");
+    const host = previewSurfaceRef.current;
+    if (!host) return;
+
+    const cards = Array.from(host.querySelectorAll<HTMLElement>(".tree-card"));
+    if (!cards.length) {
+      handleDropTargetChange(null, "inside", dragMode);
+      return;
     }
+
+    const pointerY = event.clientY;
+    const nearest = cards.reduce<{ el: HTMLElement | null; dist: number }>(
+      (best, el) => {
+        const rect = el.getBoundingClientRect();
+        const dist =
+          pointerY >= rect.top && pointerY <= rect.bottom
+            ? 0
+            : Math.min(Math.abs(pointerY - rect.top), Math.abs(pointerY - rect.bottom));
+        return dist < best.dist ? { el, dist } : best;
+      },
+      { el: null, dist: Number.POSITIVE_INFINITY },
+    );
+
+    const target = nearest.el;
+    if (!target) return;
+    const rect = target.getBoundingClientRect();
+    const ratio = rect.height ? (pointerY - rect.top) / rect.height : 0.5;
+    const placement: DropPlacement = ratio < 0.25 ? "before" : ratio > 0.75 ? "after" : "inside";
+    handleDropTargetChange(target.dataset.nodeId ?? null, placement, dragMode);
   };
 
   const handleCompositionDragLeave = (event: React.DragEvent<HTMLElement>) => {
@@ -5543,16 +6163,22 @@ function App() {
     setCompositionDropActive(false);
     setCatalogDragging(false);
     setTreeDropState(null);
+    setDropGhost(null);
   };
 
   const handleCompositionDrop = (event: React.DragEvent<HTMLElement>) => {
     event.preventDefault();
+    const dropState = treeDropState;
     setCompositionDropActive(false);
     setCatalogDragging(false);
     setTreeDropState(null);
     const draggedNode = event.dataTransfer.getData("application/x-darkmesh-node");
     if (draggedNode) {
-      handleMoveNode(draggedNode, null, "after");
+      if (dropState?.mode === "move") {
+        handleMoveNode(draggedNode, dropState.id, dropState.placement);
+      } else {
+        handleMoveNode(draggedNode, null, "after");
+      }
       setDraggedNodeId(null);
       return;
     }
@@ -5566,7 +6192,11 @@ function App() {
       return;
     }
 
-    addFromCatalog(dropped);
+    if (dropState && dropState.mode === "catalog") {
+      handleTreeDrop(dropState.id, itemId, dropState.placement, dropState.mode);
+    } else {
+      addFromCatalog(dropped);
+    }
   };
 
   const handleTreeDrop = (targetId: string | null, payloadId: string, placement: DropPlacement, mode: TreeDropMode) => {
@@ -5631,6 +6261,39 @@ function App() {
       }
       const placement: DropPlacement = direction === "up" ? "before" : "after";
       handleMoveNode(activeId, sibling.id, placement);
+    },
+    [flashStatus, handleMoveNode, selectedNodeId],
+  );
+
+  const handleKeyboardStack = useCallback(
+    (direction: "in" | "out") => {
+      const activeId = selectedNodeId;
+      if (!activeId) {
+        flashStatus("Select a node to move");
+        return;
+      }
+      const parentIndex = buildParentIndex(manifestRef.current.nodes);
+      const meta = parentIndex.get(activeId);
+      if (!meta) return;
+
+      if (direction === "in") {
+        const parentNode = meta.parentId ? findNodeById(manifestRef.current.nodes, meta.parentId) : null;
+        const siblings = parentNode?.children ?? manifestRef.current.nodes;
+        const previous = siblings[meta.index - 1];
+        if (!previous) {
+          flashStatus("No previous sibling to stack under");
+          return;
+        }
+        handleMoveNode(activeId, previous.id, "inside");
+        return;
+      }
+
+      if (!meta.parentId) {
+        flashStatus("Already at root");
+        return;
+      }
+
+      handleMoveNode(activeId, meta.parentId, "after");
     },
     [flashStatus, handleMoveNode, selectedNodeId],
   );
@@ -5761,10 +6424,61 @@ function App() {
     setManifest((prev) => touch({ ...prev, name: value || "Untitled manifest" }));
   };
 
+  const addReviewComment = (nodeId: string, text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed || !nodeId) return;
+    const entry: ReviewComment = {
+      id: randomId(),
+      manifestId: manifest.id,
+      nodeId,
+      text: trimmed,
+      createdAt: new Date().toISOString(),
+    };
+    setReviewComments((current) => [entry, ...current]);
+    setReviewDraft("");
+    window.setTimeout(() => commentInputRef.current?.focus(), 20);
+  };
+
+  const toggleReviewComment = (commentId: string) => {
+    setReviewComments((current) =>
+      current.map((comment) =>
+        comment.id === commentId
+          ? { ...comment, resolvedAt: comment.resolvedAt ? null : new Date().toISOString() }
+          : comment,
+      ),
+    );
+  };
+
+  const deleteReviewComment = (commentId: string) => {
+    setReviewComments((current) => current.filter((comment) => comment.id !== commentId));
+  };
+
+  const handleRequestComment = (nodeId: string) => {
+    applySelection([nodeId]);
+    setReviewMode(true);
+    window.setTimeout(() => commentInputRef.current?.focus(), 20);
+  };
+
   const handleSaveDraft = async () => {
     const saved = await persistDraft("manual");
     if (saved) {
       await refreshDrafts();
+    }
+  };
+
+  const handleSaveAs = async () => {
+    const proposal = window.prompt("Save this draft as…", manifestRef.current.name)?.trim();
+    if (!proposal) return;
+    const saved = await persistDraft("manual", { name: proposal, targetId: null, force: true, revisionNote: "Save as copy" });
+    if (saved) {
+      await refreshDrafts();
+    }
+  };
+
+  const handleSaveRestorePoint = async () => {
+    const saved = await persistDraft("manual", { revisionTag: "restore-point", revisionNote: "Restore point" });
+    if (saved?.id) {
+      await refreshDraftHistory(saved.id);
     }
   };
 
@@ -5782,7 +6496,9 @@ function App() {
       adoptManifest(draft.document, { resetHistory: true });
       setActiveDraftId(id);
       setSavedSignature(manifestSignature(draft.document));
+      setSavedVersionStamp(draft.versionStamp ?? null);
       setLastSavedAt(draft.updatedAt);
+      setDraftConflict(null);
       void refreshDraftHistory(id);
       flashStatus("Draft loaded");
     }
@@ -5805,7 +6521,10 @@ function App() {
     setRevertTargetId(revision.id);
     adoptManifest(revision.document);
     setActiveDraftId(revision.draftId);
+    setSavedSignature(manifestSignature(revision.document));
+    setSavedVersionStamp(revision.versionStamp ?? null);
     setLastSavedAt(revision.savedAt);
+    setDraftConflict(null);
     flashStatus(`Reverted to ${formatDraftSaveMode(revision.mode).toLowerCase()} from ${formatDate(revision.savedAt)}`);
     window.setTimeout(() => {
       setRevertTargetId((current) => (current === revision.id ? null : current));
@@ -5816,6 +6535,39 @@ function App() {
     const saved = await persistDraft("duplicate");
     if (saved) {
       await refreshDrafts();
+    }
+  };
+
+  const handleResolveConflict = async (action: "reload" | "force" | "duplicate") => {
+    if (action === "reload") {
+      const latest =
+        draftConflict?.latest ?? (activeDraftIdRef.current ? await getDraft(activeDraftIdRef.current) : null);
+      if (latest) {
+        adoptManifest(latest.document, { resetHistory: true });
+        setActiveDraftId(latest.id ?? null);
+        setSavedSignature(manifestSignature(latest.document));
+        setSavedVersionStamp(latest.versionStamp ?? null);
+        setLastSavedAt(latest.updatedAt);
+        void refreshDraftHistory(latest.id ?? null);
+        flashStatus("Reloaded latest draft");
+      }
+      setDraftConflict(null);
+      return;
+    }
+
+    if (action === "force") {
+      const saved = await persistDraft("manual", { force: true });
+      if (saved) {
+        await refreshDrafts();
+        setDraftConflict(null);
+      }
+      return;
+    }
+
+    const saved = await persistDraft("duplicate");
+    if (saved) {
+      await refreshDrafts();
+      setDraftConflict(null);
     }
   };
 
@@ -5833,15 +6585,21 @@ function App() {
 
   const handleExportDrafts = async () => {
     try {
-      const data = await exportDraftsToJson();
-      const blob = new Blob([data], { type: "application/json" });
+      const result = await exportDraftsToJson();
+      const blob = new Blob([result.json], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
       link.download = `darkmesh-drafts-${new Date().toISOString().slice(0, 10)}.json`;
       link.click();
       URL.revokeObjectURL(url);
-      flashStatus(`Exported ${drafts.length} draft${drafts.length === 1 ? "" : "s"}`);
+      const revisionCopy =
+        result.revisions > 0 ? ` · ${result.revisions} revision${result.revisions === 1 ? "" : "s"}` : "";
+      const restoreCopy =
+        result.restorePoints > 0
+          ? ` · ${result.restorePoints} restore point${result.restorePoints === 1 ? "" : "s"}`
+          : "";
+      flashStatus(`Exported ${result.drafts} draft${result.drafts === 1 ? "" : "s"}${revisionCopy}${restoreCopy}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Draft export failed";
       flashStatus(message);
@@ -5860,7 +6618,13 @@ function App() {
         const text = await file.text();
         const imported = await importDraftsFromJson(text);
         await refreshDrafts();
-        flashStatus(`Imported ${imported} draft${imported === 1 ? "" : "s"}`);
+        const revisionCopy =
+          imported.revisions > 0 ? ` · ${imported.revisions} revision${imported.revisions === 1 ? "" : "s"}` : "";
+        const restoreCopy =
+          imported.restorePoints > 0
+            ? ` · ${imported.restorePoints} restore point${imported.restorePoints === 1 ? "" : "s"}`
+            : "";
+        flashStatus(`Imported ${imported.drafts} draft${imported.drafts === 1 ? "" : "s"}${revisionCopy}${restoreCopy}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : "Draft import failed";
         flashStatus(message);
@@ -5962,6 +6726,7 @@ function App() {
   const classifyAoSeverity = (status: string): AoLogSeverity => {
     const normalized = status.toLowerCase();
     if (normalized.includes("error") || normalized.includes("fail")) return "error";
+    if (normalized.includes("dry")) return "success";
     if (normalized.includes("placeholder") || normalized.includes("warn")) return "warning";
     if (normalized.includes("success")) return "success";
     return "info";
@@ -6011,6 +6776,37 @@ function App() {
     );
   };
 
+  const toggleAoLogTail = useCallback((next?: boolean) => {
+    setAoLogTailing((current) => (typeof next === "boolean" ? next : !current));
+  }, []);
+
+  const handleClearAoLog = useCallback(() => {
+    setAoLog([]);
+    flashStatus("AO console log cleared");
+  }, [flashStatus]);
+
+  const handleExportAoLog = useCallback(
+    (format: "csv") => {
+      if (!aoLog.length) {
+        flashStatus("No AO log entries to export");
+        return;
+      }
+
+      if (format === "csv") {
+        const csv = aoLogToCsv(aoLog);
+        const blob = new Blob([csv], { type: "text/csv" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `ao-log-${new Date().toISOString().slice(0, 10)}.csv`;
+        link.click();
+        URL.revokeObjectURL(url);
+        flashStatus("AO log exported");
+      }
+    },
+    [aoLog, flashStatus],
+  );
+
   const retryAoAction = (entry: AoMiniLogEntry) => {
     if (entry.kind === "deploy") {
       void handleDeployModuleClick();
@@ -6039,6 +6835,85 @@ function App() {
     retryAoAction(entry);
   };
 
+  const snapshotProfile = useCallback(
+    (snapshot: AoProfileSnapshot) => {
+      const sanitized: AoProfileSnapshot = {
+        ...snapshot,
+        walletPath: snapshot.walletMode === "path" ? snapshot.walletPath ?? null : null,
+        moduleTx: snapshot.moduleTx ?? null,
+        manifestTx: snapshot.manifestTx ?? null,
+        scheduler: snapshot.scheduler ?? null,
+        dryRun: snapshot.dryRun ?? false,
+      };
+
+      const { profile, profiles } = rememberProfile(sanitized, aoProfilesRef.current);
+      setAoProfiles(profiles);
+      setActiveProfileId(profile.id);
+      return profile;
+    },
+    [rememberProfile, setActiveProfileId, setAoProfiles],
+  );
+
+  const applyProfile = useCallback(
+    (profile: AoDeployProfile) => {
+      setActiveProfileId(profile.id);
+      setWalletMode(profile.walletMode);
+      setWalletFieldError(null);
+      setModuleTxError(null);
+      setSchedulerError(null);
+      setManifestTxError(null);
+      setWalletNote(profile.walletMode === "path" && profile.walletPath ? "Path loaded from profile; load wallet to use it." : null);
+      setWalletPathInput(profile.walletPath ?? "");
+      setWalletPath(null);
+      setWalletJwk(null);
+      setWalletJwkInput("");
+      setModuleTxInput(profile.moduleTx ?? "");
+      setManifestTxInput(profile.manifestTx ?? "");
+      setScheduler(profile.scheduler ?? "");
+      setDeployDryRun(Boolean(profile.dryRun));
+      flashStatus(`Profile ${profile.label} applied`);
+    },
+    [flashStatus],
+  );
+
+  const handleSaveProfile = useCallback(() => {
+    const pathCandidate = walletMode === "path" ? walletPathInput.trim() || walletPath || null : null;
+    const snapshot: AoProfileSnapshot = {
+      label: profileNameDraft || undefined,
+      walletMode,
+      walletPath: pathCandidate,
+      moduleTx: moduleTxInput.trim() || deployedModuleTx || null,
+      manifestTx: manifestTxInput.trim() || pip?.manifestTx?.trim() || null,
+      scheduler: scheduler.trim() || null,
+      dryRun: deployDryRun,
+      lastKind: "deploy",
+    };
+
+    if (!snapshot.moduleTx && !snapshot.manifestTx) {
+      flashStatus("Add a moduleTx or manifestTx before saving a profile");
+      return;
+    }
+
+    const profile = snapshotProfile(snapshot);
+    if (profileNameDraft) {
+      setProfileNameDraft("");
+    }
+    flashStatus(`Profile ${profile.label} saved`);
+  }, [
+    deployDryRun,
+    deployedModuleTx,
+    flashStatus,
+    manifestTxInput,
+    moduleTxInput,
+    profileNameDraft,
+    pip,
+    scheduler,
+    snapshotProfile,
+    walletMode,
+    walletPath,
+    walletPathInput,
+  ]);
+
   const closePalette = useCallback(() => {
     setPaletteOpen(false);
     setPaletteQuery("");
@@ -6055,15 +6930,32 @@ function App() {
     setPaletteOpen(true);
   }, [closePalette, paletteOpen]);
 
+  const resetHotkeyOverlayState = useCallback(() => {
+    setHotkeyPrintable(false);
+    setHotkeyLearnMode(false);
+    setHotkeyActiveTarget(null);
+    setHotkeyScopeFilter("active");
+  }, []);
+
   const closeHotkeyOverlay = useCallback(() => {
     setHotkeyOverlayOpen(false);
-  }, []);
+    resetHotkeyOverlayState();
+  }, [resetHotkeyOverlayState]);
 
   const toggleHotkeyOverlay = useCallback(() => {
     setPaletteOpen(false);
     setPaletteQuery("");
     setPaletteIndex(0);
-    setHotkeyOverlayOpen((open) => !open);
+    setHotkeyOverlayOpen((open) => {
+      if (open) {
+        resetHotkeyOverlayState();
+      }
+      return !open;
+    });
+  }, [resetHotkeyOverlayState]);
+
+  const rememberPaletteAction = useCallback((actionId: string) => {
+    setPaletteRecents((current) => [actionId, ...current.filter((value) => value !== actionId)].slice(0, PALETTE_RECENTS_LIMIT));
   }, []);
 
   const runPaletteAction = useCallback(
@@ -6071,11 +6963,14 @@ function App() {
       closePalette();
       try {
         await action.run();
+        if (action.id) {
+          rememberPaletteAction(action.id);
+        }
       } catch (err) {
         flashStatus(err instanceof Error ? err.message : "Command failed");
       }
     },
-    [closePalette, flashStatus],
+    [closePalette, flashStatus, rememberPaletteAction],
   );
 
   const changeLocale = useCallback(
@@ -6087,69 +6982,119 @@ function App() {
         return;
       }
       setLocale(next);
+      saveSettings({ locale: next });
       flashStatus(nextTranslator("statuses.localeChanged", { language: nextMessages.meta.languageNative }));
     },
     [flashStatus, locale],
   );
 
   const actionCopy = messages.actions;
+  const paletteSectionLabels = messages.paletteUi.sections;
   const nextThemePreset = useMemo(
     () => themePresets[(themePresets.findIndex((preset) => preset.id === theme) + 1) % themePresets.length] ?? themePresets[0],
     [theme],
   );
 
+  const fuzzyScore = useCallback((text: string, query: string): number | null => {
+    const haystack = text.toLowerCase();
+    let cursor = 0;
+    let score = 0;
+    for (const char of query) {
+      const hit = haystack.indexOf(char, cursor);
+      if (hit === -1) return null;
+      score += hit - cursor;
+      cursor = hit + 1;
+    }
+    return score;
+  }, []);
+
+  const scorePaletteAction = useCallback(
+    (action: CommandPaletteAction, query: string): number | null => {
+      if (!query) return 0;
+      const haystacks = [action.label, action.description, action.shortcut ?? "", action.id]
+        .filter(Boolean)
+        .map((value) => value.toLowerCase());
+
+      let best: number | null = null;
+      for (const hay of haystacks) {
+        const score = fuzzyScore(hay, query);
+        if (score === null) continue;
+        const startsWithBonus = hay.startsWith(query) ? -2 : 0;
+        const wordBonus = hay.split(/\s+/).some((word) => word.startsWith(query)) ? -1 : 0;
+        const total = score + startsWithBonus + wordBonus;
+        best = best === null ? total : Math.min(best, total);
+      }
+      return best;
+    },
+    [fuzzyScore],
+  );
+
   const themePaletteActions: CommandPaletteAction[] = themePresets.map((preset) => ({
     id: `theme-${preset.id}`,
+    groupId: "themes",
     label: `${actionCopy.toggles.theme.label} · ${preset.label}`,
     description: preset.id === theme ? `${preset.description} · Active` : preset.description,
+    target: actionCopy.toggles.theme.target,
     run: () => setTheme(preset.id),
   }));
 
   const paletteActions: CommandPaletteAction[] = [
     {
       id: "workspace-studio",
+      groupId: "workspace",
       label: actionCopy.workspace.studio.label,
       description: actionCopy.workspace.studio.description,
       shortcut: actionCopy.workspace.studio.shortcut,
+      target: actionCopy.workspace.studio.target,
       run: () => setWorkspace("studio"),
     },
     {
       id: "workspace-ao",
+      groupId: "workspace",
       label: actionCopy.workspace.ao.label,
       description: actionCopy.workspace.ao.description,
       shortcut: actionCopy.workspace.ao.shortcut,
+      target: actionCopy.workspace.ao.target,
       run: () => setWorkspace("ao"),
     },
     {
       id: "workspace-data",
+      groupId: "workspace",
       label: actionCopy.workspace.data.label,
       description: actionCopy.workspace.data.description,
       shortcut: actionCopy.workspace.data.shortcut,
+      target: actionCopy.workspace.data.target,
       run: () => setWorkspace("data"),
     },
     {
       id: "workspace-preview",
+      groupId: "workspace",
       label: actionCopy.workspace.preview.label,
       description: actionCopy.workspace.preview.description,
       shortcut: actionCopy.workspace.preview.shortcut,
+      target: actionCopy.workspace.preview.target,
       run: () => setWorkspace("preview"),
     },
     {
       id: "toggle-theme",
+      groupId: "toggles",
       label: actionCopy.toggles.theme.label,
       description: t("actions.toggles.theme.nextLabel", {
         theme: nextThemePreset?.label ?? getThemeLabel(DEFAULT_THEME),
       }),
       shortcut: actionCopy.toggles.theme.shortcut,
+      target: actionCopy.toggles.theme.target,
       run: toggleTheme,
     },
     {
       id: "toggle-high-effects",
+      groupId: "toggles",
       label: highEffects ? actionCopy.toggles.highEffects.labelOn : actionCopy.toggles.highEffects.labelOff,
       description: prefersReducedMotion
         ? actionCopy.toggles.highEffects.description.blocked
         : actionCopy.toggles.highEffects.description.default,
       shortcut: actionCopy.toggles.highEffects.shortcut,
+      target: actionCopy.toggles.highEffects.target,
       run: () => {
         if (prefersReducedMotion) {
           setHighEffects(false);
@@ -6162,165 +7107,365 @@ function App() {
     ...themePaletteActions,
     {
       id: "toggle-offline",
+      groupId: "toggles",
       label: offlineMode ? actionCopy.toggles.offline.labelOn : actionCopy.toggles.offline.labelOff,
       description: offlineMode ? actionCopy.toggles.offline.description.on : actionCopy.toggles.offline.description.off,
       shortcut: actionCopy.toggles.offline.shortcut,
+      target: actionCopy.toggles.offline.target,
       run: () => setOfflineMode((current) => !current),
     },
     {
       id: "toggle-health",
+      groupId: "diagnostics",
       label: healthExpanded ? actionCopy.toggles.health.labelOpen : actionCopy.toggles.health.labelClosed,
       description: actionCopy.toggles.health.description,
       shortcut: actionCopy.toggles.health.shortcut,
+      target: actionCopy.toggles.health.target,
       run: () => setHealthExpanded((open) => !open),
     },
     {
       id: "focus-wizard-wallet",
+      groupId: "focus",
       label: actionCopy.focus.wizardWallet.label,
       description: actionCopy.focus.wizardWallet.description,
       shortcut: actionCopy.focus.wizardWallet.shortcut,
+      target: actionCopy.focus.wizardWallet.target,
       run: () => focusWizardStep("wallet"),
     },
     {
       id: "focus-wizard-module",
+      groupId: "focus",
       label: actionCopy.focus.wizardModule.label,
       description: actionCopy.focus.wizardModule.description,
       shortcut: actionCopy.focus.wizardModule.shortcut,
+      target: actionCopy.focus.wizardModule.target,
       run: () => focusWizardStep("module"),
     },
     {
       id: "focus-wizard-process",
+      groupId: "focus",
       label: actionCopy.focus.wizardProcess.label,
       description: actionCopy.focus.wizardProcess.description,
       shortcut: actionCopy.focus.wizardProcess.shortcut,
+      target: actionCopy.focus.wizardProcess.target,
       run: () => focusWizardStep("spawn"),
     },
     {
       id: "focus-vault-password",
+      groupId: "focus",
       label: actionCopy.focus.vaultPassword.label,
       description: actionCopy.focus.vaultPassword.description,
       shortcut: actionCopy.focus.vaultPassword.shortcut,
+      target: actionCopy.focus.vaultPassword.target,
       run: () => focusVaultField("password"),
     },
     {
       id: "focus-vault-filter",
+      groupId: "focus",
       label: actionCopy.focus.vaultFilter.label,
       description: actionCopy.focus.vaultFilter.description,
       shortcut: actionCopy.focus.vaultFilter.shortcut,
+      target: actionCopy.focus.vaultFilter.target,
       run: () => focusVaultField("filter"),
     },
     {
       id: "focus-health-failure",
+      groupId: "diagnostics",
       label: actionCopy.focus.healthFailure.label,
       description: actionCopy.focus.healthFailure.description,
       shortcut: actionCopy.focus.healthFailure.shortcut,
+      target: actionCopy.focus.healthFailure.target,
       run: () => focusHealthThreshold("failure"),
     },
     {
       id: "focus-health-latency",
+      groupId: "diagnostics",
       label: actionCopy.focus.healthLatency.label,
       description: actionCopy.focus.healthLatency.description,
       shortcut: actionCopy.focus.healthLatency.shortcut,
+      target: actionCopy.focus.healthLatency.target,
       run: () => focusHealthThreshold("latency"),
     },
     {
       id: "new-draft",
+      groupId: "drafts",
       label: actionCopy.drafts.new.label,
       description: actionCopy.drafts.new.description,
       shortcut: actionCopy.drafts.new.shortcut,
+      target: actionCopy.drafts.new.target,
       run: () => startNewDraft(actionCopy.drafts.new.label),
     },
     {
       id: "duplicate-draft",
+      groupId: "drafts",
       label: actionCopy.drafts.duplicate.label,
       description: actionCopy.drafts.duplicate.description,
       shortcut: actionCopy.drafts.duplicate.shortcut,
+      target: actionCopy.drafts.duplicate.target,
       run: () => void handleDuplicateDraft(),
     },
     {
       id: "open-draft-diff",
+      groupId: "drafts",
       label: actionCopy.drafts.diff.label,
       description: actionCopy.drafts.diff.description,
       shortcut: actionCopy.drafts.diff.shortcut,
+      target: actionCopy.drafts.diff.target,
       run: () => void openDraftDiffPanel(),
     },
     {
       id: "save-draft",
+      groupId: "drafts",
       label: actionCopy.drafts.save.label,
       description: actionCopy.drafts.save.description,
       shortcut: actionCopy.drafts.save.shortcut,
+      target: actionCopy.drafts.save.target,
       run: () => void handleSaveDraft(),
     },
     {
       id: "refresh-health",
+      groupId: "diagnostics",
       label: actionCopy.diagnostics.refresh.label,
       description: actionCopy.diagnostics.refresh.description,
       shortcut: actionCopy.diagnostics.refresh.shortcut,
+      target: actionCopy.diagnostics.refresh.target,
       run: () => void refreshHealth(),
     },
     {
       id: "load-pip-vault",
+      groupId: "vault",
       label: actionCopy.vault.load.label,
       description: actionCopy.vault.load.description,
       shortcut: actionCopy.vault.load.shortcut,
+      target: actionCopy.vault.load.target,
       run: () => void handleLoadPipFromVault(),
     },
     {
       id: "save-pip-vault",
+      groupId: "vault",
       label: actionCopy.vault.save.label,
       description: actionCopy.vault.save.description,
       shortcut: actionCopy.vault.save.shortcut,
+      target: actionCopy.vault.save.target,
       run: () => void handleSavePipToVault(),
     },
     {
       id: "export-drafts",
+      groupId: "exports",
       label: actionCopy.exports.drafts.label,
       description: actionCopy.exports.drafts.description,
       shortcut: actionCopy.exports.drafts.shortcut,
+      target: actionCopy.exports.drafts.target,
       run: () => void handleExportDrafts(),
     },
     {
       id: "export-manifest",
+      groupId: "exports",
       label: actionCopy.exports.manifest.label,
       description: actionCopy.exports.manifest.description,
       shortcut: actionCopy.exports.manifest.shortcut,
+      target: actionCopy.exports.manifest.target,
       run: () => handleExportManifest(),
     },
     {
       id: "language-en",
+      groupId: "language",
       label: actionCopy.language.options.en.label,
       description: actionCopy.language.options.en.description,
+      target: actionCopy.language.options.en.target,
       run: () => changeLocale("en"),
     },
     {
       id: "language-cs",
+      groupId: "language",
       label: actionCopy.language.options.cs.label,
       description: actionCopy.language.options.cs.description,
+      target: actionCopy.language.options.cs.target,
       run: () => changeLocale("cs"),
+    },
+    {
+      id: "language-es",
+      groupId: "language",
+      label: actionCopy.language.options.es.label,
+      description: actionCopy.language.options.es.description,
+      target: actionCopy.language.options.es.target,
+      run: () => changeLocale("es"),
+    },
+    {
+      id: "language-de",
+      groupId: "language",
+      label: actionCopy.language.options.de.label,
+      description: actionCopy.language.options.de.description,
+      target: actionCopy.language.options.de.target,
+      run: () => changeLocale("de"),
     },
   ];
 
-  const filteredPaletteActions = paletteActions.filter((action) => {
-    const haystack = `${action.label} ${action.description} ${action.shortcut ?? ""} ${action.id}`.toLowerCase();
-    const query = paletteQuery.trim().toLowerCase();
-    return !query || haystack.includes(query);
-  });
+  const paletteActionMap = useMemo(
+    () => new Map(paletteActions.map((action) => [action.id, action] as const)),
+    [paletteActions],
+  );
 
-  const safePaletteIndex = filteredPaletteActions.length
-    ? Math.min(paletteIndex, filteredPaletteActions.length - 1)
+  const recentPaletteActions = useMemo(
+    () =>
+      paletteRecents
+        .map((id) => paletteActionMap.get(id))
+        .filter((value): value is CommandPaletteAction => Boolean(value)),
+    [paletteActionMap, paletteRecents],
+  );
+
+  const paletteSearchResults = useMemo(() => {
+    const query = paletteQuery.trim().toLowerCase();
+    if (!query) return paletteActions;
+    return paletteActions
+      .map((action) => ({ action, score: scorePaletteAction(action, query) }))
+      .filter((item) => item.score !== null)
+      .sort((a, b) => (a.score as number) - (b.score as number))
+      .map((item) => item.action);
+  }, [paletteActions, paletteQuery, scorePaletteAction]);
+
+  const paletteSections = useMemo<CommandPaletteSection[]>(() => {
+    const order = ["recents", "workspace", "toggles", "focus", "drafts", "diagnostics", "vault", "exports", "themes", "language", "palette"];
+    const grouped = new Map<string, CommandPaletteAction[]>();
+    const query = paletteQuery.trim();
+    const add = (groupId: string, action: CommandPaletteAction) => {
+      const key = groupId || "palette";
+      const bucket = grouped.get(key) ?? [];
+      bucket.push(action);
+      grouped.set(key, bucket);
+    };
+    const recentSet = new Set(recentPaletteActions.map((item) => item.id));
+    if (!query && recentPaletteActions.length) {
+      recentPaletteActions.forEach((action) => add("recents", action));
+    }
+    paletteSearchResults.forEach((action) => {
+      if (!query && recentSet.has(action.id)) return;
+      add(action.groupId ?? "palette", action);
+    });
+
+    return order
+      .map((groupId) => {
+        const items = grouped.get(groupId);
+        if (!items || !items.length) return null;
+        const title = paletteSectionLabels[groupId as keyof typeof paletteSectionLabels] ?? groupId;
+        return { id: groupId, title, items };
+      })
+      .filter(Boolean) as CommandPaletteSection[];
+  }, [paletteQuery, paletteSearchResults, paletteSectionLabels, recentPaletteActions]);
+
+  const flattenedPaletteActions = useMemo(
+    () => paletteSections.flatMap((section) => section.items),
+    [paletteSections],
+  );
+
+  const safePaletteIndex = flattenedPaletteActions.length
+    ? Math.min(paletteIndex, flattenedPaletteActions.length - 1)
     : 0;
 
-  const hotkeySections: HotkeyOverlaySection[] = [
-    ...messages.hotkeys.sections,
-    {
+  useEffect(() => {
+    setPaletteIndex(0);
+  }, [paletteQuery]);
+  const baseHotkeySections: HotkeyOverlaySection[] = useMemo(
+    () =>
+      messages.hotkeys.sections.map((section) => ({
+        id: section.id,
+        title: section.title,
+        scope: section.scope,
+        items: section.items.map((item) => ({
+          ...item,
+          action: item.action ?? item.label,
+        })),
+      })),
+    [messages.hotkeys.sections],
+  );
+
+  const paletteHotkeySection: HotkeyOverlaySection = useMemo(
+    () => ({
+      id: "palette-actions",
       title: messages.hotkeys.paletteSectionTitle,
+      scope: "palette",
       items: paletteActions.map((action) => ({
         shortcut: action.shortcut ?? "—",
         action: action.label,
         description: action.description,
+        target: (action.target as HotkeyTarget | undefined) ?? undefined,
       })),
+    }),
+    [messages.hotkeys.paletteSectionTitle, paletteActions],
+  );
+
+  const allHotkeySections = useMemo(
+    () => [...baseHotkeySections, paletteHotkeySection],
+    [baseHotkeySections, paletteHotkeySection],
+  );
+
+  const hotkeyGroups = useMemo<HotkeyOverlayGroup[]>(() => {
+    const grouped = new Map<HotkeyScope, HotkeyOverlaySection[]>();
+    allHotkeySections.forEach((section) => {
+      const scope = section.scope ?? "global";
+      const current = grouped.get(scope) ?? [];
+      current.push(section);
+      grouped.set(scope, current);
+    });
+    const scopesOrder: HotkeyScope[] = ["global", "palette", "studio", "ao", "data", "preview"];
+    const activeScope = workspace as HotkeyScope;
+    const shouldInclude = (scope: HotkeyScope) =>
+      hotkeyScopeFilter === "all" || scope === "global" || scope === "palette" || scope === activeScope;
+
+    return scopesOrder
+      .filter((scope) => shouldInclude(scope) && (grouped.get(scope)?.length ?? 0) > 0)
+      .map((scope) => ({
+        id: scope,
+        title: messages.hotkeys.scopes[scope],
+        scope,
+        sections: grouped.get(scope) ?? [],
+      }));
+  }, [allHotkeySections, hotkeyScopeFilter, messages.hotkeys.scopes, workspace]);
+
+  const handleHotkeyHighlight = useCallback((target: HotkeyTarget | null) => {
+    setHotkeyActiveTarget(target);
+  }, []);
+
+  const applyHotkeyHighlight = useCallback(
+    (target: HotkeyTarget | null) => {
+      if (typeof document === "undefined") return;
+      const nodes = document.querySelectorAll<HTMLElement>("[data-hotkey-area]");
+      nodes.forEach((node) => {
+        const areas = (node.getAttribute("data-hotkey-area") ?? "")
+          .split(/\s+/)
+          .filter(Boolean);
+        const matches = hotkeyLearnMode && target ? areas.includes(target) : false;
+        node.classList.toggle("hotkey-learn-highlight", matches);
+      });
     },
-  ];
+    [hotkeyLearnMode],
+  );
+
+  useEffect(() => {
+    applyHotkeyHighlight(hotkeyLearnMode ? hotkeyActiveTarget : null);
+  }, [applyHotkeyHighlight, hotkeyActiveTarget, hotkeyLearnMode]);
+
+  useEffect(() => () => applyHotkeyHighlight(null), [applyHotkeyHighlight]);
+
+  const toggleHotkeyPrintable = useCallback(() => {
+    setHotkeyPrintable((current) => {
+      const next = !current;
+      if (!current && typeof window !== "undefined") {
+        window.setTimeout(() => window.print(), 30);
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleHotkeyLearnMode = useCallback(() => {
+    setHotkeyLearnMode((current) => {
+      const next = !current;
+      if (!next) {
+        setHotkeyActiveTarget(null);
+      }
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     const handleKeydown = (event: KeyboardEvent) => {
@@ -6456,7 +7601,7 @@ function App() {
             id: `workspace-${target}`,
             label: workspaceAction.label,
             description: workspaceAction.description,
-            run: () => setWorkspace(target),
+            run: () => switchWorkspace(target),
           },
         );
         return;
@@ -6510,6 +7655,13 @@ function App() {
         return;
       }
 
+      if (isAltShortcut && (key === "arrowleft" || key === "arrowright")) {
+        if (targetIsForm) return;
+        event.preventDefault();
+        handleKeyboardStack(key === "arrowright" ? "in" : "out");
+        return;
+      }
+
       if (!paletteOpen) return;
 
       if (key === "escape") {
@@ -6521,8 +7673,8 @@ function App() {
       if (key === "arrowdown") {
         event.preventDefault();
         setPaletteIndex((current) => {
-          if (!filteredPaletteActions.length) return 0;
-          return (current + 1) % filteredPaletteActions.length;
+          if (!flattenedPaletteActions.length) return 0;
+          return (current + 1) % flattenedPaletteActions.length;
         });
         return;
       }
@@ -6530,15 +7682,15 @@ function App() {
       if (key === "arrowup") {
         event.preventDefault();
         setPaletteIndex((current) => {
-          if (!filteredPaletteActions.length) return 0;
-          return (current - 1 + filteredPaletteActions.length) % filteredPaletteActions.length;
+          if (!flattenedPaletteActions.length) return 0;
+          return (current - 1 + flattenedPaletteActions.length) % flattenedPaletteActions.length;
         });
         return;
       }
 
       if (key === "enter") {
         event.preventDefault();
-        const action = filteredPaletteActions[safePaletteIndex];
+        const action = flattenedPaletteActions[safePaletteIndex];
         if (action) {
           void runPaletteAction(action);
         }
@@ -6566,7 +7718,7 @@ function App() {
     nextThemePreset,
     t,
     offlineMode,
-    filteredPaletteActions,
+    flattenedPaletteActions,
     paletteActions,
     handleUndo,
     handleRedo,
@@ -6574,6 +7726,7 @@ function App() {
     focusVaultField,
     focusHealthThreshold,
     handleKeyboardMove,
+    handleKeyboardStack,
   ]);
 
   useEffect(() => {
@@ -6634,6 +7787,19 @@ function App() {
   const previewHologramActive = neonThemes.includes(theme) && highEffects && workspace === "preview";
   const hologramActive = previewHologramActive && !prefersReducedMotion;
   const holomapEnabled = workspace === "preview" && highEffects && !prefersReducedMotion;
+  const showCyberPreviews = highEffects && !prefersReducedMotion;
+  const renderBlockPreview = (type: string, variant: "card" | "compact" = "card") =>
+    showCyberPreviews ? (
+      <CyberBlockPreview
+        shape={blockShapeForType(type)}
+        theme={theme}
+        highEffects={highEffects}
+        reducedMotion={prefersReducedMotion}
+        variant={variant}
+      />
+    ) : (
+      <BlockPlaceholder type={type} />
+    );
 
   return (
     <I18nContext.Provider value={{ locale, messages, t, setLocale }}>
@@ -6643,7 +7809,7 @@ function App() {
       </a>
       <HeroCanvas theme={theme} highEffects={highEffects} />
       <header className={`top-bar ${catalogDragging ? "dragging-block" : ""}`}>
-        <div className="brand-area">
+        <div className="brand-area" data-hotkey-area="palette language">
           <div className="brand">
             <div className="brand-dot" />
             <div>
@@ -6657,7 +7823,7 @@ function App() {
               />
             </div>
           </div>
-          <div className="theme-picker" title="Select a theme preset">
+          <div className="theme-picker" title="Select a theme preset" data-hotkey-area="theme">
             <div className="theme-picker-head">
               <span className="eyebrow">Theme</span>
               <span className="theme-picker-current">{getThemeLabel(theme)}</span>
@@ -6685,6 +7851,7 @@ function App() {
                 ? "Disabled to respect your reduced-motion preference."
                 : "Toggle high visual effects (WebGL grid, holograms, cursor FX)."
             }
+            data-hotkey-area="effects"
           >
             <input
               type="checkbox"
@@ -6718,7 +7885,7 @@ function App() {
             />
             <span>{cursorTrailLabel}</span>
           </label>
-          <label className="toggle offline-toggle" title="Offline / air-gap mode blocks renderer network requests">
+          <label className="toggle offline-toggle" title="Offline / air-gap mode blocks renderer network requests" data-hotkey-area="offline">
             <input
               type="checkbox"
               checked={offlineMode}
@@ -6743,11 +7910,12 @@ function App() {
             onClick={toggleHotkeyOverlay}
             aria-label={messages.hotkeys.title}
             title={messages.hotkeys.title}
+            data-hotkey-area="palette"
           >
             ?
           </button>
         </div>
-        <div className="workspace-nav">
+        <div className="workspace-nav" data-hotkey-area="workspaces">
           {[
             { id: "studio", label: "Creator Studio" },
             { id: "ao", label: "AO Console" },
@@ -6757,7 +7925,7 @@ function App() {
             <button
               key={item.id}
               className={`chip ${workspace === (item.id as Workspace) ? "active" : ""}`}
-              onClick={() => setWorkspace(item.id as Workspace)}
+              onClick={() => switchWorkspace(item.id as Workspace)}
               onMouseEnter={item.id === "ao" ? prefetchAoLogPanel : undefined}
               onFocus={item.id === "ao" ? prefetchAoLogPanel : undefined}
               type="button"
@@ -6766,6 +7934,25 @@ function App() {
             </button>
           ))}
         </div>
+        {draftConflict ? (
+          <div className="conflict-banner" role="alert">
+            <div className="conflict-copy">
+              <strong>Draft conflict</strong>
+              <span>{draftConflict.latest ? `Updated ${formatDate(draftConflict.latest.updatedAt)}` : draftConflict.message}</span>
+            </div>
+            <div className="conflict-actions">
+              <button className="ghost small" type="button" onClick={() => void handleResolveConflict("reload")}>
+                Reload latest
+              </button>
+              <button className="ghost small" type="button" onClick={() => void handleResolveConflict("force")}>
+                Overwrite
+              </button>
+              <button className="ghost small" type="button" onClick={() => void handleResolveConflict("duplicate")}>
+                Save copy
+              </button>
+            </div>
+          </div>
+        ) : null}
         <div className="top-actions">
           {workspace === "ao" && (
             <div
@@ -6775,6 +7962,7 @@ function App() {
               aria-labelledby="health-diagnostics-heading"
               aria-describedby="health-sla-caption health-sla-note"
               tabIndex={-1}
+              data-hotkey-area="health"
             >
               <div className="health-header">
                 <div>
@@ -7098,7 +8286,7 @@ function App() {
             </div>
           )}
           {workspace === "studio" && (
-            <div className="top-buttons hud-bar">
+            <div className="top-buttons hud-bar" data-hotkey-area="drafts">
               <button className="ghost icon-lead" data-icon="↺" onClick={handleUndo} disabled={!canUndo} title="Cmd/Ctrl+Z">
                 Undo
               </button>
@@ -7137,6 +8325,16 @@ function App() {
                 </button>
                 <HelpTip copy="Open the draft diff panel to compare the current manifest against a saved draft and cherry-pick differences." />
               </div>
+              <button
+                className={`ghost icon-lead ${draftDiffDocked ? "accent" : ""}`}
+                data-icon="☰"
+                onClick={() => void openDraftDiffPanel(undefined, { dock: true })}
+                onMouseEnter={prefetchDraftDiffPanel}
+                onFocus={prefetchDraftDiffPanel}
+                title="Dock diff sidebar"
+              >
+                Diff sidebar
+              </button>
               <button className="ghost icon-lead" data-icon="↓" onClick={handleLoadPip} disabled={loadingManifest}>
                 {loadingManifest ? "Loading manifest…" : "Load PIP"}
               </button>
@@ -7170,8 +8368,25 @@ function App() {
               >
                 Duplicate draft
               </button>
+              <button className="ghost icon-lead" data-icon="🖫" onClick={handleSaveAs} disabled={saving}>
+                Save as
+              </button>
+              <label className="autosave-tuner" title="Adjust autosave debounce">
+                <span className="mono">Autosave</span>
+                <select
+                  value={autosavePreset}
+                  onChange={(e) => {
+                    const preset = e.target.value as AutosavePreset;
+                    setAutosaveDelayMs(AUTOSAVE_PRESETS[preset] ?? DEFAULT_AUTOSAVE_MS);
+                  }}
+                >
+                  <option value="fast">Fast · 0.8s</option>
+                  <option value="balanced">Balanced · 1.2s</option>
+                  <option value="relaxed">Relaxed · 2.4s</option>
+                </select>
+              </label>
               <span
-                className={`pill save-status ${saving ? "busy" : isDirty ? "dirty" : "saved"}`}
+                className={`pill save-status ${draftConflict ? "conflict" : saving ? "busy" : isDirty ? "dirty" : "saved"}`}
                 title={lastSavedAt ? `Last saved ${formatDate(lastSavedAt)}` : "This draft has not been saved yet"}
               >
                 <span className="save-status-label">{saveStatusLabel}</span>
@@ -7197,6 +8412,9 @@ function App() {
                       ? `${draftHistory.length} save${draftHistory.length === 1 ? "" : "s"}`
                       : "No saves yet"}
                 </span>
+                <button className="ghost small" type="button" onClick={handleSaveRestorePoint} disabled={saving}>
+                  Save restore point
+                </button>
                 <button className="ghost small" type="button" onClick={() => void openDraftDiffPanel()}>
                   Diff
                 </button>
@@ -7221,6 +8439,7 @@ function App() {
                         </div>
                         <div className="draft-history-actions">
                           <span className="pill ghost mono">{revision.name}</span>
+                          {revision.tag === "restore-point" ? <span className="pill ghost">Restore point</span> : null}
                           {isCurrent ? (
                             <span className="pill accent">Current</span>
                           ) : (
@@ -7248,21 +8467,29 @@ function App() {
         </div>
       </header>
 
-      <main id="main-content" ref={mainContentRef} tabIndex={-1}>
+      <main id="main-content" ref={mainContentRef} tabIndex={-1} data-hotkey-area="preview">
         <HotkeyOverlay
           open={hotkeyOverlayOpen}
-          sections={hotkeySections}
+          groups={hotkeyGroups}
+          scopeFilter={hotkeyScopeFilter}
+          printable={hotkeyPrintable}
+          learnMode={hotkeyLearnMode}
+          onScopeChange={setHotkeyScopeFilter}
+          onTogglePrintable={toggleHotkeyPrintable}
+          onToggleLearn={toggleHotkeyLearnMode}
+          onHighlight={handleHotkeyHighlight}
           onClose={closeHotkeyOverlay}
           labels={{
             eyebrow: messages.hotkeys.eyebrow,
-          title: messages.hotkeys.title,
-          tableHeaders: messages.hotkeys.tableHeaders,
-          footer: messages.hotkeys.footer,
-          close: messages.paletteUi.close,
-          formatCount: (count: number) => t("hotkeys.itemsLabel", { count }),
-        }}
+            title: messages.hotkeys.title,
+            scopes: messages.hotkeys.scopes,
+            tableHeaders: messages.hotkeys.tableHeaders,
+            footer: messages.hotkeys.footer,
+            close: messages.paletteUi.close,
+            view: messages.hotkeys.view,
+            formatCount: (count: number) => t("hotkeys.itemsLabel", { count }),
+          }}
         />
-
       <ErrorBoundary name="PIP vault" variant="panel" onReset={resetVaultPanelBoundary}>
         <Vault
           ref={vaultRegionRef}
@@ -7270,6 +8497,7 @@ function App() {
           open={workspace === "data"}
           labelledBy="pip-vault-heading"
           describedBy="pip-vault-desc"
+          data-hotkey-area="vault"
         >
           <div className="panel-header">
             <div>
@@ -7298,6 +8526,14 @@ function App() {
               </span>
               <span className={`pill ${pipVaultLocked ? "issue" : "ghost"}`}>
                 {pipVaultLocked ? "Locked" : "Unlocked"}
+              </span>
+              <span className="pill ghost">{vaultKdfLabel ? `KDF ${vaultKdfLabel}` : "KDF"}</span>
+              <span className={`pill ${pipVaultAutoLockMinutes ? "ghost" : "warn"}`}>
+                {pipVaultAutoLockMinutes
+                  ? `Auto-lock ${pipVaultAutoLockMinutes}m${
+                      pipVaultAutoLockRemainingMs != null ? ` (${formatCountdown(pipVaultAutoLockRemainingMs)})` : ""
+                    }`
+                  : "Auto-lock off"}
               </span>
               <span className="pill ghost">
                 {pipVaultBlockingIssues.length ? `${pipVaultBlockingIssues.length} blocking issue${pipVaultBlockingIssues.length === 1 ? "" : "s"}` : "Ready to save"}
@@ -7350,7 +8586,11 @@ function App() {
               </div>
               <div>
                 <dt>Current PIP</dt>
-                <dd>{pip ? `${normalizeText(pip.tenant) || "tenant?"} / ${normalizeText(pip.site) || "site?"}` : "No PIP loaded"}</dd>
+                <dd>
+                  {pip
+                    ? `${normalizeText(pip.tenant ?? "") || "tenant?"} / ${normalizeText(pip.site ?? "") || "site?"}`
+                    : "No PIP loaded"}
+                </dd>
               </div>
             </dl>
           </article>
@@ -7375,7 +8615,19 @@ function App() {
               </div>
               <div>
                 <span>KDF</span>
-                <strong className="mono">{pipVaultSnapshot?.iterations ? `${pipVaultSnapshot.iterations} · PBKDF2` : "—"}</strong>
+                <strong className="mono">{vaultKdfLabel}</strong>
+                <span className="hint mono">{vaultKdfDetail}</span>
+              </div>
+              <div>
+                <span>KDF preference</span>
+                <strong className="mono">
+                  {kdfProfile.algorithm === "argon2id" ? "Argon2id (UI)" : "PBKDF2"}
+                </strong>
+                <span className="hint mono">
+                  {kdfProfile.algorithm === "argon2id"
+                    ? `${Math.round(kdfMemory / 1024)} MiB · t=${kdfIterations}`
+                    : "Stored locally"}
+                </span>
               </div>
               <div>
                 <span>Salt</span>
@@ -7408,6 +8660,7 @@ function App() {
                       : "OK"
                     : "Not scanned"}
                 </strong>
+                {vaultIntegrity?.at ? <span className="hint mono">{formatTimeShort(vaultIntegrity.at)}</span> : null}
               </div>
               <div>
                 <span>Auto-lock</span>
@@ -7480,7 +8733,7 @@ function App() {
                 Remember unlock for this session
                 {rememberedVaultPassword ? <span className="remember-hint">Stored for this session</span> : null}
               </label>
-              <div className={`pip-vault-strength ${pipVaultPasswordStrength.score ? "" : "muted"}`}>
+              <div className={`pip-vault-strength ${pipVaultStrengthClass} ${pipVaultPasswordStrength.score ? "" : "muted"}`}>
                 <div className="strength-meter">
                   <span style={{ width: `${(pipVaultPasswordStrength.score / 4) * 100}%` }} />
                 </div>
@@ -7498,6 +8751,20 @@ function App() {
                   </div>
                 </div>
               </div>
+            </div>
+            <div className="pip-vault-breach">
+              <div className="pip-vault-breach-copy">
+                <span className={`pill ${breachStatusTone}`}>{breachStatusLabel}</span>
+                <span className="hint">Stubbed offline check; a live breach API will replace this.</span>
+              </div>
+              <button
+                className="ghost small"
+                type="button"
+                onClick={handleBreachCheck}
+                disabled={pipVaultBusy || pipVaultBreachStatus === "checking" || !pipVaultPassword.trim()}
+              >
+                {pipVaultBreachStatus === "checking" ? "Checking…" : "Run breach check"}
+              </button>
             </div>
               <div className="pip-vault-auto-lock">
                 <div className="auto-lock-row">
@@ -7538,6 +8805,100 @@ function App() {
                   ) : null}
                 </div>
               </div>
+              <div className="pip-vault-kdf">
+                <div className="pip-vault-kdf-head">
+                  <span className="pill ghost">Key derivation</span>
+                  <div className="pip-vault-kdf-chips">
+                    <button
+                      type="button"
+                      className={`chip ${pipVaultKdfProfile.algorithm === "pbkdf2" ? "active" : ""}`}
+                      onClick={() => setPipVaultKdfProfile((current) => ({ ...current, algorithm: "pbkdf2" }))}
+                    >
+                      PBKDF2
+                    </button>
+                    <button
+                      type="button"
+                      className={`chip ${pipVaultKdfProfile.algorithm === "argon2id" ? "active" : ""}`}
+                      onClick={() => setPipVaultKdfProfile((current) => ({ ...current, algorithm: "argon2id" }))}
+                    >
+                      Argon2id
+                    </button>
+                    <span className="pill ghost mono">
+                      {pipVaultSnapshot?.kdf?.algorithm ? `${pipVaultSnapshot.kdf.algorithm} active` : "pbkdf2 active"}
+                    </span>
+                  </div>
+                </div>
+                {pipVaultKdfProfile.algorithm === "argon2id" ? (
+                  <div className="pip-vault-kdf-grid">
+                    <label>
+                      Memory (MiB)
+                      <input
+                        type="range"
+                        min={16 * 1024}
+                        max={256 * 1024}
+                        step={16 * 1024}
+                        value={kdfMemory}
+                        onChange={(e) =>
+                          setPipVaultKdfProfile((current) => ({
+                            ...current,
+                            memoryKiB: Number(e.target.value),
+                          }))
+                        }
+                      />
+                      <span className="hint mono">
+                        {kdfMemory / 1024} MiB
+                      </span>
+                    </label>
+                    <label>
+                      Iterations (t)
+                      <input
+                        type="number"
+                        min={2}
+                        max={6}
+                        value={kdfIterations}
+                        onChange={(e) =>
+                          setPipVaultKdfProfile((current) => ({
+                            ...current,
+                            iterations: Number(e.target.value) || DEFAULT_ARGON2_PROFILE.iterations,
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      Parallelism (p)
+                        <input
+                          type="number"
+                          min={1}
+                          max={4}
+                          value={kdfParallelism}
+                          onChange={(e) =>
+                            setPipVaultKdfProfile((current) => ({
+                              ...current,
+                              parallelism: Math.max(1, Math.min(4, Number(e.target.value) || 1)),
+                            }))
+                        }
+                      />
+                    </label>
+                  </div>
+                ) : (
+                  <p className="hint">
+                    PBKDF2 is active today; Argon2id tuning is stored locally and will apply once encrypted-at-rest upgrades land.
+                  </p>
+                )}
+                <div className="pip-vault-kdf-actions">
+                  <button className="ghost small" type="button" onClick={handleSaveKdfProfile} disabled={pipVaultBusy}>
+                    Save tuning
+                  </button>
+                  <button
+                    className="ghost small"
+                    type="button"
+                    onClick={() => setPipVaultKdfProfile(DEFAULT_ARGON2_PROFILE)}
+                    disabled={pipVaultBusy}
+                  >
+                    Reset profile
+                  </button>
+                </div>
+              </div>
               <div className="pip-vault-hw">
                 <div className="pip-vault-hw-copy">
                   <span className="pill ghost">Hardware key</span>
@@ -7570,6 +8931,38 @@ function App() {
               >
                 {pipVaultTask?.kind === "export" ? "Exporting…" : "Export backup"}
               </button>
+            </div>
+            <div className="pip-vault-integrity-issues">
+              <div className="pip-vault-integrity-head">
+                <span className="pill ghost">Integrity issues</span>
+                <span className="hint mono">
+                  {vaultIntegrity ? `${vaultIntegrity.scanned} scanned` : "No scan yet"}
+                  {vaultIntegrity?.at ? ` · ${formatTimeShort(vaultIntegrity.at)}` : ""}
+                </span>
+              </div>
+              {vaultIntegrityIssues.length ? (
+                <div className="pip-vault-integrity-list">
+                  {vaultIntegrityIssues.map((issue) => (
+                    <div key={issue.id} className="pip-vault-integrity-item">
+                      <div className="pip-vault-integrity-copy">
+                        <strong className="mono">{issue.id}</strong>
+                        <p>{issue.error}</p>
+                        <span className="hint">Repair suggestion: delete record then re-import from trusted backup.</span>
+                      </div>
+                      <button
+                        className="ghost small danger"
+                        type="button"
+                        onClick={() => void handleRepairVaultIssue(issue)}
+                        disabled={pipVaultBusy || pipVaultLocked}
+                      >
+                        Delete record
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="hint">Last scan clean. Run integrity to surface corrupted envelopes.</p>
+              )}
             </div>
             <p className="hint">Use password mode for portable backups. Import uses the password field when required.</p>
           </article>
@@ -7976,7 +9369,7 @@ function App() {
                     type="button"
                     onClick={() => setQuickShape(active ? null : shape.id)}
                   >
-                    <BlockPlaceholder type={shape.sampleType} />
+                    {renderBlockPreview(shape.sampleType, "compact")}
                     <div className="quick-card-meta">
                       <div className="quick-card-title-row">
                         <strong>{shape.label}</strong>
@@ -8034,7 +9427,7 @@ function App() {
                     }}
                   >
                     <div>
-                      <BlockPlaceholder type={item.type} />
+                      {renderBlockPreview(item.type)}
                       <div className="item-title">{item.name}</div>
                       <p className="item-summary">{item.summary}</p>
                       {item.preview ? (
@@ -8227,6 +9620,24 @@ function App() {
                 prefersReducedMotion={prefersReducedMotion}
               />
             )}
+            {dropGhost ? (
+              <div className="drop-ghost-layer" aria-hidden>
+                <div
+                  className={`drop-ghost drop-${dropGhost.placement} ${dropGhost.mode === "move" ? "move" : "add"}`}
+                  style={{
+                    width: dropGhost.rect.width,
+                    height: dropGhost.rect.height,
+                    transform: `translate(${dropGhost.rect.x}px, ${dropGhost.rect.y}px)`,
+                  }}
+                >
+                  <div className="drop-ghost-label">
+                    <span className="pill ghost micro">{dropGhost.mode === "move" ? "Move" : "Add"}</span>
+                    <strong>{dropGhost.label}</strong>
+                  </div>
+                  <BlockPlaceholder type={dropGhost.type} />
+                </div>
+              </div>
+            ) : null}
             <div
               className={`composition-dropzone ${manifest.nodes.length ? "inline" : ""} ${compositionDropActive ? "active" : ""}`}
               role="region"
@@ -8238,9 +9649,9 @@ function App() {
                 <p>Drop a block anywhere in this panel to add it to the manifest.</p>
               </div>
               <div className="dropzone-stack">
-                <BlockPlaceholder type="block.hero" />
-                <BlockPlaceholder type="block.featureGrid" />
-                <BlockPlaceholder type="block.gallery" />
+                {renderBlockPreview("block.hero", "compact")}
+                {renderBlockPreview("block.featureGrid", "compact")}
+                {renderBlockPreview("block.gallery", "compact")}
               </div>
             </div>
             {manifest.nodes.length > 0 && (
@@ -8259,6 +9670,9 @@ function App() {
                   diffHighlight={draftDiffOpen ? draftDiffHighlight : undefined}
                   validation={treeValidation}
                   onApplyDefaults={autofillNodeProps}
+                  reviewMode={reviewMode}
+                  commentCounts={reviewCounts}
+                  onRequestComment={handleRequestComment}
                 />
               </Suspense>
             )}
@@ -8279,6 +9693,77 @@ function App() {
             </div>
           ) : (
             <div className="props-body">
+              <div className="review-toggle-row">
+                <label className="toggle">
+                  <input type="checkbox" checked={reviewMode} onChange={(e) => setReviewMode(e.target.checked)} />
+                  <span>Review mode</span>
+                </label>
+                <span className="pill ghost">
+                  {openReviewCount ? `${openReviewCount} open` : "No open comments"}
+                </span>
+              </div>
+              {reviewMode ? (
+                <div className="review-panel">
+                  <div className="review-panel-head">
+                    <div>
+                      <p className="eyebrow">Pinned comments</p>
+                      <h4>{selectedNode?.title || "Selected node"}</h4>
+                    </div>
+                    <span className="pill ghost">
+                      {selectedNodeComments.length} note{selectedNodeComments.length === 1 ? "" : "s"}
+                    </span>
+                  </div>
+                  <div className="review-thread">
+                    {selectedNodeComments.length === 0 ? (
+                      <p className="hint">No comments pinned to this node yet.</p>
+                    ) : (
+                      selectedNodeComments.map((comment) => (
+                        <div
+                          key={comment.id}
+                          className={`review-comment ${comment.resolvedAt ? "resolved" : ""}`}
+                        >
+                          <div className="review-comment-head">
+                            <span className="mono">{formatTime(comment.createdAt)}</span>
+                            <div className="review-comment-actions">
+                              <button className="ghost micro" type="button" onClick={() => toggleReviewComment(comment.id)}>
+                                {comment.resolvedAt ? "Reopen" : "Resolve"}
+                              </button>
+                              <button className="ghost micro" type="button" onClick={() => deleteReviewComment(comment.id)}>
+                                Delete
+                              </button>
+                            </div>
+                          </div>
+                          <p>{comment.text}</p>
+                          {comment.resolvedAt ? <span className="pill ghost micro">Resolved</span> : null}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                  <label className="field">
+                    <span>Add review note</span>
+                    <textarea
+                      ref={commentInputRef}
+                      value={reviewDraft}
+                      onChange={(e) => setReviewDraft(e.target.value)}
+                      rows={3}
+                      placeholder="Pin a note to this node"
+                    />
+                  </label>
+                  <div className="review-panel-actions">
+                    <button
+                      className="primary small"
+                      type="button"
+                      onClick={() => selectedNodeId && addReviewComment(selectedNodeId, reviewDraft)}
+                      disabled={!selectedNodeId || !reviewDraft.trim()}
+                    >
+                      Pin comment
+                    </button>
+                    <button className="ghost small" type="button" onClick={() => setReviewDraft("")} disabled={!reviewDraft}>
+                      Clear
+                    </button>
+                  </div>
+                </div>
+              ) : null}
               <div className="inspector-toolbar">
                 <div className="mode-toggle" role="tablist" aria-label="Inspector mode">
                   <button
@@ -8561,6 +10046,7 @@ function App() {
         open={workspace === "ao"}
         labelledBy="ao-wizard-heading"
         describedBy="ao-wizard-desc"
+        data-hotkey-area="wizard"
       >
         <div className="panel-header">
           <div>
@@ -8597,6 +10083,66 @@ function App() {
             <div className="pill ghost">
               {deployedModuleTx ? `Module tx • ${deployedModuleTx.slice(0, 10)}…` : "Awaiting module"}
             </div>
+          </div>
+        </div>
+        <div className="wizard-validation-row" aria-label="Wizard validation status">
+          {wizardValidation.map((item) => (
+            <div key={item.id} className={`wizard-pill status-${item.status}`}>
+              <div className="wizard-pill-head">
+                <span className="eyebrow">{item.label}</span>
+                <span className={`pill ghost micro ${item.status}`}>{item.status}</span>
+              </div>
+              <div className="wizard-pill-detail">{item.detail}</div>
+            </div>
+          ))}
+        </div>
+        <div className="ao-profile-bar" aria-label="Recent deploy profiles">
+          <div className="ao-profile-head">
+            <div>
+              <p className="eyebrow">Profiles</p>
+              <h4>Recent deploys</h4>
+            </div>
+            <div className="ao-profile-actions">
+              <input
+                className="profile-name-input"
+                placeholder="Label (optional)"
+                value={profileNameDraft}
+                onChange={(e) => setProfileNameDraft(e.target.value)}
+              />
+              <button className="ghost small" type="button" onClick={handleSaveProfile}>
+                Save current
+              </button>
+              {activeProfile ? <span className="pill ghost micro">Active {activeProfile.label}</span> : null}
+            </div>
+          </div>
+          <div className="ao-profile-chips">
+            {aoProfiles.length ? (
+              aoProfiles.map((profile) => {
+                const active = activeProfileId === profile.id;
+                return (
+                  <button
+                    key={profile.id}
+                    type="button"
+                    className={`ao-profile-chip ${active ? "active" : ""}`}
+                    onClick={() => applyProfile(profile)}
+                  >
+                    <div className="ao-profile-chip-top">
+                      <strong>{profile.label}</strong>
+                      <span className="pill ghost micro">{profile.lastKind}</span>
+                      {profile.dryRun ? <span className="pill ghost micro">dry-run</span> : null}
+                    </div>
+                    <div className="ao-profile-chip-meta">
+                      <span className="mono">{profile.moduleTx ? abbreviateTx(profile.moduleTx) : "moduleTx —"}</span>
+                      <span className="mono">
+                        {profile.scheduler ? abbreviateTx(profile.scheduler) : "scheduler —"}
+                      </span>
+                    </div>
+                  </button>
+                );
+              })
+            ) : (
+              <p className="hint">Deploy or spawn to capture profiles. Save to pin the current inputs.</p>
+            )}
           </div>
         </div>
         <div className="deploy-grid">
@@ -8725,16 +10271,8 @@ function App() {
             {walletFieldError ? (
               <p className="error field-error">{walletFieldError}</p>
             ) : (
-              <p className="subtle">
-                {walletMode === "path"
-                  ? (walletPathValidation.ok ? walletPathValidation.hint : undefined) ??
-                    walletNote ??
-                    "Enter a wallet path or pick via IPC."
-                  : walletMode === "jwk"
-                    ? (walletJwkValidation.ok ? walletJwkValidation.hint : undefined) ??
-                      walletNote ??
-                      "Paste wallet JSON or pick via IPC."
-                    : walletNote ?? "Choose IPC, path, or pasted JWK."}
+              <p className={`subtle ${walletInlineError ? "error" : ""}`}>
+                {walletInlineError ?? walletInlineHint ?? "Choose IPC, path, or pasted JWK."}
               </p>
             )}
           </div>
@@ -8779,14 +10317,28 @@ function App() {
               />
               {moduleSourceError ? <p className="error field-error">{moduleSourceError}</p> : <p className="hint">Deploy reads this source and writes a module tx.</p>}
             </label>
-            <div className="inline-actions">
+            <div className="inline-actions deploy-actions">
+              <label className={`toggle dry-run-toggle ${deployDryRun ? "active" : ""}`}>
+                <input
+                  type="checkbox"
+                  checked={deployDryRun}
+                  onChange={(e) => setDeployDryRun(e.target.checked)}
+                />
+                <span>Dry-run (mock gateway)</span>
+              </label>
               <button
                 className="primary"
                 onClick={handleDeployModuleClick}
-                disabled={deploying || offlineMode}
+                disabled={deploying || (offlineMode && !deployDryRun)}
                 type="button"
                 aria-label="Deploy module"
-                title={offlineMode ? "Offline mode is enabled; deploy is blocked" : "Deploy module"}
+                title={
+                  offlineMode && !deployDryRun
+                    ? "Offline mode is enabled; deploy is blocked"
+                    : deployDryRun
+                      ? "Simulate deploy using mocked gateway"
+                      : "Deploy module"
+                }
               >
                 {deploying ? "Deploying…" : "Deploy module"}
               </button>
@@ -9002,11 +10554,15 @@ function App() {
             aoLog={aoLog}
             metrics={aoLogMetrics}
             pinned={pinnedAoIds}
+            tailing={aoLogTailing}
             onTogglePin={togglePinnedAoId}
             onCopy={handleCopyAoId}
             onOpen={handleOpenAoId}
             onRetry={retryAoAction}
             onResume={resumeAoAction}
+            onToggleTail={toggleAoLogTail}
+            onClear={handleClearAoLog}
+            onExport={handleExportAoLog}
           />
         </Suspense>
       </Wizard>
@@ -9042,6 +10598,8 @@ function App() {
               onSelectRight={handleSelectDraftDiffOption}
               onCherryPick={handleCherryPick}
               onStatus={flashStatus}
+              docked={draftDiffDocked}
+              onToggleDock={() => setDraftDiffDocked((current) => !current)}
             />
           </Suspense>
         </ErrorBoundary>
@@ -9346,7 +10904,8 @@ function App() {
         open={paletteOpen}
         query={paletteQuery}
         selectedIndex={safePaletteIndex}
-        actions={filteredPaletteActions}
+        sections={paletteSections}
+        flattened={flattenedPaletteActions}
         inputRef={paletteInputRef}
         onQueryChange={setPaletteQuery}
         onSelectIndex={setPaletteIndex}

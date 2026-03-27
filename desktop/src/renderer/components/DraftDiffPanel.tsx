@@ -27,6 +27,8 @@ interface DraftDiffPanelProps {
   onSelectRight: (value: string) => void;
   onCherryPick: (entry: DraftDiffEntry, action: CherryPickAction, options?: CherryPickOptions) => void;
   onStatus?: (message: string) => void;
+  docked?: boolean;
+  onToggleDock?: () => void;
 }
 
 const actionLabel: Record<CherryPickAction, string> = {
@@ -49,6 +51,8 @@ const DraftDiffPanel: React.FC<DraftDiffPanelProps> = ({
   onSelectRight,
   onCherryPick,
   onStatus,
+  docked = false,
+  onToggleDock,
 }) => {
   if (!open) return null;
 
@@ -294,15 +298,18 @@ const DraftDiffPanel: React.FC<DraftDiffPanelProps> = ({
 
   return (
     <div
-      className="draft-diff-backdrop"
+      className={`draft-diff-backdrop ${docked ? "docked" : ""}`}
       role="presentation"
-      onClick={onClose}
+      onClick={(event) => {
+        if (docked) return;
+        onClose();
+      }}
     >
       <div
         ref={dialogRef}
-        className="draft-diff-shell"
+        className={`draft-diff-shell ${docked ? "docked" : ""}`}
         role="dialog"
-        aria-modal="true"
+        aria-modal={!docked}
         aria-labelledby={titleId}
         aria-describedby={descriptionId}
         tabIndex={-1}
@@ -318,6 +325,11 @@ const DraftDiffPanel: React.FC<DraftDiffPanelProps> = ({
             </p>
           </div>
           <div className="draft-diff-head-actions">
+            {onToggleDock && (
+              <button className="ghost" type="button" onClick={onToggleDock}>
+                {docked ? "Undock" : "Dock sidebar"}
+              </button>
+            )}
             <button
               className="ghost"
               type="button"

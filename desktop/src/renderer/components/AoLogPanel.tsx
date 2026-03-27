@@ -1,6 +1,6 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
-import type { AoLogMetrics, AoLogSeverity, AoMiniLogEntry } from "../App";
+import type { AoLogMetrics, AoLogSeverity, AoMiniLogEntry } from "../types/ao";
 
 type AoLogFilter = "all" | "deploy" | "spawn";
 
@@ -8,11 +8,15 @@ type AoLogPanelProps = {
   aoLog: AoMiniLogEntry[];
   metrics: AoLogMetrics;
   pinned: string[];
+  tailing: boolean;
   onTogglePin: (value: string | null) => void;
   onCopy: (value: string | null, label: string) => void;
   onOpen: (value: string | null) => void;
   onRetry: (entry: AoMiniLogEntry) => void;
   onResume: (entry: AoMiniLogEntry) => void;
+  onToggleTail: (next?: boolean) => void;
+  onClear: () => void;
+  onExport: (format: "csv") => void;
 };
 
 const formatTimestamp = (iso?: string) => {
@@ -63,15 +67,36 @@ const AoLogPanel: React.FC<AoLogPanelProps> = ({
   aoLog,
   metrics,
   pinned,
+  tailing,
   onTogglePin,
   onCopy,
   onOpen,
   onRetry,
   onResume,
+  onToggleTail,
+  onClear,
+  onExport,
 }) => {
   const [kindFilter, setKindFilter] = useState<AoLogFilter>("all");
   const [severityFilter, setSeverityFilter] = useState<AoLogSeverity | "all">("all");
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const tableRef = useRef<HTMLDivElement>(null);
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const previousCountRef = useRef(aoLog.length);
+
+  useEffect(() => {
+    if (!tailing) {
+      previousCountRef.current = aoLog.length;
+      return;
+    }
+    if (aoLog.length > previousCountRef.current) {
+      if (tableRef.current) {
+        tableRef.current.scrollTop = 0;
+      }
+      timelineRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    previousCountRef.current = aoLog.length;
+  }, [aoLog, tailing]);
 
   const kindCounts = useMemo(
     () =>
@@ -132,7 +157,7 @@ const AoLogPanel: React.FC<AoLogPanelProps> = ({
         <div>
           <p className="eyebrow">AO console log</p>
           <h4>Action payloads</h4>
-          <p className="subtle">Timeline, severity filters, retry/resume, and pinned AO ids.</p>
+          <p className="subtle">Timeline, tail/filters, retry/resume, and pinned AO ids.</p>
         </div>
         <div className="ao-log-toolbar">
           <div className="ao-log-filters" role="group" aria-label="Filter AO log">
@@ -146,6 +171,22 @@ const AoLogPanel: React.FC<AoLogPanelProps> = ({
                 {value} ({kindCounts[value]})
               </button>
             ))}
+          </div>
+          <div className="ao-log-actions" role="group" aria-label="Log controls">
+            <button
+              type="button"
+              className={`chip ${tailing ? "active" : ""}`}
+              onClick={() => onToggleTail(!tailing)}
+              aria-pressed={tailing}
+            >
+              Tail
+            </button>
+            <button className="ghost small" type="button" onClick={() => onClear()} disabled={!aoLog.length}>
+              Clear
+            </button>
+            <button className="ghost small" type="button" onClick={() => onExport("csv")} disabled={!aoLog.length}>
+              Export CSV
+            </button>
           </div>
           <div className="ao-log-filters" role="group" aria-label="Filter by severity">
             {(["all", "success", "warning", "error", "info"] as const).map((value) => (
@@ -244,7 +285,7 @@ const AoLogPanel: React.FC<AoLogPanelProps> = ({
         </div>
       ) : null}
 
-      <div className="ao-log-timeline">
+      <div className="ao-log-timeline" ref={timelineRef}>
         <div className="ao-log-timeline-head">
           <p className="eyebrow">Log timeline</p>
           <span className="ao-log-badge subtle">last {timelineEntries.length || 0} events</span>
@@ -311,7 +352,7 @@ const AoLogPanel: React.FC<AoLogPanelProps> = ({
         </div>
       </div>
 
-      <div className="ao-log-table-wrap">
+      <div className="ao-log-table-wrap" ref={tableRef}>
         <table className="ao-log-table">
           <thead>
             <tr>

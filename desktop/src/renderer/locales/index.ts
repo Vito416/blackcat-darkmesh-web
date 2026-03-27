@@ -1,14 +1,31 @@
 import React from "react";
 
 import cs from "./cs";
-import en from "./en";
+import de from "./de";
+import en, { type Messages } from "./en";
+import es from "./es";
+export type { Messages } from "./en";
 
-export type LocaleKey = "en" | "cs";
-export type Messages = typeof en;
+export type LocaleKey = "en" | "cs" | "es" | "de";
+export type HotkeyScope = "global" | "studio" | "ao" | "data" | "preview" | "palette";
+export type HotkeyTarget =
+  | "workspaces"
+  | "theme"
+  | "effects"
+  | "offline"
+  | "health"
+  | "wizard"
+  | "vault"
+  | "drafts"
+  | "preview"
+  | "language"
+  | "palette";
 
 export type HotkeySectionCopy = {
+  id: string;
   title: string;
-  items: { shortcut: string; action: string; description: string }[];
+  scope: HotkeyScope;
+  items: { shortcut: string; action?: string; label?: string; description: string; target?: HotkeyTarget }[];
 };
 
 export type PaletteActionCopy = {
@@ -18,14 +35,22 @@ export type PaletteActionCopy = {
 };
 
 export const DEFAULT_LOCALE: LocaleKey = "en";
-export const SUPPORTED_LOCALES: LocaleKey[] = ["en", "cs"];
+export const SUPPORTED_LOCALES: LocaleKey[] = ["en", "cs", "es", "de"];
 
 const LOCALE_MAP: Record<LocaleKey, Messages> = {
   en,
   cs,
+  es,
+  de,
 };
 
-export const resolveLocale = (value?: string | null): LocaleKey => (value === "cs" ? "cs" : "en");
+export const resolveLocale = (value?: string | null): LocaleKey => {
+  const normalized = (value ?? "").toLowerCase();
+  const direct = normalized as LocaleKey;
+  if (SUPPORTED_LOCALES.includes(direct)) return direct;
+  const short = normalized.slice(0, 2) as LocaleKey;
+  return SUPPORTED_LOCALES.includes(short) ? short : DEFAULT_LOCALE;
+};
 
 const interpolate = (value: string, params?: Record<string, string | number>) =>
   value.replace(/\{\{(.*?)\}\}/g, (_, key) => String(params?.[key.trim()] ?? ""));

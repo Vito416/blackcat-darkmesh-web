@@ -1,16 +1,14 @@
 import React from "react";
 
-type VaultProps = {
+type VaultProps = React.HTMLAttributes<HTMLElement> & {
   children: React.ReactNode;
   open: boolean;
   labelledBy: string;
   describedBy?: string;
-  className?: string;
-  style?: React.CSSProperties;
 };
 
 const Vault = React.forwardRef<HTMLElement, VaultProps>(
-  ({ children, open, labelledBy, describedBy, className, style }, ref) => {
+  ({ children, open, labelledBy, describedBy, className, style, ...rest }, ref) => {
     const mergedStyle = open ? style : { ...(style ?? {}), display: "none" };
 
     return (
@@ -22,6 +20,7 @@ const Vault = React.forwardRef<HTMLElement, VaultProps>(
         aria-describedby={describedBy}
         tabIndex={-1}
         style={mergedStyle}
+        {...rest}
       >
         {children}
       </section>

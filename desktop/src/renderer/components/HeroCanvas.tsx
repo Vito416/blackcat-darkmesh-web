@@ -3,7 +3,16 @@ import * as THREE from "three";
 
 type HeroMode = "idle" | "webgl" | "fallback";
 
-type ThemeName = "light" | "cyberpunk" | "neon-wasteland" | "solarized-void" | "night-drive" | "vapor" | "synthwave" | "void";
+type ThemeName =
+  | "light"
+  | "cyberpunk"
+  | "neon-wasteland-v2"
+  | "hologrid-noir"
+  | "solarized-void"
+  | "night-drive"
+  | "vapor"
+  | "synthwave"
+  | "void";
 
 type HeroCanvasProps = {
   theme: ThemeName;
@@ -12,7 +21,7 @@ type HeroCanvasProps = {
 
 const PARTICLE_COUNT = 220;
 const FRAME_INTERVAL = 1000 / 30; // throttle to ~30fps to keep perf steady
-const WEBGL_THEMES: ThemeName[] = ["cyberpunk", "neon-wasteland", "solarized-void"];
+const WEBGL_THEMES: ThemeName[] = ["cyberpunk", "neon-wasteland-v2", "hologrid-noir", "solarized-void"];
 
 const cssColor = (value: string, fallback: string) => value.trim() || fallback;
 

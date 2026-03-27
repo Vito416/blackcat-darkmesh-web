@@ -28,6 +28,7 @@ export type PipVaultDescribeResult =
       locked: boolean;
       lockedAt?: string;
       recordCount: number;
+      kdf?: PipVaultKdfMeta;
     }
   | { ok: false; error: string };
 
@@ -38,6 +39,7 @@ export type PipVaultExportSuccess = {
   bytes: number;
   createdAt: string;
   recordCount: number;
+  kdf?: PipVaultKdfMeta;
 };
 
 export type PipVaultExportResult = PipVaultExportSuccess | { ok: false; error: string };
@@ -53,11 +55,36 @@ export type PipVaultBundleMeta = {
   mode?: "safeStorage" | "plain" | "password";
   createdAt?: string;
   recordCount?: number;
+  kdf?: PipVaultKdfMeta;
+};
+
+export type PipVaultKdfMeta = {
+  algorithm: "pbkdf2" | "argon2id";
+  iterations?: number;
+  salt?: string;
+  memoryKiB?: number;
+  parallelism?: number;
+  digest?: string;
+  version?: number;
 };
 
 const bridge = (): PipVaultBridge | undefined => {
   if (typeof window === "undefined") return undefined;
   return window.pipVault;
+};
+
+const normalizeKdfMeta = (value: { kdf?: PipVaultKdfMeta; iterations?: number; salt?: string }): PipVaultKdfMeta | undefined => {
+  if (value.kdf) return value.kdf;
+  if (value.iterations || value.salt) {
+    return {
+      algorithm: "pbkdf2",
+      iterations: value.iterations,
+      salt: value.salt,
+      digest: "sha256",
+      version: 1,
+    };
+  }
+  return undefined;
 };
 
 export async function readPipVault(): Promise<PipVaultReadResult> {
@@ -177,7 +204,9 @@ export async function describePipVault(): Promise<PipVaultDescribeResult> {
   }
 
   try {
-    return { ok: true, ...(await api.describe()) };
+    const result = await api.describe();
+    const kdf = normalizeKdfMeta(result);
+    return { ok: true, ...result, ...(kdf ? { kdf } : {}) };
   } catch (err) {
     return {
       ok: false,
@@ -237,6 +266,7 @@ export async function exportPipVaultBundle(): Promise<PipVaultExportResult> {
       bytes: result.bytes,
       createdAt: result.createdAt,
       recordCount: result.recordCount,
+      kdf: result.kdf ?? normalizeKdfMeta(result),
     };
   } catch (err) {
     return {
@@ -296,11 +326,13 @@ export function inspectVaultBundle(
       return { ok: false, error: "Selected file is not a vault backup bundle" };
     }
 
+    const bundleKdf = parsed.kdf ?? parsed.key?.kdf;
     const meta: PipVaultBundleMeta = {
       format: parsed.format,
       mode: parsed.mode,
       createdAt: parsed.createdAt,
       recordCount: parsed.records ?? parsed.recordCount,
+      kdf: normalizeKdfMeta({ kdf: bundleKdf }),
     };
 
     return { ok: true, meta };

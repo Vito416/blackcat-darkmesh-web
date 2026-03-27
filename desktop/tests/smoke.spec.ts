@@ -419,7 +419,8 @@ test.describe("Desktop renderer smoke", () => {
     await expect(page.locator(".save-status-label")).toHaveText("Draft saved");
 
     const deleteButton = page.locator(".composition-actions").getByRole("button", { name: "Delete" });
-    await deleteButton.click();
+    await deleteButton.scrollIntoViewIfNeeded();
+    await deleteButton.click({ force: true });
 
     await page.getByTestId("draft-diff-btn").click();
     const diffDialog = page.getByRole("dialog", { name: "Draft diff panel" });

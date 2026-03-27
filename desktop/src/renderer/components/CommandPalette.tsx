@@ -8,14 +8,24 @@ export interface CommandPaletteAction {
   label: string;
   description: string;
   shortcut?: string;
-  run: () => void | Promise<void>;
+  groupId?: string;
+  target?: string;
+  scope?: string;
+  run: () => void | boolean | Promise<void | boolean>;
+}
+
+export interface CommandPaletteSection {
+  id: string;
+  title: string;
+  items: CommandPaletteAction[];
 }
 
 interface CommandPaletteProps {
   open: boolean;
   query: string;
   selectedIndex: number;
-  actions: CommandPaletteAction[];
+  sections: CommandPaletteSection[];
+  flattened: CommandPaletteAction[];
   inputRef: React.RefObject<HTMLInputElement>;
   onQueryChange: (value: string) => void;
   onSelectIndex: (index: number) => void;
@@ -27,7 +37,8 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
   open,
   query,
   selectedIndex,
-  actions,
+  sections,
+  flattened,
   inputRef,
   onQueryChange,
   onSelectIndex,
@@ -85,36 +96,53 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
           className="command-palette-list"
           role="listbox"
           aria-label={paletteText.title}
-          aria-activedescendant={actions[selectedIndex]?.id}
+          aria-activedescendant={flattened[selectedIndex]?.id}
         >
-          {actions.length === 0 ? (
+          {flattened.length === 0 ? (
             <div className="command-palette-empty">
               <strong>{paletteText.emptyTitle}</strong>
               <span>{paletteText.emptyHint}</span>
             </div>
           ) : (
-            actions.map((action, index) => {
-              const active = index === selectedIndex;
-
-              return (
-                <button
-                  key={action.id}
-                  id={action.id}
-                  type="button"
-                  className={`command-palette-item ${active ? "active" : ""}`}
-                  onMouseEnter={() => onSelectIndex(index)}
-                  onClick={() => void onExecute(action)}
-                  role="option"
-                  aria-selected={active}
-                >
-          <div className="command-palette-copy">
-            <strong>{action.label}</strong>
-            <span>{action.description}</span>
-          </div>
-          {action.shortcut && <kbd>{action.shortcut}</kbd>}
-                </button>
-              );
-            })
+            (() => {
+              let runningIndex = 0;
+              return sections.map((section) => {
+                const startIndex = runningIndex;
+                runningIndex += section.items.length;
+                return (
+                  <div key={section.id} className="command-palette-section" role="group" aria-label={section.title}>
+                    <div className="command-palette-section-head">
+                      <span className="eyebrow">{section.title}</span>
+                      <span className="command-palette-count">{section.items.length}</span>
+                    </div>
+                    <div className="command-palette-section-items">
+                      {section.items.map((action, index) => {
+                        const globalIndex = startIndex + index;
+                        const active = globalIndex === selectedIndex;
+                        return (
+                          <button
+                            key={action.id}
+                            id={action.id}
+                            type="button"
+                            className={`command-palette-item ${active ? "active" : ""}`}
+                            onMouseEnter={() => onSelectIndex(globalIndex)}
+                            onClick={() => void onExecute(action)}
+                            role="option"
+                            aria-selected={active}
+                          >
+                            <div className="command-palette-copy">
+                              <strong>{action.label}</strong>
+                              <span>{action.description}</span>
+                            </div>
+                            {action.shortcut && <kbd>{action.shortcut}</kbd>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              });
+            })()
           )}
         </div>
 
@@ -122,6 +150,7 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
           <span id={descriptionId}>{paletteText.footerNavigate}</span>
           <span>{paletteText.footerToggle}</span>
           <span>{paletteText.footerClose}</span>
+          <span className="command-palette-hint">{paletteText.fuzzyHint}</span>
         </footer>
       </section>
     </div>

@@ -212,6 +212,36 @@ export async function deployModule(
   return { txId, tags: mergedTags, placeholder: false, raw };
 }
 
+export async function simulateDeployModule(
+  moduleSrc: string,
+  tags: Tag[] = [],
+  walletPath?: string,
+): Promise<DeployResponse> {
+  const mergedTags = mergeTags(
+    [
+      { name: "Type", value: "Module" },
+      { name: "Module-Format", value: "javascript" },
+      { name: "Input-Encoding", value: "utf-8" },
+      { name: "Content-Type", value: "application/javascript" },
+      { name: "Data-Protocol", value: "ao" },
+      { name: "Dry-Run", value: "true" },
+    ],
+    tags,
+  );
+
+  const txId = `dryrun-${Math.random().toString(36).slice(2, 10)}`;
+
+  return {
+    txId,
+    tags: mergedTags,
+    placeholder: false,
+    note: "Dry-run mock gateway (not broadcast)",
+    walletPath,
+    raw: { dryRun: true, simulated: true, moduleBytes: moduleSrc?.length ?? 0, at: new Date().toISOString() },
+    transient: false,
+  };
+}
+
 export async function spawnProcess(
   scheduler?: string,
   manifestTx?: string,
