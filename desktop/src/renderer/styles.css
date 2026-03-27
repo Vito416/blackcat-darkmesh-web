@@ -1267,11 +1267,42 @@ button.ghost {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--surface-muted);
+  position: relative;
+  isolation: isolate;
+  transition:
+    border-color var(--motion-duration-fast) var(--motion-ease-standard),
+    background var(--motion-duration-fast) var(--motion-ease-decelerate),
+    box-shadow var(--motion-duration-fast) var(--motion-ease-standard),
+    transform var(--motion-duration-fast) var(--motion-ease-standard);
+}
+
+.draft-history-item:hover {
+  transform: translateY(-1px);
+  border-color: rgba(var(--accent-rgb), 0.26);
+  background:
+    linear-gradient(120deg, rgba(var(--accent-rgb), 0.12), rgba(var(--accent-strong-rgb), 0.1)),
+    var(--surface-muted);
+  box-shadow: 0 12px 28px rgba(var(--accent-rgb), 0.12);
 }
 
 .draft-history-item.current {
   border-color: rgba(var(--accent-rgb), 0.3);
   background: linear-gradient(120deg, rgba(var(--accent-rgb), 0.1), rgba(var(--accent-strong-rgb), 0.08));
+}
+
+.draft-history-item.current:hover {
+  border-color: rgba(var(--accent-rgb), 0.36);
+  box-shadow: 0 14px 32px rgba(var(--accent-rgb), 0.16);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .draft-history-item {
+    transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+  }
+
+  .draft-history-item:hover {
+    transform: none;
+  }
 }
 
 .draft-history-meta {
@@ -5930,6 +5961,11 @@ button.tiny {
   --drop-tilt-x: 0deg;
   --drop-tilt-y: 0deg;
   --drop-tilt-z: 0deg;
+  --tree-hover-wash: radial-gradient(120% 120% at 18% 14%, rgba(var(--accent-rgb), 0.08), transparent 46%),
+    radial-gradient(140% 130% at 82% 18%, rgba(var(--accent-strong-rgb), 0.07), transparent 50%);
+  --tree-hover-ring: rgba(var(--accent-rgb), 0.22);
+  --tree-hover-shadow: 0 12px 28px rgba(15, 23, 42, 0.12);
+  --tree-hover-glow: 0 18px 40px rgba(var(--accent-rgb), 0.16);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: var(--space-3);
@@ -5937,6 +5973,7 @@ button.tiny {
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
   cursor: pointer;
   transform-style: preserve-3d;
+  isolation: isolate;
   transition:
     border-color var(--motion-duration-fast) var(--motion-ease-standard),
     transform var(--motion-duration-fast) var(--motion-ease-standard),
@@ -5944,8 +5981,17 @@ button.tiny {
     background var(--motion-duration-base) var(--motion-ease-decelerate);
 }
 
-.tree-card:hover {
+:root[data-high-effects="off"] .tree-card {
+  --tree-hover-ring: rgba(var(--accent-rgb), 0.16);
+  --tree-hover-shadow: 0 10px 22px rgba(15, 23, 42, 0.12);
+  --tree-hover-glow: 0 14px 28px rgba(var(--accent-rgb), 0.12);
+}
+
+.tree-card:not(.drop-target):not(.drop-blocked):hover,
+.tree-card:not(.drop-target):not(.drop-blocked):focus-visible {
   transform: translateY(-1px);
+  background: var(--tree-hover-wash), linear-gradient(160deg, #ffffff 0%, #f6fbff 100%);
+  box-shadow: var(--tree-hover-shadow), 0 0 0 1px var(--tree-hover-ring), var(--tree-hover-glow);
 }
 
 .tree-card.selected {
@@ -5956,6 +6002,11 @@ button.tiny {
 .tree-card.primary-selected {
   border-color: var(--accent);
   box-shadow: 0 14px 32px rgba(14, 165, 233, 0.24);
+}
+
+.tree-card.selected:not(.drop-target):not(.drop-blocked):hover,
+.tree-card.primary-selected:not(.drop-target):not(.drop-blocked):hover {
+  box-shadow: var(--tree-hover-shadow), 0 0 0 1px rgba(var(--accent-rgb), 0.26), 0 18px 42px rgba(var(--accent-rgb), 0.2);
 }
 
 .tree-card.flash-highlight {

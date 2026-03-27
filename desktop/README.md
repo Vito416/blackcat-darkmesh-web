@@ -9,6 +9,8 @@ Cross‑platform desktop shell for blackcat write:
 
 ## Dev tips
 - Bundle report: `BUNDLE_REPORT=1 npm run build:report` (writes `dist/renderer/bundle-report.html`).
+- Locale packs: EN is bundled; other locales lazy-load on first switch to trim renderer boot size.
+- Animation gating: hero canvas / holomap / neon cursor run only when FX is on and `prefers-reduced-motion` is false (auto-disables when users request reduced motion).
 - Neon hover utility: add `class="neon-hover-glow"`; override `--neon-hover-gradient` per theme if needed.
 - Faster Playwright install: export `PLAYWRIGHT_SKIP_DOWNLOAD=1` if Chromium is already available.
 - Headless on Linux: `xvfb-run npm run test:smoke -- --project=chromium`.

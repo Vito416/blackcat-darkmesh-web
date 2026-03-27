@@ -223,13 +223,15 @@ import Wizard from "./components/Wizard";
 import { validatePipDocument } from "./services/pipValidation";
 import {
   DEFAULT_LOCALE,
-  getMessages,
+  FALLBACK_MESSAGES,
   I18nContext,
+  loadMessages,
   makeTranslator,
   resolveLocale,
   type HotkeyScope,
   type HotkeyTarget,
   type LocaleKey,
+  type Messages,
 } from "./locales";
 import themeTokenConfig from "./theme/tokens.json";
 import type {
@@ -2203,7 +2205,19 @@ function App() {
     }
     return resolved;
   });
-  const messages = useMemo(() => getMessages(locale), [locale]);
+  const [messages, setMessages] = useState<Messages>(FALLBACK_MESSAGES);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadMessages(locale).then((loaded) => {
+      if (cancelled) return;
+      setMessages(loaded);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [locale]);
+
   const t = useMemo(() => makeTranslator(messages), [messages]);
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
   const [highEffects, setHighEffects] = useState<boolean>(() => {
@@ -7235,14 +7249,16 @@ function App() {
 
   const changeLocale = useCallback(
     (next: LocaleKey) => {
-      const nextMessages = getMessages(next);
-      const nextTranslator = makeTranslator(nextMessages);
-      if (next === locale) {
-        flashStatus(nextTranslator("statuses.localeAlready", { language: nextMessages.meta.languageNative }));
-        return;
-      }
-      setLocale(next);
-      flashStatus(nextTranslator("statuses.localeChanged", { language: nextMessages.meta.languageNative }));
+      void (async () => {
+        const nextMessages = await loadMessages(next);
+        const nextTranslator = makeTranslator(nextMessages);
+        if (next === locale) {
+          flashStatus(nextTranslator("statuses.localeAlready", { language: nextMessages.meta.languageNative }));
+          return;
+        }
+        setLocale(next);
+        flashStatus(nextTranslator("statuses.localeChanged", { language: nextMessages.meta.languageNative }));
+      })();
     },
     [flashStatus, locale],
   );

@@ -6,6 +6,8 @@
 ## Dev tips
 - **CI matrix**: `smoke` (Playwright + artifact upload), `vault` (sealed/vaulted creds), `ao` (AO harness) in `.github/workflows/ci.yml`.
 - **Bundle report (desktop UI)**: `cd desktop && BUNDLE_REPORT=1 npm run build:report` (creates `dist/renderer/bundle-report.html`).
+- **Locale packs**: default EN ships in the main bundle; other locales lazy-load on first switch to keep the renderer cold-start small.
+- **Animation gating**: hero canvas / holomap / cursor trail sit behind the FX toggle and `prefers-reduced-motion`; High FX auto-disables when reduced motion is set.
 - **Neon hover utility**: add `class="neon-hover-glow"` (optional `--neon-hover-gradient`) for gradient hover/focus states across cyberpunk themes.
 - **Playwright install faster**: set `PLAYWRIGHT_SKIP_DOWNLOAD=1` if Chromium is preinstalled; otherwise `npx playwright install --with-deps chromium`.
 - **Headless on Linux CI**: `xvfb-run npm run test:smoke -- --project=chromium`.

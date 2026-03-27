@@ -1,9 +1,6 @@
 import React from "react";
 
-import cs from "./cs";
-import de from "./de";
 import en, { type Messages } from "./en";
-import es from "./es";
 export type { Messages } from "./en";
 
 export type LocaleKey = "en" | "cs" | "es" | "de";
@@ -36,13 +33,18 @@ export type PaletteActionCopy = {
 
 export const DEFAULT_LOCALE: LocaleKey = "en";
 export const SUPPORTED_LOCALES: LocaleKey[] = ["en", "cs", "es", "de"];
+export const FALLBACK_MESSAGES = en;
 
-const LOCALE_MAP: Record<LocaleKey, Messages> = {
-  en,
-  cs,
-  es,
-  de,
+type LocaleLoader = () => Promise<{ default: Messages }>;
+
+const LOCALE_LOADERS: Record<LocaleKey, LocaleLoader> = {
+  en: () => Promise.resolve({ default: en }),
+  cs: () => import("./cs"),
+  es: () => import("./es"),
+  de: () => import("./de"),
 };
+
+const messagesCache = new Map<LocaleKey, Promise<Messages>>();
 
 export const resolveLocale = (value?: string | null): LocaleKey => {
   const normalized = (value ?? "").toLowerCase();
@@ -50,6 +52,22 @@ export const resolveLocale = (value?: string | null): LocaleKey => {
   if (SUPPORTED_LOCALES.includes(direct)) return direct;
   const short = normalized.slice(0, 2) as LocaleKey;
   return SUPPORTED_LOCALES.includes(short) ? short : DEFAULT_LOCALE;
+};
+
+export const loadMessages = (locale: LocaleKey): Promise<Messages> => {
+  const normalized = resolveLocale(locale);
+
+  if (!messagesCache.has(normalized)) {
+    const loader = LOCALE_LOADERS[normalized] ?? LOCALE_LOADERS[DEFAULT_LOCALE];
+    messagesCache.set(
+      normalized,
+      loader()
+        .then((mod) => mod?.default ?? FALLBACK_MESSAGES)
+        .catch(() => FALLBACK_MESSAGES),
+    );
+  }
+
+  return messagesCache.get(normalized)!;
 };
 
 const interpolate = (value: string, params?: Record<string, string | number>) =>
@@ -87,5 +105,3 @@ export const I18nContext = React.createContext<I18nContextValue>({
 });
 
 export const useI18n = () => React.useContext(I18nContext);
-
-export const getMessages = (locale: LocaleKey): Messages => LOCALE_MAP[locale] ?? en;

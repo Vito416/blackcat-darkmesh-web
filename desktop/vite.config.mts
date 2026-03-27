@@ -2,8 +2,29 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { visualizer } from "rollup-plugin-visualizer";
 import path from "path";
+import purgeCss from "vite-plugin-purgecss";
 
 const enableBundleReport = process.env.BUNDLE_REPORT === "true" || process.env.ANALYZE === "true";
+
+const rendererRoot = path.resolve(__dirname, "src/renderer");
+const rendererOutDir = path.resolve(__dirname, "dist/renderer");
+const toPosix = (value: string) => value.replace(/\\/g, "/");
+
+const purgeCssPlugin = {
+  ...purgeCss({
+    // Scan renderer sources (JSX/TSX + HTML) to drop unused selectors while keeping data/test hooks.
+    content: [
+      toPosix(path.join(rendererRoot, "index.html")),
+      toPosix(path.join(rendererRoot, "**/*.{ts,tsx,html}")),
+    ],
+    safelist: {
+      // Preserve selectors driven by runtime flags and tests (data-*, aria-* and data-testid patterns).
+      standard: [/data-[\w-:]+/, /aria-[\w-]+/, /data-testid/],
+    },
+    defaultExtractor: (content) => content.match(/[\w-/:@]+/g) ?? [],
+  }),
+  apply: "build" as const,
+};
 
 const vendorChunkMap = [
   { match: "@permaweb/aoconnect", chunk: "vendor-ao-connect" },
@@ -17,6 +38,7 @@ const vendorChunkMap = [
 export default defineConfig({
   plugins: [
     react(),
+    purgeCssPlugin,
     ...(enableBundleReport
       ? [
           visualizer({
@@ -29,10 +51,10 @@ export default defineConfig({
         ]
       : []),
   ],
-  root: path.resolve(__dirname, "src/renderer"),
+  root: rendererRoot,
   base: "./",
   build: {
-    outDir: path.resolve(__dirname, "dist/renderer"),
+    outDir: rendererOutDir,
     emptyOutDir: true,
     chunkSizeWarningLimit: 5000,
     rollupOptions: {
