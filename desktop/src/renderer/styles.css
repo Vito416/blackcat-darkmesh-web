@@ -2047,6 +2047,32 @@ button.primary:hover {
   box-shadow: 0 14px 32px rgba(14, 165, 233, 0.42);
 }
 
+/* Neon hover accents on key surfaces */
+body:not([data-reduced-motion]) .panel,
+body:not([data-reduced-motion]) .quick-card,
+body:not([data-reduced-motion]) button.primary,
+body:not([data-reduced-motion]) button.ghost {
+  transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+}
+
+body:not([data-reduced-motion]) .panel:hover,
+body:not([data-reduced-motion]) .quick-card:hover,
+body:not([data-reduced-motion]) button.primary:hover,
+body:not([data-reduced-motion]) button.ghost:hover {
+  box-shadow: var(--hover-glow, 0 12px 30px rgba(0, 0, 0, 0.25)), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  transform: translateY(-2px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel,
+  .quick-card,
+  button.primary,
+  button.ghost {
+    transition: none;
+    transform: none !important;
+  }
+}
+
 button.ghost {
   background: var(--surface-muted);
   border-color: var(--border);

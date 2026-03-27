@@ -7,6 +7,11 @@ Cross‑platform desktop shell for blackcat write:
 - **@permaweb/aoconnect** for AO deploy (to be wired)
 - **Roadmap:** see [../ROADMAP.md](../ROADMAP.md) for phased plans.
 
+## Dev tips
+- Bundle report: `npm run build:report` (writes `dist/renderer/bundle-report.html` when `BUNDLE_REPORT=true`).
+- Faster Playwright install: export `PLAYWRIGHT_SKIP_DOWNLOAD=1` if Chromium is already available.
+- Headless on Linux: `xvfb-run npm run test:smoke -- --project=chromium`.
+
 ## Commands (after `npm install`)
 
 ```bash

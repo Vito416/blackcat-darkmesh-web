@@ -3,6 +3,11 @@
 
 ![Web Banner](.github/blackcat-darkmesh-web-banner.jpg)
 
+## Dev tips
+- **Bundle report (desktop UI)**: `cd desktop && npm run build:report` (creates `dist/renderer/bundle-report.html`).
+- **Playwright install faster**: set `PLAYWRIGHT_SKIP_DOWNLOAD=1` if Chromium is preinstalled; otherwise `npx playwright install --with-deps chromium`.
+- **Headless on Linux CI**: `xvfb-run npm run test:smoke -- --project=chromium`.
+
 Purpose
 - Admin-facing console to build and operate a site/eshop.
 - Maintains an offline-first sensitive database (PII) synced on demand from the Worker inbox (Cloudflare).
