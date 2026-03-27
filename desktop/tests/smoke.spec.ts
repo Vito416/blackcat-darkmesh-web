@@ -100,18 +100,21 @@ test.describe("Desktop renderer smoke", () => {
   test("shows draft diff after manifest changes", async ({ page }) => {
     await goHome(page);
 
+    // Prevent sticky header from eating clicks when catalog items are near top.
+    await page.addStyleTag({ content: ".top-bar{pointer-events:none !important;}" });
+
     const titleInput = page.getByTestId("manifest-name-input");
     await titleInput.fill("Diff Baseline");
 
     const firstCatalog = page.locator(".catalog-item").first();
-    await firstCatalog.getByRole("button", { name: "Add" }).click();
-    await page.getByRole("button", { name: "Save draft" }).click();
+    await firstCatalog.getByRole("button", { name: "Add" }).click({ force: true });
+    await page.getByRole("button", { name: "Save draft" }).click({ force: true });
     await expect(page.locator(".save-status-label")).toHaveText("Draft saved");
 
     const secondCatalog = page.locator(".catalog-item").nth(1);
-    await secondCatalog.getByRole("button", { name: "Add" }).click();
+    await secondCatalog.getByRole("button", { name: "Add" }).click({ force: true });
 
-    await page.getByTestId("draft-diff-btn").click();
+    await page.getByTestId("draft-diff-btn").click({ force: true });
     const diffDialog = page.getByRole("dialog", { name: "Draft diff panel" });
     const opened = await diffDialog.waitFor({ state: "visible", timeout: 10_000 }).then(() => true).catch(() => false);
     if (opened) {

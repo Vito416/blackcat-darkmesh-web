@@ -20,6 +20,8 @@ export type VaultKdfMeta = {
   parallelism?: number;
 };
 
+export type VaultIntegrityIssue = { id: string; error: string };
+
 export type VaultState = {
   mode: "password" | "safeStorage";
   unlocked: boolean;
@@ -27,15 +29,21 @@ export type VaultState = {
   exists: boolean;
   pip: Record<string, unknown> | null;
   records: VaultRecord[];
+  integrityIssues: VaultIntegrityIssue[];
   iterations: number;
   salt: string;
   updatedAt: string;
   kdf: VaultKdfMeta;
+  hardwarePlaceholder: boolean;
+  lockedAt?: string | null;
 };
 
 type SetupOptions = {
   vaultPassword?: string;
   kdf?: VaultKdfMeta;
+  records?: VaultRecord[];
+  integrityIssues?: VaultIntegrityIssue[];
+  hardwarePlaceholder?: boolean;
 };
 
 const DEFAULT_KDF_SALT = typeof Buffer !== "undefined" ? Buffer.from("smoke-salt").toString("base64") : "c21va2Utc2FsdA==";
@@ -49,21 +57,30 @@ const DEFAULT_KDF: VaultKdfMeta = {
 };
 
 export async function setupPage(page: Page, options: SetupOptions = {}) {
-  const { vaultPassword = TEST_PASSWORD, kdf = DEFAULT_KDF } = options;
+  const {
+    vaultPassword = TEST_PASSWORD,
+    kdf = DEFAULT_KDF,
+    records = [],
+    integrityIssues = [],
+    hardwarePlaceholder = false,
+  } = options;
 
   await page.addInitScript(
-    ({ password, kdfProfile }) => {
+    ({ password, kdfProfile, seedRecords, seedIntegrityIssues, hardwarePlaceholder: seedHardwarePlaceholder }) => {
       const state: VaultState = {
         mode: "password",
         unlocked: false,
         password,
         exists: true,
         pip: null,
-        records: [],
+        records: seedRecords ?? [],
+        integrityIssues: seedIntegrityIssues ?? [],
         iterations: 100_000,
         salt: kdfProfile.salt ?? btoa("smoke-salt"),
         updatedAt: new Date().toISOString(),
         kdf: kdfProfile,
+        hardwarePlaceholder: Boolean(seedHardwarePlaceholder),
+        lockedAt: null,
       };
 
       const toRecordMeta = (record: VaultRecord) => ({
@@ -84,6 +101,8 @@ export async function setupPage(page: Page, options: SetupOptions = {}) {
         iterations: state.iterations,
         salt: state.salt,
         kdf: state.kdf,
+        hardwarePlaceholder: state.hardwarePlaceholder,
+        lockedAt: state.lockedAt ?? undefined,
         locked: state.mode === "password" ? !state.unlocked : false,
         recordCount: state.records.length,
       });
@@ -114,22 +133,31 @@ export async function setupPage(page: Page, options: SetupOptions = {}) {
           state.records = state.records.filter((r) => r.id !== id);
           return { ok: true, removed: before !== state.records.length };
         },
-        enablePasswordMode: async (input: string) => {
+        enablePasswordMode: async (input: string, opts?: { kdf?: VaultKdfMeta; hardwarePlaceholder?: boolean }) => {
           const trimmed = (input ?? "").trim();
           if (!trimmed) {
             throw new Error("Vault password required");
           }
+          const nextKdf = opts?.kdf ?? kdfProfile;
+          const nextHardware =
+            typeof opts?.hardwarePlaceholder === "boolean" ? opts.hardwarePlaceholder : state.hardwarePlaceholder;
 
           if (state.mode === "password" && !state.unlocked) {
             if (trimmed !== state.password) {
               throw new Error("Invalid vault password");
             }
             state.unlocked = true;
+            state.lockedAt = null;
+            state.kdf = nextKdf;
+            state.hardwarePlaceholder = nextHardware;
           } else {
             state.mode = "password";
             state.password = trimmed;
             state.unlocked = true;
             state.exists = true;
+            state.kdf = nextKdf;
+            state.hardwarePlaceholder = nextHardware;
+            state.lockedAt = null;
           }
 
           state.updatedAt = new Date().toISOString();
@@ -139,11 +167,14 @@ export async function setupPage(page: Page, options: SetupOptions = {}) {
             iterations: state.iterations,
             salt: state.salt,
             records: state.records.length,
+            hardwarePlaceholder: state.hardwarePlaceholder,
+            kdf: state.kdf,
           };
         },
         disablePasswordMode: async () => {
           state.mode = "safeStorage";
           state.unlocked = true;
+          state.lockedAt = null;
           state.updatedAt = new Date().toISOString();
           return { ok: true, mode: "safeStorage" };
         },
@@ -154,23 +185,51 @@ export async function setupPage(page: Page, options: SetupOptions = {}) {
           bytes: 64,
           createdAt: new Date().toISOString(),
           recordCount: state.records.length,
+          hardwarePlaceholder: state.hardwarePlaceholder,
           kdf: state.kdf,
         }),
         importVault: async (_bundle: unknown, pwd?: string) => {
           state.mode = pwd ? "password" : "safeStorage";
           state.unlocked = !pwd || pwd === state.password;
+          state.lockedAt = state.unlocked ? null : new Date().toISOString();
           state.updatedAt = new Date().toISOString();
           return { ok: true, mode: state.mode, records: state.records.length };
         },
         scanIntegrity: async () => ({
           ok: true,
-          scanned: state.records.length,
-          failed: [],
+          scanned: state.records.length || state.integrityIssues.length,
+          failed: state.integrityIssues,
           durationMs: 5,
           recordCount: state.records.length,
         }),
+        repairRecord: async (id: string, options?: { strategy?: "rewrap" | "quarantine"; deleteAfter?: boolean }) => {
+          const remaining = state.integrityIssues.filter((issue) => issue.id !== id);
+          const repaired = remaining.length !== state.integrityIssues.length;
+          state.integrityIssues = remaining;
+          const response: { ok: true; repaired: boolean; quarantinedPath?: string; removed?: boolean; message?: string } = {
+            ok: true,
+            repaired,
+          };
+          if (options?.strategy === "quarantine") {
+            response.quarantinedPath = `/tmp/${id}.quarantine.json`;
+            response.message = "Record quarantined";
+          } else if (options?.strategy === "rewrap") {
+            response.message = "Record re-wrapped";
+          }
+          return response;
+        },
+        setHardwarePlaceholder: async (enabled: boolean) => {
+          state.hardwarePlaceholder = enabled;
+          return { ok: true, hardwarePlaceholder: state.hardwarePlaceholder };
+        },
+        lock: async () => {
+          state.unlocked = false;
+          state.lockedAt = new Date().toISOString();
+          return { ok: true, locked: true, lockedAt: state.lockedAt };
+        },
         __lock: () => {
           state.unlocked = false;
+          state.lockedAt = new Date().toISOString();
         },
       } as Window["pipVault"];
 
@@ -218,7 +277,13 @@ export async function setupPage(page: Page, options: SetupOptions = {}) {
         },
       };
     },
-    { password: vaultPassword, kdfProfile: kdf },
+    {
+      password: vaultPassword,
+      kdfProfile: kdf,
+      seedRecords: records,
+      seedIntegrityIssues: integrityIssues,
+      hardwarePlaceholder,
+    },
   );
 
   await page.route("**/*", (route) => {
