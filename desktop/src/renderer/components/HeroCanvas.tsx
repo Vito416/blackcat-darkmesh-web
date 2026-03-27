@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, type CSSProperties } from "react";
 import * as THREE from "three";
 
 type HeroMode = "idle" | "webgl" | "fallback";
@@ -17,6 +17,10 @@ type ThemeName =
 type HeroCanvasProps = {
   theme: ThemeName;
   highEffects: boolean;
+  hologridEnabled: boolean;
+  hologridSpeed: number;
+  hologridOpacity: number;
+  reducedMotion: boolean;
 };
 
 const PARTICLE_COUNT = 220;
@@ -25,7 +29,7 @@ const WEBGL_THEMES: ThemeName[] = ["cyberpunk", "neon-wasteland-v2", "hologrid-n
 
 const cssColor = (value: string, fallback: string) => value.trim() || fallback;
 
-const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme, highEffects }) => {
+const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme, highEffects, hologridEnabled, hologridSpeed, hologridOpacity, reducedMotion }) => {
   const mountRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [mode, setMode] = useState<HeroMode>("idle");
@@ -33,10 +37,25 @@ const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme, highEffects }) => {
   const setParallaxRef = (index: number) => (node: HTMLDivElement | null) => {
     parallaxRefs.current[index] = node;
   };
+  const hologridEnabledRef = useRef(hologridEnabled);
+  const hologridSpeedRef = useRef(hologridSpeed);
+  const hologridOpacityRef = useRef(hologridOpacity);
+
+  useEffect(() => {
+    hologridEnabledRef.current = hologridEnabled;
+  }, [hologridEnabled]);
+
+  useEffect(() => {
+    hologridSpeedRef.current = hologridSpeed;
+  }, [hologridSpeed]);
+
+  useEffect(() => {
+    hologridOpacityRef.current = hologridOpacity;
+  }, [hologridOpacity]);
 
   useEffect(() => {
     const layers = parallaxRefs.current;
-    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const reduceMotion = reducedMotion;
 
     if (!highEffects || reduceMotion) {
       layers.forEach((layer) => {
@@ -92,7 +111,7 @@ const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme, highEffects }) => {
         if (layer) layer.style.transform = "";
       });
     };
-  }, [highEffects]);
+  }, [highEffects, reducedMotion]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -104,7 +123,7 @@ const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme, highEffects }) => {
       return;
     }
 
-    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const reduceMotion = reducedMotion;
     if (reduceMotion || !highEffects) {
       setMode("fallback");
       return;
@@ -203,6 +222,8 @@ const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme, highEffects }) => {
 
     const gridUniforms = {
       time: { value: 0 },
+      speed: { value: hologridSpeedRef.current },
+      opacity: { value: hologridOpacityRef.current },
       color1: { value: accentStrongColor },
       color2: { value: accentColor },
       fogColor: { value: fogColor },
@@ -228,6 +249,8 @@ const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme, highEffects }) => {
         #endif
         uniform float time;
         uniform vec3 color1;
+        uniform float speed;
+        uniform float opacity;
         uniform vec3 color2;
         uniform vec3 fogColor;
         uniform float fogNear;
@@ -244,13 +267,13 @@ const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme, highEffects }) => {
 
         void main() {
           vec2 uv = vUv;
-          uv.y += time * 0.55;
+          uv.y += time * 0.55 * speed;
 
           float major = gridLine(uv * 0.55, 0.035);
           float minor = gridLine(uv, 0.02) * 0.85;
           float grid = max(major, minor);
 
-          float pulse = sin((uv.y + time * 0.75) * 0.6) * 0.5 + 0.5;
+          float pulse = sin((uv.y + time * 0.75 * speed) * 0.6) * 0.5 + 0.5;
           vec3 neon = mix(color1, color2, pulse);
 
           float depthFog = smoothstep(fogNear, fogFar, vDepth);
@@ -258,7 +281,7 @@ const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme, highEffects }) => {
           vec3 color = neon * intensity;
 
           color = mix(color, fogColor, depthFog * 0.85);
-          float alpha = clamp(intensity * (1.0 - depthFog * 0.55), 0.0, 0.92);
+          float alpha = clamp(intensity * (1.0 - depthFog * 0.55) * opacity, 0.0, 0.92);
 
           gl_FragColor = vec4(color, alpha);
         }
@@ -273,6 +296,7 @@ const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme, highEffects }) => {
     gridMesh = new THREE.Mesh(gridGeometry, gridMaterial);
     gridMesh.position.set(0, -3.6, -12);
     gridMesh.rotation.set(-0.06, 0.24, 0.18);
+    gridMesh.visible = hologridEnabledRef.current;
     scene.add(gridMesh);
 
     particleGeometry = new THREE.BufferGeometry();
@@ -336,6 +360,8 @@ const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme, highEffects }) => {
 
         if (gridMaterial) {
           gridMaterial.uniforms.time.value = elapsed;
+          gridMaterial.uniforms.speed.value = hologridSpeedRef.current;
+          gridMaterial.uniforms.opacity.value = hologridOpacityRef.current;
         }
 
         if (camera) {
@@ -358,6 +384,7 @@ const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme, highEffects }) => {
           gridMesh.position.x += (targetX - gridMesh.position.x) * 0.06;
           gridMesh.position.y += (targetY - gridMesh.position.y) * 0.06;
           gridMesh.rotation.y += (pointer.x * 0.4 - gridMesh.rotation.y) * 0.04;
+          gridMesh.visible = hologridEnabledRef.current;
         }
 
         renderer?.render(scene as THREE.Scene, camera as THREE.PerspectiveCamera);
@@ -389,7 +416,13 @@ const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme, highEffects }) => {
       renderer?.dispose();
       setMode("idle");
     };
-  }, [highEffects, theme]);
+  }, [highEffects, reducedMotion, theme]);
+
+  const hologridActive = hologridEnabled && highEffects && !reducedMotion;
+  const heroStyle = {
+    "--hologrid-speed": hologridSpeed,
+    "--hologrid-opacity": hologridOpacity,
+  } as unknown as CSSProperties;
 
   return (
     <div
@@ -397,6 +430,8 @@ const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme, highEffects }) => {
       className="hero-stage"
       data-mode={mode}
       data-high-effects={highEffects ? "on" : "off"}
+      data-hologrid={hologridActive ? "on" : "off"}
+      style={heroStyle}
       aria-hidden="true"
     >
       <div className="hero-parallax layer horizon" ref={setParallaxRef(0)} />
@@ -407,7 +442,7 @@ const HeroCanvas: React.FC<HeroCanvasProps> = ({ theme, highEffects }) => {
       <canvas ref={canvasRef} className="hero-canvas" />
       <div className="hero-fallback">
         <div className="hero-fallback-layer glow" />
-        <div className="hero-fallback-layer grid" />
+        {hologridActive ? <div className="hero-fallback-layer grid" /> : null}
         <div className="hero-fallback-layer haze" />
       </div>
     </div>

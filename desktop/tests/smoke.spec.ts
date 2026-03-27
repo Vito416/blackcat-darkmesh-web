@@ -65,6 +65,29 @@ test.describe("Desktop renderer smoke", () => {
     });
   });
 
+  test("toggles animated grid effects", async ({ page }) => {
+    await page.addInitScript(() => {
+      window.localStorage.setItem("darkmesh-high-effects", "0");
+    });
+
+    await goHome(page);
+
+    const heroStage = page.locator(".hero-stage");
+    await expect(heroStage).toHaveAttribute("data-high-effects", "off");
+
+    await page.locator("#theme-select").selectOption("hologrid-noir");
+
+    const effectsToggle = page.locator(".effects-toggle input");
+    await effectsToggle.check();
+
+    await expect(heroStage).toHaveAttribute("data-high-effects", "on");
+    await expect(heroStage).toHaveAttribute("data-mode", /(webgl|fallback)/, { timeout: 10_000 });
+    await expect(page.locator("html")).toHaveAttribute("data-high-effects", "on");
+
+    await effectsToggle.uncheck();
+    await expect(heroStage).toHaveAttribute("data-high-effects", "off");
+  });
+
   test("loads AO console log panel", async ({ page }) => {
     await goHome(page);
     const aoButton = page.getByRole("button", { name: "AO Console" });
@@ -79,7 +102,7 @@ test.describe("Desktop renderer smoke", () => {
     await expect(page.getByText("Spawn status")).toBeVisible();
   });
 
-  test("unlocks password-protected vault", async ({ page }) => {
+  test("opens vault password dialog to enable and unlock", async ({ page }) => {
     await goHome(page);
     const dataButton = page.getByRole("button", { name: "Data Core" });
     await dataButton.waitFor({ timeout: 10_000 });
@@ -87,13 +110,41 @@ test.describe("Desktop renderer smoke", () => {
 
     const header = page.locator(".pip-vault-header-actions");
     await expect(header).toContainText("Password locked");
-    await expect(header).toContainText("Locked");
 
-    await page.getByLabel("Vault password").fill(TEST_PASSWORD);
-    await page.getByTestId("vault-unlock-btn").click();
+    await page.getByRole("button", { name: "Open password dialog" }).click();
+    const unlockDialog = page.getByRole("dialog", { name: "Unlock vault" });
+    await expect(unlockDialog).toBeVisible();
 
-    await expect(header).toContainText("Password ready");
+    await unlockDialog.getByPlaceholder("Vault password").fill(TEST_PASSWORD);
+    await unlockDialog.getByRole("button", { name: "Unlock vault" }).click();
+
+    await expect(unlockDialog).not.toBeVisible({ timeout: 7_000 });
     await expect(header).toContainText("Unlocked");
+
+    await page.getByRole("button", { name: "Disable password" }).click();
+    const modeDialog = page.getByRole("dialog", { name: "Switch to keychain storage?" });
+    await modeDialog.getByRole("button", { name: "Use keychain" }).click();
+    await expect(header).toContainText("Safe storage");
+
+    const modalPassword = "modal-strong-pass-123!";
+    await page.getByRole("button", { name: "Open password dialog" }).click();
+    const enableDialog = page.getByRole("dialog", { name: "Enable password mode" });
+    await enableDialog.getByPlaceholder("New vault password").fill(modalPassword);
+    await enableDialog.getByRole("button", { name: "Enable password" }).click();
+
+    const confirmDialog = page.getByRole("dialog", { name: "Enable password mode?" });
+    await confirmDialog.getByRole("button", { name: "Enable password" }).click();
+
+    await expect(header).toContainText("Password ready", { timeout: 7_000 });
+    await expect(header).toContainText("Unlocked");
+
+    await page.evaluate(() => (window as any).pipVault?.__lock?.());
+    await page.getByRole("button", { name: "Open password dialog" }).click();
+    const relockDialog = page.getByRole("dialog", { name: "Unlock vault" });
+    await relockDialog.getByPlaceholder("Vault password").fill(modalPassword);
+    await relockDialog.getByRole("button", { name: "Unlock vault" }).click();
+
+    await expect(header).toContainText("Unlocked", { timeout: 7_000 });
   });
 
   test("rotates vault password", async ({ page }) => {
@@ -149,13 +200,16 @@ test.describe("Desktop renderer smoke", () => {
     }
   });
 
-  test("adds catalog block via drag and drop", async ({ page }) => {
+  test("adds catalog block from palette grid via drag and drop", async ({ page }) => {
     await goHome(page);
 
     // Prevent sticky header from intercepting the drag path in CI.
     await page.addStyleTag({ content: ".top-bar{pointer-events:none !important;}" });
 
-    const source = page.locator(".catalog-item").first();
+    const gridCard = page.locator(".catalog-grid-card").first();
+    await gridCard.waitFor({ timeout: 10_000 });
+
+    const source = gridCard.locator(".catalog-grid-preview");
     const dest = page.locator(".preview-surface");
     await dest.waitFor({ timeout: 10_000 });
     await dest.scrollIntoViewIfNeeded();
@@ -164,17 +218,27 @@ test.describe("Desktop renderer smoke", () => {
     const treeFirst = page.locator(".tree-card").first();
     // Fallback for flaky drag: click the add button if nothing was dropped.
     if (!(await treeFirst.isVisible({ timeout: 2000 }).catch(() => false))) {
-      await source.getByRole("button", { name: "Add" }).click();
+      await gridCard.getByRole("button", { name: "Add" }).click();
     }
 
     await expect(treeFirst).toBeVisible();
     await expect(page.locator(".tree-card.primary-selected")).toBeVisible();
   });
 
-  test("auto refreshes health checks", async ({ page }) => {
+  test("auto refreshes health checks with scheduler ping", async ({ page }) => {
     await page.addInitScript(() => {
       (window as any).__HEALTH_AUTO_REFRESH_MS__ = 300;
+      const proc = (window as any).process ?? { env: {} };
+      proc.env = {
+        ...proc.env,
+        SCHEDULER_URL: "https://scheduler.local",
+        AO_URL: "https://ao.local",
+        GATEWAY_URL: "https://gateway.local",
+        WORKER_PIP_BASE: "https://worker.local",
+      };
+      (window as any).process = proc;
     });
+
     await goHome(page);
     await page.getByRole("button", { name: "AO Console" }).click();
 
@@ -182,15 +246,21 @@ test.describe("Desktop renderer smoke", () => {
     await expect(healthCard).toBeVisible();
     await healthCard.getByRole("button", { name: "Expand" }).click();
     await page.getByLabel("Health auto refresh cadence").selectOption("10");
+    await healthCard.getByRole("button", { name: "Refresh" }).click();
+
+    const schedulerRow = healthCard.locator(".health-row").filter({ hasText: "AO scheduler" });
+    await expect(schedulerRow).toBeVisible({ timeout: 8_000 });
+    await expect(schedulerRow).not.toHaveClass(/missing|offline/);
+    await expect(schedulerRow.locator(".health-meta")).toContainText("scheduler.local");
 
     const events = page.locator(".health-events-list .health-event");
-    await events.first().waitFor({ timeout: 5000 });
+    await events.first().waitFor({ timeout: 5_000 });
     const initial = await events.count();
 
     await page.waitForFunction(
       (target) => document.querySelectorAll(".health-events-list .health-event").length > target,
       initial,
-      { timeout: 5000 },
+      { timeout: 5_000 },
     );
   });
 

@@ -726,16 +726,27 @@ type VaultExportOptions = {
   source?: "wizard" | "panel";
 };
 
+type CatalogFilterState = {
+  search: string;
+  types: string[];
+  tags: string[];
+  quickShape: string | null;
+};
+
 const THEME_STORAGE_KEY = "darkmesh-theme";
 const OFFLINE_STORAGE_KEY = "darkmesh-offline-mode";
 const CURSOR_TRAIL_STORAGE_KEY = "darkmesh-cursor-trail";
 const LOCALE_STORAGE_KEY = "darkmesh-locale";
 const PALETTE_RECENTS_STORAGE_KEY = "darkmesh-palette-recents";
+const CATALOG_FILTER_STORAGE_KEY = "darkmesh-catalog-filters";
+const CATALOG_RECENTS_STORAGE_KEY = "darkmesh-catalog-recents";
+const CATALOG_RECENTS_LIMIT = 6;
 const PALETTE_RECENTS_LIMIT = 8;
 const OFFLINE_FETCH_ERROR = "Offline mode is enabled; network requests are blocked";
 const HEALTH_AUTO_REFRESH_STORAGE_KEY = "health-auto-refresh";
-type HealthAutoRefresh = "off" | "10" | "30" | "60";
-const HEALTH_AUTO_REFRESH_OPTIONS: HealthAutoRefresh[] = ["off", "10", "30", "60"];
+const HEALTH_AUTO_REFRESH_CUSTOM_KEY = "health-auto-refresh-custom";
+type HealthAutoRefresh = "off" | "10" | "30" | "60" | "custom";
+const HEALTH_AUTO_REFRESH_OPTIONS: HealthAutoRefresh[] = ["off", "10", "30", "60", "custom"];
 const PIP_VAULT_REMEMBER_KEY = "pip-vault-remember";
 const PIP_VAULT_REMEMBER_PASSWORD_KEY = "pip-vault-remember-password";
 const PIP_VAULT_AUTO_LOCK_KEY = "pip-vault-auto-lock-minutes";
@@ -748,6 +759,15 @@ const HEALTH_SLA_LATENCY_STORAGE_KEY = "health-sla-latency";
 const LAST_MODULE_TX_STORAGE_KEY = "ao-last-module-tx";
 const LAST_SPAWN_STORAGE_KEY = "ao-last-spawn";
 const AO_PINNED_IDS_STORAGE_KEY = "ao-console-pins";
+const HOLOGRID_ENABLED_STORAGE_KEY = "darkmesh-hologrid-enabled";
+const HOLOGRID_SPEED_STORAGE_KEY = "darkmesh-hologrid-speed";
+const HOLOGRID_OPACITY_STORAGE_KEY = "darkmesh-hologrid-opacity";
+const DEFAULT_HOLOGRID_SPEED = 1;
+const MIN_HOLOGRID_SPEED = 0;
+const MAX_HOLOGRID_SPEED = 2;
+const DEFAULT_HOLOGRID_OPACITY = 1;
+const MIN_HOLOGRID_OPACITY = 0;
+const MAX_HOLOGRID_OPACITY = 1;
 
 const setDocumentLanguage = (value: LocaleKey) => {
   if (typeof document !== "undefined") {
@@ -771,11 +791,13 @@ const parsePositiveNumber = (value: string | undefined, fallback: number): numbe
 };
 const HEALTH_HISTORY_STORE_LIMIT = parsePositiveNumber(getEnv("HEALTH_HISTORY_LIMIT"), 200);
 const HEALTH_EVENT_DISPLAY_LIMIT = 10;
+const MIN_HEALTH_AUTO_REFRESH_SECONDS = 3;
+const DEFAULT_HEALTH_AUTO_REFRESH_CUSTOM = parsePositiveNumber(getEnv("HEALTH_AUTO_REFRESH_CUSTOM_SECONDS"), 15);
 const DEFAULT_SLA_FAILURE_THRESHOLD = parsePositiveNumber(getEnv("HEALTH_SLA_FAILURE_THRESHOLD"), 3);
 const DEFAULT_SLA_LATENCY_THRESHOLD_MS = parsePositiveNumber(getEnv("HEALTH_SLA_LATENCY_MS"), 1500);
 const MANIFEST_HISTORY_LIMIT = 20;
 const VAULT_AUDIT_DISPLAY_LIMIT = 12;
-const resolveAutoRefreshIntervalMs = (value: HealthAutoRefresh): number | null => {
+const resolveAutoRefreshIntervalMs = (value: HealthAutoRefresh, customSeconds?: number): number | null => {
   if (value === "off") return null;
   const override =
     typeof window !== "undefined" && typeof (window as { __HEALTH_AUTO_REFRESH_MS__?: unknown }).__HEALTH_AUTO_REFRESH_MS__ !== "undefined"
@@ -784,7 +806,22 @@ const resolveAutoRefreshIntervalMs = (value: HealthAutoRefresh): number | null =
   if (Number.isFinite(override) && override > 0) {
     return Math.round(override);
   }
-  return Number(value) * 1000;
+  if (value === "custom") {
+    const seconds = Number.isFinite(customSeconds) && customSeconds ? Math.max(MIN_HEALTH_AUTO_REFRESH_SECONDS, customSeconds) : DEFAULT_HEALTH_AUTO_REFRESH_CUSTOM;
+    return Math.round(seconds * 1000);
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed * 1000 : null;
+};
+
+const clampHologridSpeed = (value: number): number => {
+  if (!Number.isFinite(value)) return DEFAULT_HOLOGRID_SPEED;
+  return Math.min(MAX_HOLOGRID_SPEED, Math.max(MIN_HOLOGRID_SPEED, value));
+};
+
+const clampHologridOpacity = (value: number): number => {
+  if (!Number.isFinite(value)) return DEFAULT_HOLOGRID_OPACITY;
+  return Math.min(MAX_HOLOGRID_OPACITY, Math.max(MIN_HOLOGRID_OPACITY, value));
 };
 
 const loadPaletteRecents = (): string[] => {
@@ -795,6 +832,58 @@ const loadPaletteRecents = (): string[] => {
     return Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : [];
   } catch {
     return [];
+  }
+};
+
+const DEFAULT_CATALOG_FILTERS: CatalogFilterState = { search: "", types: [], tags: [], quickShape: null };
+
+const loadCatalogFilters = (): CatalogFilterState => {
+  if (typeof window === "undefined") return DEFAULT_CATALOG_FILTERS;
+  try {
+    const raw = window.localStorage.getItem(CATALOG_FILTER_STORAGE_KEY);
+    if (!raw) return DEFAULT_CATALOG_FILTERS;
+    const parsed = JSON.parse(raw) as Partial<CatalogFilterState>;
+    const search = typeof parsed.search === "string" ? parsed.search : "";
+    const types = Array.isArray(parsed.types) ? parsed.types.filter((value) => typeof value === "string") : [];
+    const tags = Array.isArray(parsed.tags) ? parsed.tags.filter((value) => typeof value === "string") : [];
+    const validShapes = new Set(["hero", "cta", "grid", "timeline", "stats", "media", "pricing", "contact", "footer"]);
+    const quickShape = typeof parsed.quickShape === "string" && validShapes.has(parsed.quickShape) ? parsed.quickShape : null;
+    return { search, types, tags, quickShape };
+  } catch {
+    return DEFAULT_CATALOG_FILTERS;
+  }
+};
+
+const persistCatalogFilters = (state: CatalogFilterState) => {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(CATALOG_FILTER_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // ignore storage errors
+  }
+};
+
+const loadRecentCatalogItems = (): CatalogItem[] => {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(CATALOG_RECENTS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed)
+      ? (parsed.filter(
+          (entry) => entry && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string",
+        ) as CatalogItem[])
+      : [];
+  } catch {
+    return [];
+  }
+};
+
+const persistRecentCatalogItems = (items: CatalogItem[]) => {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(CATALOG_RECENTS_STORAGE_KEY, JSON.stringify(items));
+  } catch {
+    // ignore storage errors
   }
 };
 
@@ -2225,18 +2314,35 @@ function App() {
     const stored = window.localStorage.getItem("darkmesh-high-effects");
     return stored ? stored === "1" : true;
   });
+  const [hologridEnabled, setHologridEnabled] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    const stored = window.localStorage.getItem(HOLOGRID_ENABLED_STORAGE_KEY);
+    return stored ? stored === "1" : true;
+  });
+  const [hologridSpeed, setHologridSpeed] = useState<number>(() => {
+    if (typeof window === "undefined") return DEFAULT_HOLOGRID_SPEED;
+    const stored = Number(window.localStorage.getItem(HOLOGRID_SPEED_STORAGE_KEY));
+    return clampHologridSpeed(stored);
+  });
+  const [hologridOpacity, setHologridOpacity] = useState<number>(() => {
+    if (typeof window === "undefined") return DEFAULT_HOLOGRID_OPACITY;
+    const stored = Number(window.localStorage.getItem(HOLOGRID_OPACITY_STORAGE_KEY));
+    return clampHologridOpacity(stored);
+  });
   const [cursorTrailPref, setCursorTrailPref] = useState<boolean>(() => getInitialCursorTrail());
   const prefersReducedMotion = usePrefersReducedMotion();
   const [offlineMode, setOfflineMode] = useState<boolean>(() => getInitialOffline());
   const [workspace, setWorkspace] = useState<Workspace>("studio");
+  const initialCatalogFilters = useMemo(() => loadCatalogFilters(), []);
   const [catalog, setCatalog] = useState<CatalogItem[]>(seedCatalog);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [cyberPreviewComponent, setCyberPreviewComponent] =
     useState<React.ComponentType<CyberBlockPreviewProps> | null>(null);
-  const [search, setSearch] = useState("");
-  const [activeTypes, setActiveTypes] = useState<string[]>([]);
-  const [activeTags, setActiveTags] = useState<string[]>([]);
-  const [quickShape, setQuickShape] = useState<string | null>(null);
+  const [search, setSearch] = useState(initialCatalogFilters.search);
+  const [activeTypes, setActiveTypes] = useState<string[]>(initialCatalogFilters.types);
+  const [activeTags, setActiveTags] = useState<string[]>(initialCatalogFilters.tags);
+  const [quickShape, setQuickShape] = useState<string | null>(initialCatalogFilters.quickShape);
+  const [recentCatalog, setRecentCatalog] = useState<CatalogItem[]>(() => loadRecentCatalogItems());
   const initialManifest = useMemo(() => newManifest(), []);
   const [manifest, setManifest] = useState<ManifestDocument>(() => initialManifest);
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
@@ -2266,14 +2372,17 @@ function App() {
     return match ? match[0] : "balanced";
   });
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
+  const [lastAutosaveAt, setLastAutosaveAt] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const flashStatus = useCallback((message: string) => {
     setStatus(message);
     window.setTimeout(() => setStatus(null), 1800);
   }, []);
   const [saving, setSaving] = useState(false);
+  const [savingMode, setSavingMode] = useState<DraftSaveMode | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [revertTargetId, setRevertTargetId] = useState<number | null>(null);
+  const [autosaveError, setAutosaveError] = useState<string | null>(null);
   const [draftConflict, setDraftConflict] = useState<{ message: string; latest?: ManifestDraft | null } | null>(null);
   const [draftDiffOpen, setDraftDiffOpen] = useState(false);
   const [draftDiffLoading, setDraftDiffLoading] = useState(false);
@@ -2307,9 +2416,18 @@ function App() {
   const [pipVaultFilter, setPipVaultFilter] = useState("");
   const [pipVaultRecordsLoading, setPipVaultRecordsLoading] = useState(false);
   const [pipVaultPassword, setPipVaultPassword] = useState("");
+  const [pipVaultPasswordVisible, setPipVaultPasswordVisible] = useState(false);
   const [pipVaultKdfProfile, setPipVaultKdfProfile] = useState<PipVaultKdfProfile>(() => loadKdfProfile());
   const [pipVaultError, setPipVaultError] = useState<string | null>(null);
   const [pipVaultPasswordError, setPipVaultPasswordError] = useState<string | null>(null);
+  const [vaultResetOpen, setVaultResetOpen] = useState(false);
+  const [vaultResetCurrent, setVaultResetCurrent] = useState("");
+  const [vaultResetNew, setVaultResetNew] = useState("");
+  const [vaultResetConfirm, setVaultResetConfirm] = useState("");
+  const [vaultResetError, setVaultResetError] = useState<string | null>(null);
+  const [vaultResetCurrentVisible, setVaultResetCurrentVisible] = useState(false);
+  const [vaultResetNewVisible, setVaultResetNewVisible] = useState(false);
+  const [vaultResetConfirmVisible, setVaultResetConfirmVisible] = useState(false);
   const [lastVaultError, setLastVaultError] = useState<{ message: string; at: string } | null>(null);
   const [pipVaultAuthPrompt, setPipVaultAuthPrompt] = useState<{ mode: "unlock" | "enable"; reason?: string } | null>(
     null,
@@ -2347,6 +2465,7 @@ function App() {
   const [vaultWizardImportError, setVaultWizardImportError] = useState<string | null>(null);
   const [vaultWizardUseVaultPassword, setVaultWizardUseVaultPassword] = useState(true);
   const [vaultWizardPassword, setVaultWizardPassword] = useState("");
+  const [vaultWizardPasswordVisible, setVaultWizardPasswordVisible] = useState(false);
   const [vaultWizardIntegrity, setVaultWizardIntegrity] = useState<VaultIntegrityEvent[]>([]);
   const vaultWizardFileInputRef = useRef<HTMLInputElement>(null);
   const [health, setHealth] = useState<HealthStatus[]>([]);
@@ -2355,8 +2474,36 @@ function App() {
   const [healthEvents, setHealthEvents] = useState<HealthEvent[]>([]);
   const [healthAutoRefresh, setHealthAutoRefresh] = useState<HealthAutoRefresh>(() => {
     if (typeof window === "undefined") return "off";
-    const stored = window.localStorage.getItem(HEALTH_AUTO_REFRESH_STORAGE_KEY) as HealthAutoRefresh | null;
-    return stored && HEALTH_AUTO_REFRESH_OPTIONS.includes(stored) ? stored : "off";
+    const stored = window.localStorage.getItem(HEALTH_AUTO_REFRESH_STORAGE_KEY);
+    if (stored && (HEALTH_AUTO_REFRESH_OPTIONS as string[]).includes(stored)) {
+      return stored as HealthAutoRefresh;
+    }
+
+    const legacySeconds = Number(stored);
+    if (Number.isFinite(legacySeconds) && legacySeconds > 0) {
+      return "custom";
+    }
+
+    return "off";
+  });
+  const [healthAutoRefreshCustom, setHealthAutoRefreshCustom] = useState<number>(() => {
+    if (typeof window === "undefined") return DEFAULT_HEALTH_AUTO_REFRESH_CUSTOM;
+    const stored = Number(window.localStorage.getItem(HEALTH_AUTO_REFRESH_CUSTOM_KEY));
+    if (Number.isFinite(stored) && stored > 0) {
+      return Math.max(MIN_HEALTH_AUTO_REFRESH_SECONDS, Math.round(stored));
+    }
+
+    const legacyRaw = window.localStorage.getItem(HEALTH_AUTO_REFRESH_STORAGE_KEY);
+    const legacySeconds = Number(legacyRaw);
+    if (
+      Number.isFinite(legacySeconds) &&
+      legacySeconds > 0 &&
+      !(HEALTH_AUTO_REFRESH_OPTIONS as string[]).includes(legacyRaw ?? "")
+    ) {
+      return Math.max(MIN_HEALTH_AUTO_REFRESH_SECONDS, Math.round(legacySeconds));
+    }
+
+    return DEFAULT_HEALTH_AUTO_REFRESH_CUSTOM;
   });
   const [slaFailureThreshold, setSlaFailureThreshold] = useState<number>(() => {
     if (typeof window === "undefined") return DEFAULT_SLA_FAILURE_THRESHOLD;
@@ -2584,6 +2731,10 @@ function App() {
   }, [manifest.id, reviewComments]);
 
   useEffect(() => {
+    persistCatalogFilters({ search, types: activeTypes, tags: activeTags, quickShape });
+  }, [activeTags, activeTypes, quickShape, search]);
+
+  useEffect(() => {
     if (typeof document === "undefined") return;
     document.documentElement.classList.toggle("catalog-dragging", catalogDragging);
     return () => {
@@ -2755,6 +2906,18 @@ function App() {
     () => uniqueSorted(catalog.flatMap((item) => item.tags ?? [])),
     [catalog],
   );
+  const recentCatalogItems = useMemo(() => {
+    const currentById = new Map<string, CatalogItem>();
+    catalog.forEach((item) => currentById.set(item.id, item));
+    seedCatalog.forEach((item) => {
+      if (!currentById.has(item.id)) {
+        currentById.set(item.id, item);
+      }
+    });
+    return recentCatalog
+      .map((item) => currentById.get(item.id) ?? item)
+      .filter((item): item is CatalogItem => Boolean(item?.id && item?.type));
+  }, [catalog, recentCatalog]);
   const visibleCatalog = useMemo(
     () =>
       catalog.filter(
@@ -2893,6 +3056,39 @@ function App() {
     : lastSavedAt
       ? formatTime(lastSavedAt)
       : "Never saved";
+  const autosaveInFlight = saving && savingMode === "autosave";
+  const autosavePending = !draftConflict && !autosaveInFlight && !saving && isDirty;
+  const autosaveTone = draftConflict
+    ? "conflict"
+    : autosaveInFlight
+      ? "saving"
+      : autosaveError
+        ? "error"
+        : autosavePending
+          ? "pending"
+          : lastAutosaveAt
+            ? "saved"
+            : "idle";
+  const autosaveStatusLabel = draftConflict
+    ? "Autosave blocked"
+    : autosaveInFlight
+      ? "Autosaving…"
+      : autosaveError
+        ? "Autosave failed"
+        : autosavePending
+          ? "Autosave queued"
+          : lastAutosaveAt
+            ? "Autosave complete"
+            : "Autosave idle";
+  const autosaveStatusTime = draftConflict
+    ? "Open diff to resolve"
+    : autosaveInFlight
+      ? "Writing draft"
+      : autosaveError
+        ? autosaveError
+        : lastAutosaveAt
+          ? formatTime(lastAutosaveAt)
+          : "No autosave yet";
   const confirmDiscardChanges = useCallback(
     (reason?: string) => {
       if (!isDirty && !draftConflict) return true;
@@ -2980,6 +3176,8 @@ function App() {
   }, []);
   const pipVaultPasswordStrength = useMemo(() => evaluatePasswordStrength(pipVaultPassword), [pipVaultPassword]);
   const pipVaultStrengthClass = pipVaultPasswordStrength.score ? `score-${pipVaultPasswordStrength.score}` : "";
+  const vaultResetStrength = useMemo(() => evaluatePasswordStrength(vaultResetNew), [vaultResetNew]);
+  const vaultResetStrengthClass = vaultResetStrength.score ? `score-${vaultResetStrength.score}` : "";
   const rememberedVaultPassword = useMemo(
     () => (pipVaultRememberUnlock ? readRememberedPassword() : null),
     [pipVaultRememberUnlock, pipVaultPassword, readRememberedPassword],
@@ -3000,6 +3198,15 @@ function App() {
     const timer = window.setTimeout(() => vaultAuthInputRef.current?.focus(), 80);
     return () => window.clearTimeout(timer);
   }, [pipVaultAuthPrompt]);
+  useEffect(() => {
+    if (pipVaultSnapshot?.mode !== "password") {
+      setVaultResetOpen(false);
+      setVaultResetCurrent("");
+      setVaultResetNew("");
+      setVaultResetConfirm("");
+      setVaultResetError(null);
+    }
+  }, [pipVaultSnapshot?.mode]);
   const validateVaultPassword = useCallback(
     (intent: "unlock" | "enable", raw?: string) => {
       const password = (raw ?? pipVaultPassword).trim();
@@ -3480,6 +3687,45 @@ function App() {
     };
   }, [healthEvents, slaFailureThreshold, slaLatencyThresholdMs]);
 
+  const latestHealthErrorMessage = useMemo(() => {
+    if (!latestHealthError) return null;
+    const mainMessage = latestHealthError.lastError ?? latestHealthError.detail;
+    if (!mainMessage) return null;
+    const checkedLabel = latestHealthError.checkedAt ? new Date(latestHealthError.checkedAt).toLocaleString() : null;
+    const parts = [
+      `Last error: ${latestHealthError.label}`,
+      mainMessage,
+      checkedLabel ? `at ${checkedLabel}` : null,
+      latestHealthError.url ? `url ${latestHealthError.url}` : null,
+    ].filter(Boolean) as string[];
+
+    return parts.join(" — ");
+  }, [latestHealthError]);
+
+  const healthStatusCopy = useMemo(() => {
+    if (!health.length) return null;
+    const summaryLine = `Overall ${healthStatusLabel(healthSummary.overall)} · ok ${healthSummary.ok} · warn ${healthSummary.warn} · error ${healthSummary.error} · missing ${healthSummary.missing} · offline ${healthSummary.offline}`;
+    const slaLine = `SLA ${healthSla.breached ? "breached" : "ok"} · failures ${healthSla.failureStreak}/${healthSla.failureThreshold} · avg latency ${healthSla.averageLatency ?? "—"} ms (≤ ${healthSla.latencyThreshold} ms)`;
+    const recap = formatHealthRecap(health);
+    const detailLines = health.map((item) => {
+      const parts = [`${item.label}: ${healthStatusLabel(item.status)}`];
+      if (item.detail) parts.push(item.detail);
+      if (item.status !== "ok" && item.lastError) {
+        parts.push(`last error ${item.lastError}`);
+      }
+      const latency =
+        typeof item.latencyMs === "number"
+          ? `${item.latencyMs} ms`
+          : item.latencyHistory?.length
+            ? `${item.latencyHistory[item.latencyHistory.length - 1]} ms`
+            : null;
+      if (latency) parts.push(latency);
+      return parts.join(" — ");
+    });
+
+    return [summaryLine, slaLine, recap, ...detailLines].filter(Boolean).join("\n");
+  }, [health, healthSla, healthSummary]);
+
   const healthSparkline = useMemo(() => {
     const values = [...healthEvents]
       .slice(0, HEALTH_EVENT_DISPLAY_LIMIT)
@@ -3522,6 +3768,42 @@ function App() {
       showLatencyLine: values.length > 1,
     };
   }, [healthEvents, slaLatencyThresholdMs]);
+
+  const handleCopyHealthStatus = useCallback(async () => {
+    if (!healthStatusCopy) {
+      flashStatus("No health status to copy");
+      return;
+    }
+
+    try {
+      if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
+        throw new Error("Clipboard unavailable");
+      }
+      await navigator.clipboard.writeText(healthStatusCopy);
+      flashStatus("Health status copied");
+    } catch (err) {
+      console.error("Failed to copy health status", err);
+      flashStatus("Could not copy status");
+    }
+  }, [flashStatus, healthStatusCopy]);
+
+  const handleCopyLatestHealthError = useCallback(async () => {
+    if (!latestHealthErrorMessage) {
+      flashStatus("No health error to copy");
+      return;
+    }
+
+    try {
+      if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
+        throw new Error("Clipboard unavailable");
+      }
+      await navigator.clipboard.writeText(latestHealthErrorMessage);
+      flashStatus("Last error copied");
+    } catch (err) {
+      console.error("Failed to copy last health error", err);
+      flashStatus("Could not copy error");
+    }
+  }, [flashStatus, latestHealthErrorMessage]);
 
   const refreshHealthHistory = useCallback(async () => {
     try {
@@ -4098,12 +4380,28 @@ function App() {
   }, [activeDraftId, refreshDraftHistory]);
 
   useEffect(() => {
+    const latestAutosave = draftHistory.find((revision) => revision.mode === "autosave");
+    setLastAutosaveAt(latestAutosave?.savedAt ?? null);
+  }, [draftHistory]);
+
+  useEffect(() => {
+    let cancelled = false;
     setCatalogLoading(true);
-    fetchCatalog()
-      .then(setCatalog)
-      .finally(() => setCatalogLoading(false));
+    fetchCatalog(initialCatalogFilters.search)
+      .then((result) => {
+        if (cancelled) return;
+        setCatalog(result);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setCatalogLoading(false);
+        }
+      });
     refreshDrafts(true);
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [initialCatalogFilters.search]);
 
   useEffect(() => {
     void refreshPipVaultSnapshot();
@@ -4229,6 +4527,29 @@ function App() {
   }, [highEffects]);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(HOLOGRID_ENABLED_STORAGE_KEY, hologridEnabled ? "1" : "0");
+  }, [hologridEnabled]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(HOLOGRID_SPEED_STORAGE_KEY, hologridSpeed.toString());
+  }, [hologridSpeed]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(HOLOGRID_OPACITY_STORAGE_KEY, hologridOpacity.toString());
+  }, [hologridOpacity]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const active = hologridEnabled && highEffects && !prefersReducedMotion;
+    document.documentElement.setAttribute("data-hologrid", active ? "on" : "off");
+    document.documentElement.style.setProperty("--hologrid-speed", hologridSpeed.toString());
+    document.documentElement.style.setProperty("--hologrid-opacity", hologridOpacity.toString());
+  }, [hologridEnabled, highEffects, prefersReducedMotion, hologridSpeed, hologridOpacity]);
+
+  useEffect(() => {
     if (typeof document === "undefined") return;
     if (hotkeyPrintable) {
       document.body.setAttribute("data-hotkey-print", "on");
@@ -4271,6 +4592,11 @@ function App() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+    window.localStorage.setItem(HEALTH_AUTO_REFRESH_CUSTOM_KEY, String(healthAutoRefreshCustom));
+  }, [healthAutoRefreshCustom]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
     window.localStorage.setItem(HEALTH_SLA_FAILURE_STORAGE_KEY, String(slaFailureThreshold));
     window.localStorage.setItem(HEALTH_SLA_LATENCY_STORAGE_KEY, String(slaLatencyThresholdMs));
   }, [slaFailureThreshold, slaLatencyThresholdMs]);
@@ -4298,7 +4624,7 @@ function App() {
   }, [refreshHealth]);
 
   useEffect(() => {
-    const intervalMs = resolveAutoRefreshIntervalMs(healthAutoRefresh);
+    const intervalMs = resolveAutoRefreshIntervalMs(healthAutoRefresh, healthAutoRefreshCustom);
     if (!intervalMs) return;
     const id = window.setInterval(() => {
       void refreshHealth();
@@ -4307,7 +4633,7 @@ function App() {
     return () => {
       window.clearInterval(id);
     };
-  }, [healthAutoRefresh, refreshHealth]);
+  }, [healthAutoRefresh, healthAutoRefreshCustom, refreshHealth]);
 
   useEffect(() => {
     if (!healthNotifyEnabled) return;
@@ -4572,7 +4898,7 @@ function App() {
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [draftConflict, isDirty, saving]);
 
-  const refreshDrafts = async (loadLatest?: boolean) => {
+  async function refreshDrafts(loadLatest?: boolean) {
     const all = await listDrafts();
     setDrafts(all);
 
@@ -4583,11 +4909,14 @@ function App() {
       setSavedSignature(manifestSignature(latest.document));
       setSavedVersionStamp(latest.versionStamp ?? null);
       setLastSavedAt(latest.updatedAt);
+      setLastAutosaveAt(null);
+      setAutosaveError(null);
+      setSavingMode(null);
       setDraftConflict(null);
       void refreshDraftHistory(latest.id ?? null);
       flashStatus("Loaded latest draft");
     }
-  };
+  }
 
   const startNewDraft = useCallback((message?: string, options?: { force?: boolean }) => {
     if (!options?.force && !confirmDiscardChanges("Start a new scratch draft? Unsaved changes will be lost.")) {
@@ -4601,6 +4930,9 @@ function App() {
     setSavedSignature(manifestSignature(next));
     setSavedVersionStamp(null);
     setLastSavedAt(null);
+    setLastAutosaveAt(null);
+    setAutosaveError(null);
+    setSavingMode(null);
     setDraftConflict(null);
     setReviewDraft("");
     if (message) {
@@ -4639,6 +4971,10 @@ function App() {
       };
 
       saveInFlightRef.current = true;
+      setSavingMode(mode);
+      if (mode === "autosave") {
+        setAutosaveError(null);
+      }
       setSaving(true);
 
       try {
@@ -4657,6 +4993,10 @@ function App() {
         setSavedSignature(manifestSignature(saved.document));
         setSavedVersionStamp(saved.versionStamp ?? null);
         setLastSavedAt(saved.updatedAt);
+        if (mode === "autosave") {
+          setLastAutosaveAt(saved.updatedAt);
+          setAutosaveError(null);
+        }
         setDraftConflict(null);
         void refreshDraftHistory(saved.id ?? null);
 
@@ -4680,17 +5020,22 @@ function App() {
         if (err instanceof DraftVersionConflictError) {
           setDraftConflict({ message: err.message, latest: err.latest ?? null });
           flashStatus("Draft conflict: updated elsewhere");
+          if (mode === "autosave") {
+            setAutosaveError(err.message);
+          }
         } else {
           const message = err instanceof Error ? err.message : "Draft save failed";
           if (mode !== "autosave") {
             flashStatus(message);
           } else {
             flashStatus(`Autosave failed: ${message}`);
+            setAutosaveError(message);
           }
         }
         return null;
       } finally {
         saveInFlightRef.current = false;
+        setSavingMode(null);
         setSaving(false);
       }
     },
@@ -5457,6 +5802,79 @@ function App() {
     }
     autoUnlockAttemptRef.current = false;
   };
+
+  const resetVaultResetForm = useCallback(() => {
+    setVaultResetCurrent("");
+    setVaultResetNew("");
+    setVaultResetConfirm("");
+    setVaultResetError(null);
+  }, []);
+
+  const handleToggleVaultReset = useCallback(() => {
+    setVaultResetOpen((open) => {
+      const next = !open;
+      resetVaultResetForm();
+      return next;
+    });
+  }, [resetVaultResetForm]);
+
+  const handleVaultPasswordReset = useCallback(async () => {
+    if (pipVaultBusy) return;
+    const current = vaultResetCurrent.trim();
+    const next = vaultResetNew.trim();
+    const confirmation = vaultResetConfirm.trim();
+
+    if (!current) {
+      setVaultResetError("Enter your current vault password");
+      return;
+    }
+    if (!next) {
+      setVaultResetError("Enter a new vault password");
+      return;
+    }
+    if (next === current) {
+      setVaultResetError("New password must be different from the current one");
+      return;
+    }
+    if (next !== confirmation) {
+      setVaultResetError("New password and confirmation do not match");
+      return;
+    }
+    if (next.length < 14 || vaultResetStrength.score < 2) {
+      setVaultResetError("Choose a stronger new password before continuing");
+      return;
+    }
+
+    setVaultResetError(null);
+    setPipVaultPasswordError(null);
+    flashStatus("Resetting vault password…");
+
+    const unlocked = await runVaultPasswordFlow("unlock", current);
+    if (!unlocked) {
+      setVaultResetError("Current password is incorrect or the vault is locked");
+      return;
+    }
+
+    const rotated = await runEnableVaultPassword(next);
+    if (!rotated) {
+      setVaultResetError("Unable to set the new vault password");
+      return;
+    }
+
+    resetVaultResetForm();
+    setVaultResetOpen(false);
+    flashStatus("Vault password changed");
+  }, [
+    flashStatus,
+    pipVaultBusy,
+    resetVaultResetForm,
+    runEnableVaultPassword,
+    runVaultPasswordFlow,
+    vaultResetConfirm,
+    vaultResetCurrent,
+    vaultResetNew,
+    vaultResetStrength.score,
+  ]);
 
   const handleToggleHardwarePlaceholder = useCallback(async () => {
     const next = !pipVaultHardwarePlaceholder;
@@ -6382,6 +6800,19 @@ function App() {
     );
   };
 
+  const recordRecentCatalogItem = useCallback((item: CatalogItem) => {
+    setRecentCatalog((current) => {
+      const next = [item, ...current.filter((entry) => entry.id !== item.id)].slice(0, CATALOG_RECENTS_LIMIT);
+      persistRecentCatalogItems(next);
+      return next;
+    });
+  }, []);
+
+  const handleClearRecentCatalog = useCallback(() => {
+    setRecentCatalog([]);
+    persistRecentCatalogItems([]);
+  }, []);
+
   const handleSelectNode = useCallback(
     (id: string, meta?: { shiftKey?: boolean; metaKey?: boolean; ctrlKey?: boolean }) => {
       const shiftKey = Boolean(meta?.shiftKey);
@@ -6420,6 +6851,7 @@ function App() {
   );
 
   const addFromCatalog = (item: CatalogItem) => {
+    recordRecentCatalogItem(item);
     const node = fromCatalog(item);
     setManifest((prev) =>
       touch({
@@ -6433,6 +6865,7 @@ function App() {
   };
 
   const addChildFromCatalog = (parentId: string, item: CatalogItem) => {
+    recordRecentCatalogItem(item);
     const node = fromCatalog(item);
     setManifest((prev) =>
       touch({
@@ -6596,6 +7029,7 @@ function App() {
       return;
     }
 
+    recordRecentCatalogItem(dropped);
     const node = fromCatalog(dropped);
     const parentIndex = buildParentIndex(manifestRef.current.nodes);
     const targetMeta = targetId ? parentIndex.get(targetId) : null;
@@ -6880,6 +7314,9 @@ function App() {
       setSavedSignature(manifestSignature(draft.document));
       setSavedVersionStamp(draft.versionStamp ?? null);
       setLastSavedAt(draft.updatedAt);
+      setLastAutosaveAt(null);
+      setAutosaveError(null);
+      setSavingMode(null);
       setDraftConflict(null);
       void refreshDraftHistory(id);
       flashStatus("Draft loaded");
@@ -6906,6 +7343,9 @@ function App() {
     setSavedSignature(manifestSignature(revision.document));
     setSavedVersionStamp(revision.versionStamp ?? null);
     setLastSavedAt(revision.savedAt);
+    setLastAutosaveAt(revision.mode === "autosave" ? revision.savedAt : lastAutosaveAt);
+    setAutosaveError(null);
+    setSavingMode(null);
     setDraftConflict(null);
     flashStatus(`Reverted to ${formatDraftSaveMode(revision.mode).toLowerCase()} from ${formatDate(revision.savedAt)}`);
     window.setTimeout(() => {
@@ -6934,6 +7374,7 @@ function App() {
         flashStatus("Reloaded latest draft");
       }
       setDraftConflict(null);
+      setAutosaveError(null);
       return;
     }
 
@@ -6943,6 +7384,7 @@ function App() {
         await refreshDrafts();
         setDraftConflict(null);
       }
+      setAutosaveError(null);
       return;
     }
 
@@ -6950,8 +7392,15 @@ function App() {
     if (saved) {
       await refreshDrafts();
       setDraftConflict(null);
+      setAutosaveError(null);
     }
   };
+
+  const handleOpenConflictDiff = useCallback(() => {
+    const conflictDraftId = draftConflict?.latest?.id ?? activeDraftIdRef.current ?? activeDraftId;
+    const ref = conflictDraftId != null ? ({ kind: "draft", id: conflictDraftId } as DraftSourceRef) : undefined;
+    void openDraftDiffPanel(ref, { dock: true });
+  }, [activeDraftId, draftConflict, openDraftDiffPanel]);
 
   const handleExportManifest = () => {
     const data = JSON.stringify(manifest, null, 2);
@@ -8167,6 +8616,8 @@ function App() {
 
   const hasHealthAlert =
     !offlineMode && healthSummary.failing.some((item) => item.status !== "offline");
+  const hologridActive = hologridEnabled && highEffects && !prefersReducedMotion;
+  const hologridControlsDisabled = prefersReducedMotion || !highEffects;
   const previewHologramActive = neonThemes.includes(theme) && highEffects && workspace === "preview";
   const hologramActive = previewHologramActive && !prefersReducedMotion;
   const holomapEnabled = workspace === "preview" && highEffects && !prefersReducedMotion;
@@ -8306,7 +8757,14 @@ function App() {
         {messages.app.skipToContent}
       </a>
       <Suspense fallback={null}>
-        <HeroCanvas theme={theme} highEffects={highEffects} />
+        <HeroCanvas
+          theme={theme}
+          highEffects={highEffects}
+          hologridEnabled={hologridEnabled}
+          hologridSpeed={hologridSpeed}
+          hologridOpacity={hologridOpacity}
+          reducedMotion={prefersReducedMotion}
+        />
       </Suspense>
       <header className={`top-bar ${catalogDragging ? "dragging-block" : ""}`}>
         <div className="brand-area" data-hotkey-area="palette language">
@@ -8379,6 +8837,64 @@ function App() {
           </label>
           <div className="fx-badge-slot" aria-hidden>
             <FxBadge active={highEffects && !prefersReducedMotion} reducedMotion={prefersReducedMotion} />
+          </div>
+          <div
+            className={`hologrid-controls ${hologridControlsDisabled ? "disabled" : ""}`}
+            title={
+              prefersReducedMotion
+                ? "Disabled to respect your reduced-motion preference."
+                : !highEffects
+                  ? "Turn FX on to enable the hologrid."
+                  : "Toggle and tune the hologrid grid animation."
+            }
+            data-hotkey-area="effects"
+          >
+            <div className="hologrid-controls-head">
+              <div>
+                <p className="eyebrow">Hologrid</p>
+                <span className="hologrid-subtitle">{hologridActive ? "Animating" : "Disabled"}</span>
+              </div>
+              <label className="toggle hologrid-toggle">
+                <input
+                  type="checkbox"
+                  checked={hologridEnabled}
+                  onChange={(e) => setHologridEnabled(e.target.checked)}
+                  disabled={hologridControlsDisabled}
+                  aria-label="Toggle hologrid animation"
+                />
+                <span>{hologridEnabled ? "On" : "Off"}</span>
+              </label>
+            </div>
+            <div className="hologrid-sliders">
+              <label>
+                <span>Speed</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={2}
+                  step={0.05}
+                  value={hologridSpeed}
+                  onChange={(e) => setHologridSpeed(clampHologridSpeed(Number(e.target.value)))}
+                  disabled={hologridControlsDisabled || !hologridEnabled}
+                  aria-label="Hologrid speed"
+                />
+                <span className="holo-slider-value mono">{hologridSpeed.toFixed(2)}x</span>
+              </label>
+              <label>
+                <span>Opacity</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={hologridOpacity}
+                  onChange={(e) => setHologridOpacity(clampHologridOpacity(Number(e.target.value)))}
+                  disabled={hologridControlsDisabled || !hologridEnabled}
+                  aria-label="Hologrid opacity"
+                />
+                <span className="holo-slider-value mono">{Math.round(hologridOpacity * 100)}%</span>
+              </label>
+            </div>
           </div>
           <label
             className={`toggle cursor-trail-toggle ${prefersReducedMotion ? "disabled" : ""} ${offlineMode || !highEffects ? "paused" : ""}`}
@@ -8458,6 +8974,9 @@ function App() {
               <span>{draftConflict.latest ? `Updated ${formatDate(draftConflict.latest.updatedAt)}` : draftConflict.message}</span>
             </div>
             <div className="conflict-actions">
+              <button className="ghost small" type="button" onClick={handleOpenConflictDiff}>
+                Open diff
+              </button>
               <button className="ghost small" type="button" onClick={() => void handleResolveConflict("reload")}>
                 Reload latest
               </button>
@@ -8497,9 +9016,9 @@ function App() {
                         : `Target: < ${slaFailureThreshold} failures • ≤ ${slaLatencyThresholdMs} ms avg`}
                     </span>
                   </div>
-                  {latestHealthError?.lastError && (
+                  {latestHealthError && (latestHealthError.lastError || latestHealthError.detail) && (
                     <p className="health-last-error" aria-live="polite">
-                      Last error • {latestHealthError.label} · {formatTimeShort(latestHealthError.checkedAt)} — {latestHealthError.lastError}
+                      Last error • {latestHealthError.label} · {formatTimeShort(latestHealthError.checkedAt)} — {latestHealthError.lastError ?? latestHealthError.detail}
                     </p>
                   )}
                   <p id="health-sla-caption" className="sr-only">
@@ -8513,14 +9032,49 @@ function App() {
                       id="health-auto-refresh"
                       value={healthAutoRefresh}
                       onChange={(e) => setHealthAutoRefresh(e.target.value as HealthAutoRefresh)}
-                      aria-label="Health auto refresh cadence"
+                      aria-label="Health ping interval"
                     >
                       <option value="off">Off</option>
                       <option value="10">10s</option>
                       <option value="30">30s</option>
                       <option value="60">60s</option>
+                      <option value="custom">Custom</option>
                     </select>
+                    <input
+                      id="health-auto-refresh-custom"
+                      type="number"
+                      min={MIN_HEALTH_AUTO_REFRESH_SECONDS}
+                      step={1}
+                      value={healthAutoRefreshCustom}
+                      onChange={(e) =>
+                        setHealthAutoRefreshCustom(
+                          Math.max(
+                            MIN_HEALTH_AUTO_REFRESH_SECONDS,
+                            Math.round(Number(e.target.value) || DEFAULT_HEALTH_AUTO_REFRESH_CUSTOM),
+                          ),
+                        )
+                      }
+                      aria-label="Custom ping interval (seconds)"
+                      disabled={healthAutoRefresh !== "custom"}
+                      className="health-auto-refresh-custom"
+                    />
                   </div>
+                  <button
+                    className="ghost small"
+                    onClick={handleCopyHealthStatus}
+                    disabled={!healthStatusCopy}
+                    title="Copy current health summary"
+                  >
+                    Copy status
+                  </button>
+                  <button
+                    className="ghost small"
+                    onClick={handleCopyLatestHealthError}
+                    disabled={!latestHealthErrorMessage}
+                    title="Copy last health error"
+                  >
+                    Copy last error
+                  </button>
                   <button className="ghost small" onClick={refreshHealth} disabled={healthLoading}>
                     {healthLoading ? "Checking…" : "Refresh"}
                   </button>
@@ -8935,6 +9489,30 @@ function App() {
                 </select>
               </label>
               <span
+                className={`pill autosave-pill ${autosaveTone}`}
+                role="status"
+                aria-live="polite"
+                title={lastAutosaveAt ? formatDate(lastAutosaveAt) : undefined}
+                data-testid="autosave-indicator"
+              >
+                <span className="autosave-icon" aria-hidden>
+                  {autosaveInFlight ? (
+                    <span className="autosave-spinner" />
+                  ) : (
+                    <span className={`autosave-dot ${autosaveTone}`} />
+                  )}
+                </span>
+                <span className="autosave-text">
+                  <span className="autosave-label">{autosaveStatusLabel}</span>
+                  <span className="autosave-time">{autosaveStatusTime}</span>
+                </span>
+                {draftConflict ? (
+                  <button className="autosave-link" type="button" onClick={handleOpenConflictDiff}>
+                    Open diff
+                  </button>
+                ) : null}
+              </span>
+              <span
                 className={`pill save-status ${draftConflict ? "conflict" : saving ? "busy" : isDirty ? "dirty" : "saved"}`}
                 title={lastSavedAt ? `Last saved ${formatDate(lastSavedAt)}` : "This draft has not been saved yet"}
               >
@@ -9254,18 +9832,28 @@ function App() {
             </div>
             <div className="pip-vault-password-row">
               <div className={`pip-vault-password-input ${pipVaultPasswordError ? "has-error" : ""}`}>
-                <input
-                  ref={vaultPasswordRef}
-                  type="password"
-                  value={pipVaultPassword}
-                  onChange={(e) => {
-                    setPipVaultPassword(e.target.value);
-                    if (pipVaultPasswordError) setPipVaultPasswordError(null);
-                  }}
-                  placeholder={pipVaultSnapshot?.mode === "password" ? "Enter vault password" : "Set a vault password"}
-                  aria-label="Vault password"
-                  aria-describedby="vault-password-help"
-                />
+                <div className="pip-vault-input-wrap">
+                  <input
+                    ref={vaultPasswordRef}
+                    type={pipVaultPasswordVisible ? "text" : "password"}
+                    value={pipVaultPassword}
+                    onChange={(e) => {
+                      setPipVaultPassword(e.target.value);
+                      if (pipVaultPasswordError) setPipVaultPasswordError(null);
+                    }}
+                    placeholder={pipVaultSnapshot?.mode === "password" ? "Enter vault password" : "Set a vault password"}
+                    aria-label="Vault password"
+                    aria-describedby="vault-password-help"
+                  />
+                  <button
+                    type="button"
+                    className="ghost small password-visibility-toggle"
+                    onClick={() => setPipVaultPasswordVisible((visible) => !visible)}
+                    aria-label={`${pipVaultPasswordVisible ? "Hide" : "Show"} vault password`}
+                  >
+                    {pipVaultPasswordVisible ? "Hide" : "Show"}
+                  </button>
+                </div>
                 {pipVaultPasswordError ? <p className="field-error">{pipVaultPasswordError}</p> : null}
               </div>
               <button
@@ -9330,6 +9918,132 @@ function App() {
                 </div>
               </div>
             </div>
+            {pipVaultSnapshot?.mode === "password" && (
+              <div className="pip-vault-reset">
+                <div className="pip-vault-reset-head">
+                  <div>
+                    <p className="eyebrow">Reset password</p>
+                    <strong>Change it with the current password</strong>
+                  </div>
+                  <button className="ghost small" type="button" onClick={handleToggleVaultReset} disabled={pipVaultBusy}>
+                    {vaultResetOpen ? "Close reset" : "Change password"}
+                  </button>
+                </div>
+                {vaultResetOpen ? (
+                  <div className="pip-vault-reset-grid">
+                    <div className="pip-vault-password-input">
+                      <label className="eyebrow subtle" htmlFor="vault-reset-current">
+                        Current password
+                      </label>
+                      <div className="pip-vault-input-wrap">
+                        <input
+                          id="vault-reset-current"
+                          type={vaultResetCurrentVisible ? "text" : "password"}
+                          value={vaultResetCurrent}
+                          onChange={(e) => setVaultResetCurrent(e.target.value)}
+                          placeholder="Current vault password"
+                          autoComplete="current-password"
+                        />
+                        <button
+                          type="button"
+                          className="ghost small password-visibility-toggle"
+                          onClick={() => setVaultResetCurrentVisible((visible) => !visible)}
+                          aria-label={`${vaultResetCurrentVisible ? "Hide" : "Show"} current password`}
+                        >
+                          {vaultResetCurrentVisible ? "Hide" : "Show"}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="pip-vault-password-input">
+                      <label className="eyebrow subtle" htmlFor="vault-reset-new">
+                        New password
+                      </label>
+                      <div className="pip-vault-input-wrap">
+                        <input
+                          id="vault-reset-new"
+                          type={vaultResetNewVisible ? "text" : "password"}
+                          value={vaultResetNew}
+                          onChange={(e) => setVaultResetNew(e.target.value)}
+                          placeholder="New vault password"
+                          autoComplete="new-password"
+                        />
+                        <button
+                          type="button"
+                          className="ghost small password-visibility-toggle"
+                          onClick={() => setVaultResetNewVisible((visible) => !visible)}
+                          aria-label={`${vaultResetNewVisible ? "Hide" : "Show"} new password`}
+                        >
+                          {vaultResetNewVisible ? "Hide" : "Show"}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="pip-vault-password-input">
+                      <label className="eyebrow subtle" htmlFor="vault-reset-confirm">
+                        Confirm new password
+                      </label>
+                      <div className="pip-vault-input-wrap">
+                        <input
+                          id="vault-reset-confirm"
+                          type={vaultResetConfirmVisible ? "text" : "password"}
+                          value={vaultResetConfirm}
+                          onChange={(e) => setVaultResetConfirm(e.target.value)}
+                          placeholder="Repeat new vault password"
+                          autoComplete="new-password"
+                        />
+                        <button
+                          type="button"
+                          className="ghost small password-visibility-toggle"
+                          onClick={() => setVaultResetConfirmVisible((visible) => !visible)}
+                          aria-label={`${vaultResetConfirmVisible ? "Hide" : "Show"} confirmation`}
+                        >
+                          {vaultResetConfirmVisible ? "Hide" : "Show"}
+                        </button>
+                      </div>
+                    </div>
+                    <div className={`pip-vault-strength ${vaultResetStrengthClass} ${vaultResetStrength.score ? "" : "muted"}`}>
+                      <div className="strength-meter">
+                        <span style={{ width: `${(vaultResetStrength.score / 4) * 100}%` }} />
+                      </div>
+                      <div className="strength-meta">
+                        <strong>{vaultResetStrength.score ? vaultResetStrength.label : "Strength"}</strong>
+                        <span>{vaultResetStrength.score ? vaultResetStrength.hint : "Use 14+ chars with numbers & symbols."}</span>
+                        <div className="strength-checks">
+                          {vaultResetStrength.checks.map((check) => (
+                            <span key={check.id} className={`strength-check ${check.pass ? "ok" : ""}`}>
+                              {check.pass ? "✔" : "○"} {check.label}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                    {vaultResetError ? (
+                      <p className="field-error">{vaultResetError}</p>
+                    ) : (
+                      <p className="hint">
+                        We unlock with the current password first, then re-encrypt with the new one. Strength checks run inline.
+                      </p>
+                    )}
+                    <div className="pip-vault-reset-actions">
+                      <button className="ghost small" type="button" onClick={resetVaultResetForm} disabled={pipVaultBusy}>
+                        Clear
+                      </button>
+                      <button
+                        className="primary small"
+                        type="button"
+                        onClick={handleVaultPasswordReset}
+                        disabled={pipVaultBusy || pipVaultTask?.kind === "unlock"}
+                      >
+                        Reset password
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="hint">
+                    Know the current password? Reset it here without disabling the vault or touching auto-unlock.
+                  </p>
+                )}
+              </div>
+            )}
             <div className="pip-vault-actions">
               <button
                 className="ghost small"
@@ -10081,6 +10795,56 @@ function App() {
               })}
             </div>
           </div>
+          {recentCatalogItems.length ? (
+            <div className="catalog-recents">
+              <div className="catalog-recents-head">
+                <div>
+                  <span className="filter-label">Recent blocks</span>
+                  <p className="hint">Last added to the composition</p>
+                </div>
+                <button className="chip reset small" type="button" onClick={handleClearRecentCatalog}>
+                  Clear
+                </button>
+              </div>
+              <div className="catalog-recents-grid" role="list">
+                {recentCatalogItems.map((item) => {
+                  const shape = blockShapeForType(item.type);
+                  return (
+                    <article key={item.id} className="catalog-recent-card" role="listitem">
+                      <div className="catalog-recent-preview">{renderBlockPreview(item.type, "compact")}</div>
+                      <div className="catalog-recent-body">
+                        <div className="catalog-recent-title">
+                          <strong>{item.name}</strong>
+                          {item.preview?.badge ? <span className="pill ghost micro">{item.preview.badge}</span> : null}
+                        </div>
+                        <p className="catalog-recent-summary">{item.summary}</p>
+                        <div className="catalog-recent-tags" aria-label="Recent block tags">
+                          <span className="pill ghost micro">{item.type.replace(/^block\./, "")}</span>
+                          {item.tags?.slice(0, 2).map((tag) => (
+                            <span key={tag} className="pill ghost micro">
+                              #{tag}
+                            </span>
+                          ))}
+                        </div>
+                        <div className="catalog-recent-actions">
+                          <button className="primary small" onClick={() => addFromCatalog(item)} type="button">
+                            Add again
+                          </button>
+                          <button
+                            className={`ghost small ${quickShape === shape ? "active" : ""}`}
+                            type="button"
+                            onClick={() => setQuickShape((current) => (current === shape ? null : shape))}
+                          >
+                            {quickShape === shape ? "Shape active" : "Match shape"}
+                          </button>
+                        </div>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
           <div className="catalog-palette">
             <div className="catalog-palette-head">
               <span className="filter-label">Block placeholders</span>
@@ -11582,15 +12346,25 @@ function App() {
                 </label>
                 {!vaultWizardUseVaultPassword && (
                   <div className={`pip-vault-password-input ${vaultWizardImportError ? "has-error" : ""}`}>
-                    <input
-                      type="password"
-                      value={vaultWizardPassword}
-                      onChange={(e) => {
-                        setVaultWizardPassword(e.target.value);
-                        if (vaultWizardImportError) setVaultWizardImportError(null);
-                      }}
-                      placeholder="Password for encrypted backup"
-                    />
+                    <div className="pip-vault-input-wrap">
+                      <input
+                        type={vaultWizardPasswordVisible ? "text" : "password"}
+                        value={vaultWizardPassword}
+                        onChange={(e) => {
+                          setVaultWizardPassword(e.target.value);
+                          if (vaultWizardImportError) setVaultWizardImportError(null);
+                        }}
+                        placeholder="Password for encrypted backup"
+                      />
+                      <button
+                        type="button"
+                        className="ghost small password-visibility-toggle"
+                        onClick={() => setVaultWizardPasswordVisible((visible) => !visible)}
+                        aria-label={`${vaultWizardPasswordVisible ? "Hide" : "Show"} import password`}
+                      >
+                        {vaultWizardPasswordVisible ? "Hide" : "Show"}
+                      </button>
+                    </div>
                   </div>
                 )}
                 {vaultWizardImportError ? (
@@ -11665,16 +12439,26 @@ function App() {
                   : "Set a strong password (14+ chars) to encrypt the vault and backups. We'll validate strength before enabling.")}
             </p>
             <div className={`pip-vault-password-input ${pipVaultPasswordError ? "has-error" : ""}`}>
-              <input
-                ref={vaultAuthInputRef}
-                type="password"
-                value={pipVaultPassword}
-                onChange={(e) => {
-                  setPipVaultPassword(e.target.value);
-                  if (pipVaultPasswordError) setPipVaultPasswordError(null);
-                }}
-                placeholder={pipVaultAuthPrompt.mode === "unlock" ? "Vault password" : "New vault password"}
-              />
+              <div className="pip-vault-input-wrap">
+                <input
+                  ref={vaultAuthInputRef}
+                  type={pipVaultPasswordVisible ? "text" : "password"}
+                  value={pipVaultPassword}
+                  onChange={(e) => {
+                    setPipVaultPassword(e.target.value);
+                    if (pipVaultPasswordError) setPipVaultPasswordError(null);
+                  }}
+                  placeholder={pipVaultAuthPrompt.mode === "unlock" ? "Vault password" : "New vault password"}
+                />
+                <button
+                  type="button"
+                  className="ghost small password-visibility-toggle"
+                  onClick={() => setPipVaultPasswordVisible((visible) => !visible)}
+                  aria-label={`${pipVaultPasswordVisible ? "Hide" : "Show"} vault password`}
+                >
+                  {pipVaultPasswordVisible ? "Hide" : "Show"}
+                </button>
+              </div>
               {pipVaultPasswordError ? <p className="field-error">{pipVaultPasswordError}</p> : null}
             </div>
             <div className="pip-vault-password-meta">
@@ -11689,6 +12473,13 @@ function App() {
                       ? pipVaultPasswordStrength.hint
                       : "Use 14+ chars with numbers & symbols."}
                   </span>
+                  <div className="strength-checks">
+                    {pipVaultPasswordStrength.checks.map((check) => (
+                      <span key={check.id} className={`strength-check ${check.pass ? "ok" : ""}`}>
+                        {check.pass ? "✔" : "○"} {check.label}
+                      </span>
+                    ))}
+                  </div>
                 </div>
               </div>
               <p className="hint">
