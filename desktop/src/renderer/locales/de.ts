@@ -410,6 +410,12 @@ const de: Messages = {
       offline: "Offline- / Air-Gap-Modus umschalten",
       whatsNew: "Neuigkeiten öffnen",
     },
+    panels: {
+      catalog: "Katalogbereich",
+      preview: "Kompositionsvorschau",
+      inspector: "Eigenschaften-Inspektor",
+      aoLog: "AO-Konsolen-Log",
+    },
   },
   paletteUi: {
     eyebrow: "Befehls-Palette",

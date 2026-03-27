@@ -2351,20 +2351,36 @@ function App() {
     if (typeof window === "undefined") return false;
     return window.localStorage.getItem(HEALTH_NOTIFY_STORAGE_KEY) === "true";
   });
+  const envWalletPathDefault = useMemo(
+    () => getEnv("AO_WALLET_PATH") ?? getEnv("VITE_AO_WALLET_PATH") ?? "",
+    [],
+  );
+  const envWalletJsonDefault = useMemo(
+    () => getEnv("AO_WALLET_JSON") ?? getEnv("VITE_AO_WALLET_JSON") ?? "",
+    [],
+  );
+  const envModuleTxDefault = useMemo(
+    () => getEnv("AO_MODULE_TX") ?? getEnv("VITE_AO_MODULE_TX") ?? "",
+    [],
+  );
+  const envSchedulerDefault = useMemo(
+    () => getEnv("SCHEDULER") ?? getEnv("VITE_SCHEDULER") ?? "",
+    [],
+  );
   const [deployTimeline, setDeployTimeline] = useState<ActionStep[]>(() => buildActionTimeline("deploy"));
   const [spawnTimeline, setSpawnTimeline] = useState<ActionStep[]>(() => buildActionTimeline("spawn"));
   const [deployTransient, setDeployTransient] = useState(false);
   const [spawnTransient, setSpawnTransient] = useState(false);
   const [walletMode, setWalletMode] = useState<WalletMode>(() => {
-    if (getEnv("AO_WALLET_JSON") || getEnv("VITE_AO_WALLET_JSON")) return "jwk";
-    if (getEnv("AO_WALLET_PATH") || getEnv("VITE_AO_WALLET_PATH")) return "path";
+    if (envWalletJsonDefault) return "jwk";
+    if (envWalletPathDefault) return "path";
     return "ipc";
   });
   const [walletPathInput, setWalletPathInput] = useState(
-    getEnv("AO_WALLET_PATH") ?? getEnv("VITE_AO_WALLET_PATH") ?? "",
+    envWalletPathDefault ?? "",
   );
   const [walletJwkInput, setWalletJwkInput] = useState(
-    getEnv("AO_WALLET_JSON") ?? getEnv("VITE_AO_WALLET_JSON") ?? "",
+    envWalletJsonDefault ?? "",
   );
   const [walletFieldError, setWalletFieldError] = useState<string | null>(null);
   const [walletPath, setWalletPath] = useState<string | null>(null);
@@ -2374,9 +2390,9 @@ function App() {
   const [modulePath, setModulePath] = useState("");
   const [moduleSource, setModuleSource] = useState("");
   const [manifestTxInput, setManifestTxInput] = useState("");
-  const [scheduler, setScheduler] = useState(getEnv("SCHEDULER") ?? getEnv("VITE_SCHEDULER") ?? "");
+  const [scheduler, setScheduler] = useState(envSchedulerDefault ?? "");
   const [moduleTxInput, setModuleTxInput] = useState(
-    () => getEnv("AO_MODULE_TX") ?? getEnv("VITE_AO_MODULE_TX") ?? loadLastModuleTx() ?? "",
+    () => envModuleTxDefault || loadLastModuleTx() || "",
   );
   const [deploying, setDeploying] = useState(false);
   const [spawning, setSpawning] = useState(false);
@@ -3064,15 +3080,27 @@ function App() {
         ? (walletJwkValidation.ok ? walletJwkValidation.hint : null) ?? walletNote ?? "Paste wallet JSON or pick via IPC."
         : walletNote ??
           (walletPath || walletJwk ? "Wallet ready" : "Choose IPC, path, or pasted JWK. IPC picker preferred.");
+  const moduleTxFromEnv = useMemo(
+    () =>
+      Boolean(
+        envModuleTxDefault &&
+          !deployedModuleTx &&
+          (moduleTxInput.trim() === "" || moduleTxInput.trim() === envModuleTxDefault),
+      ),
+    [deployedModuleTx, envModuleTxDefault, moduleTxInput],
+  );
+  const schedulerFromEnv = useMemo(
+    () => Boolean(envSchedulerDefault && (scheduler.trim() === "" || scheduler.trim() === envSchedulerDefault)),
+    [envSchedulerDefault, scheduler],
+  );
 
   const effectiveModuleTx = useMemo(
     () =>
       moduleTxInput.trim() ||
       deployedModuleTx ||
-      getEnv("AO_MODULE_TX") ||
-      getEnv("VITE_AO_MODULE_TX") ||
+      envModuleTxDefault ||
       "",
-    [deployedModuleTx, moduleTxInput],
+    [deployedModuleTx, envModuleTxDefault, moduleTxInput],
   );
 
   const currentManifestTx = useMemo(
@@ -3090,29 +3118,39 @@ function App() {
   const moduleTxValidation = useMemo(
     () =>
       validateModuleTxInput(
-        moduleTxInput || deployedModuleTx || getEnv("AO_MODULE_TX") || getEnv("VITE_AO_MODULE_TX") || "",
+        moduleTxInput || deployedModuleTx || envModuleTxDefault || "",
         { allowEmpty: true },
       ),
-    [deployedModuleTx, moduleTxInput],
+    [deployedModuleTx, envModuleTxDefault, moduleTxInput],
   );
   const schedulerValidation = useMemo(
-    () => validateSchedulerInput(scheduler || getEnv("SCHEDULER") || getEnv("VITE_SCHEDULER") || ""),
-    [scheduler],
+    () => validateSchedulerInput(scheduler || envSchedulerDefault || ""),
+    [envSchedulerDefault, scheduler],
   );
   const moduleTxInlineError =
-    moduleTxError ?? (!moduleTxValidation.ok && moduleTxInput.trim() ? moduleTxValidation.reason : null);
+    moduleTxError ??
+    (!moduleTxValidation.ok && (moduleTxInput.trim() || moduleTxFromEnv) ? moduleTxValidation.reason : null);
   const moduleTxInlineHint = moduleTxInlineError
     ? null
-    : deployedModuleTx
-      ? `Cached module tx ${abbreviateTx(deployedModuleTx)}`
-      : "Autofills from the latest deploy, or read from env.";
+    : moduleTxFromEnv
+      ? `Using env AO_MODULE_TX ${abbreviateTx(envModuleTxDefault)}`
+      : deployedModuleTx
+        ? `Cached module tx ${abbreviateTx(deployedModuleTx)}`
+        : envModuleTxDefault
+          ? `Env AO_MODULE_TX available (${abbreviateTx(envModuleTxDefault)})`
+          : "Autofills from the latest deploy, or read from env.";
   const schedulerInlineError =
-    schedulerError ?? (scheduler && !schedulerValidation.ok ? schedulerValidation.reason : null);
+    schedulerError ??
+    (!schedulerValidation.ok && (scheduler || schedulerFromEnv) ? schedulerValidation.reason : null);
   const schedulerInlineHint = schedulerInlineError
     ? null
-    : scheduler
-      ? "Looks like a process id"
-      : "Optional. Leave blank to use AO defaults.";
+    : schedulerFromEnv
+      ? `Using env SCHEDULER ${abbreviateTx(envSchedulerDefault)}`
+      : scheduler
+        ? "Looks like a process id"
+        : envSchedulerDefault
+          ? `Env SCHEDULER available (${abbreviateTx(envSchedulerDefault)})`
+          : "Optional. Leave blank to use AO defaults.";
   const wizardValidation = useMemo(
     () => [
       {
@@ -3131,20 +3169,38 @@ function App() {
         id: "moduleTx",
         label: "Module tx",
         status: moduleTxInlineError ? "error" : effectiveModuleTx ? "success" : "warn",
-        detail: moduleTxInlineError ?? (effectiveModuleTx ? abbreviateTx(effectiveModuleTx) : "Missing module tx"),
+        detail:
+          moduleTxInlineError ??
+          (moduleTxFromEnv
+            ? `Env AO_MODULE_TX ${abbreviateTx(envModuleTxDefault)}`
+            : effectiveModuleTx
+              ? abbreviateTx(effectiveModuleTx)
+              : "Missing module tx"),
       },
       {
         id: "scheduler",
         label: "Scheduler",
-        status: schedulerInlineError ? "error" : scheduler ? "success" : "info",
-        detail: schedulerInlineError ?? (scheduler ? "Scheduler provided" : "Optional"),
+        status: schedulerInlineError ? "error" : schedulerFromEnv || scheduler ? "success" : "info",
+        detail:
+          schedulerInlineError ??
+          (schedulerFromEnv
+            ? `Env SCHEDULER ${abbreviateTx(envSchedulerDefault)}`
+            : scheduler
+              ? "Scheduler provided"
+              : envSchedulerDefault
+                ? "Using AO scheduler default"
+                : "Optional"),
       },
     ],
     [
       effectiveModuleTx,
+      envModuleTxDefault,
+      envSchedulerDefault,
       moduleTxInlineError,
+      moduleTxFromEnv,
       scheduler,
       schedulerInlineError,
+      schedulerFromEnv,
       walletInlineError,
       walletInlineHint,
       walletJwk,
@@ -7991,6 +8047,86 @@ function App() {
     };
   }, [showCyberPreviews]);
 
+  useEffect(() => {
+    if (!highEffects || prefersReducedMotion) return;
+    let cancelled = false;
+    let ctx: { revert?: () => void } | null = null;
+    const hoverCleanups: Array<() => void> = [];
+
+    const run = async () => {
+      const [{ gsap }, { ScrollTrigger }] = await Promise.all([import("gsap"), import("gsap/ScrollTrigger")]);
+      if (cancelled) return;
+      gsap.registerPlugin(ScrollTrigger);
+      ctx = gsap.context(() => {
+        const cards = gsap.utils.toArray<HTMLElement>(
+          ".catalog-item, .preview-card, .tree-card, .quick-card, .manifest-preview-card",
+        );
+        cards.forEach((card, index) => {
+          ScrollTrigger.create({
+            trigger: card,
+            start: "top 85%",
+            once: true,
+            onEnter: () => {
+              gsap.fromTo(
+                card,
+                { opacity: 0, y: 18, rotateX: -4, scale: 0.985 },
+                {
+                  opacity: 1,
+                  y: 0,
+                  rotateX: 0,
+                  scale: 1,
+                  duration: 0.6,
+                  ease: "power2.out",
+                  delay: Math.min(index * 0.04, 0.3),
+                },
+              );
+            },
+          });
+        });
+
+        const hoverTargets = gsap.utils.toArray<HTMLElement>(".catalog-item, .preview-card, .quick-card");
+        hoverTargets.forEach((card) => {
+          const enter = () =>
+            gsap.to(card, {
+              "--tilt-x": "-1.6deg",
+              "--tilt-y": "1deg",
+              "--lift": "-4px",
+              duration: 0.35,
+              ease: "power2.out",
+            });
+          const leave = () =>
+            gsap.to(card, {
+              "--tilt-x": "0deg",
+              "--tilt-y": "0deg",
+              "--lift": "0px",
+              duration: 0.5,
+              ease: "power3.out",
+            });
+          card.addEventListener("pointerenter", enter, { passive: true });
+          card.addEventListener("focus", enter);
+          card.addEventListener("pointerleave", leave);
+          card.addEventListener("blur", leave);
+          hoverCleanups.push(() => {
+            card.removeEventListener("pointerenter", enter);
+            card.removeEventListener("focus", enter);
+            card.removeEventListener("pointerleave", leave);
+            card.removeEventListener("blur", leave);
+          });
+        });
+
+        ScrollTrigger.refresh();
+      }, mainContentRef);
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+      hoverCleanups.forEach((cleanup) => cleanup());
+      ctx?.revert?.();
+    };
+  }, [highEffects, prefersReducedMotion, theme, workspace, visibleCatalog.length, totalNodes]);
+
   const renderBlockPreview = (type: string, variant: "card" | "compact" = "card") => {
     const PreviewComponent = cyberPreviewComponent;
     if (!showCyberPreviews || !PreviewComponent) {
@@ -9545,11 +9681,16 @@ function App() {
       </ErrorBoundary>
 
       <div className="panels" style={{ display: workspace === "ao" || workspace === "data" ? "none" : undefined }}>
-        <aside className="panel catalog">
+        <aside
+          className="panel catalog"
+          role="complementary"
+          aria-label={messages.app.panels.catalog}
+          tabIndex={-1}
+        >
           <div className="panel-header">
             <div>
               <p className="eyebrow">Catalog</p>
-              <h3>Blocks</h3>
+              <h3 id="catalog-heading">Blocks</h3>
             </div>
             <span className="pill">
               {catalogLoading ? "Loading…" : `${visibleCatalog.length}/${catalog.length}`}
@@ -9730,11 +9871,16 @@ function App() {
           </div>
         </aside>
 
-        <main className="panel preview">
+        <section
+          className="panel preview"
+          role="region"
+          aria-label={messages.app.panels.preview}
+          tabIndex={-1}
+        >
           <div className="panel-header">
             <div>
               <p className="eyebrow">Preview</p>
-              <h3>Composition</h3>
+              <h3 id="composition-heading">Composition</h3>
             </div>
             <div className="preview-header-meta">
               <div className="pill ghost">
@@ -9937,13 +10083,18 @@ function App() {
               </Suspense>
             )}
           </div>
-        </main>
+        </section>
 
-        <aside className="panel props">
+        <aside
+          className="panel props"
+          role="complementary"
+          aria-label={messages.app.panels.inspector}
+          tabIndex={-1}
+        >
           <div className="panel-header">
             <div>
               <p className="eyebrow">Inspector</p>
-              <h3>Properties</h3>
+              <h3 id="inspector-heading">Properties</h3>
             </div>
           </div>
           {!selectedNode ? (
@@ -10360,7 +10511,11 @@ function App() {
                     : "Spawn idle"}
             </span>
             <div className="pill ghost">
-              {deployedModuleTx ? `Module tx • ${deployedModuleTx.slice(0, 10)}…` : "Awaiting module"}
+              {deployedModuleTx
+                ? `Module tx • ${deployedModuleTx.slice(0, 10)}…`
+                : envModuleTxDefault
+                  ? `Env AO_MODULE_TX • ${abbreviateTx(envModuleTxDefault)}`
+                  : "Awaiting module"}
             </div>
           </div>
         </div>
@@ -10631,7 +10786,7 @@ function App() {
               </button>
               {(deployOutcome || deployStep) && (
                 <span
-                  className={`pill ${deployState === "error" ? "error" : "ghost"}`}
+                  className={`progress-chip inline ${deployState}`}
                   data-testid="ao-deploy-status"
                 >
                   {deployOutcome || deployStep}
@@ -10738,7 +10893,7 @@ function App() {
                 {spawning ? "Spawning…" : "Spawn process"}
               </button>
               {(spawnOutcome || spawnStep) && (
-                <span className={`pill ${spawnState === "error" ? "error" : "ghost"}`}>
+                <span className={`progress-chip inline ${spawnState}`} data-testid="ao-spawn-status">
                   {spawnOutcome || spawnStep}
                 </span>
               )}
@@ -10857,6 +11012,7 @@ function App() {
             onToggleTail={toggleAoLogTail}
             onClear={handleClearAoLog}
             onExport={handleExportAoLog}
+            ariaLabel={messages.app.panels.aoLog}
           />
         </Suspense>
       </Wizard>

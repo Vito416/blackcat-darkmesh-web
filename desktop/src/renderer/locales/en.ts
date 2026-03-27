@@ -409,6 +409,12 @@ const en = {
       offline: "Toggle offline / air-gap mode",
       whatsNew: "Open what's new panel",
     },
+    panels: {
+      catalog: "Catalog panel",
+      preview: "Composition preview",
+      inspector: "Properties inspector",
+      aoLog: "AO console log",
+    },
   },
   paletteUi: {
     eyebrow: "Command palette",

@@ -410,6 +410,12 @@ const cs: Messages = {
       offline: "Přepnout offline / air-gap režim",
       whatsNew: "Otevřít novinky",
     },
+    panels: {
+      catalog: "Panel katalogu",
+      preview: "Náhled kompozice",
+      inspector: "Inspektor vlastností",
+      aoLog: "Protokol konzole AO",
+    },
   },
   paletteUi: {
     eyebrow: "Příkazová paleta",

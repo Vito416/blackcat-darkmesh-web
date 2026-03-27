@@ -41,9 +41,20 @@ export const useFocusTrap = (
     const container = containerRef.current;
     if (!container) return;
 
-    const focusables = getFocusable(container);
-    const first = focusables[0] ?? container;
-    const last = focusables[focusables.length - 1] ?? container;
+    const hadTabIndex = container.hasAttribute("tabindex");
+    const previousTabIndex = container.getAttribute("tabindex");
+    if (!hadTabIndex) {
+      container.setAttribute("tabindex", "-1");
+    }
+
+    const getOrderedFocusable = () => {
+      const current = getFocusable(container);
+      if (current.length) return current;
+      return [container];
+    };
+
+    const [first] = getOrderedFocusable();
+    const last = getOrderedFocusable().slice(-1)[0] ?? container;
 
     lastFocusedRef.current = document.activeElement as HTMLElement;
     if (autoFocus) {
@@ -52,16 +63,19 @@ export const useFocusTrap = (
     }
 
     const handleFocusIn = (event: FocusEvent) => {
-      if (!container.contains(event.target as Node)) {
-        (initialFocus ?? first)?.focus({ preventScroll: true });
-      }
+      if (container.contains(event.target as Node)) return;
+      const [nextFirst] = getOrderedFocusable();
+      const target =
+        (initialFocus && container.contains(initialFocus) ? initialFocus : null) ?? nextFirst ?? container;
+      target?.focus({ preventScroll: true });
     };
 
     const handleKeydown = (event: KeyboardEvent) => {
-      if (event.key === "Tab" && focusables.length) {
-        const updated = getFocusable(container);
-        const firstEl = updated[0] ?? first;
-        const lastEl = updated[updated.length - 1] ?? last;
+      if (event.key === "Tab") {
+        const ordered = getOrderedFocusable();
+        if (!ordered.length) return;
+        const firstEl = ordered[0] ?? first;
+        const lastEl = ordered[ordered.length - 1] ?? last;
 
         if (event.shiftKey && document.activeElement === firstEl) {
           event.preventDefault();
@@ -86,11 +100,18 @@ export const useFocusTrap = (
     return () => {
       document.removeEventListener("focusin", handleFocusIn);
       container.removeEventListener("keydown", handleKeydown);
+      if (!hadTabIndex) {
+        container.removeAttribute("tabindex");
+      } else if (previousTabIndex !== null) {
+        container.setAttribute("tabindex", previousTabIndex);
+      }
       if (restoreFocus && lastFocusedRef.current instanceof HTMLElement) {
-        lastFocusedRef.current.focus({ preventScroll: true });
+        if (document.contains(lastFocusedRef.current)) {
+          lastFocusedRef.current.focus({ preventScroll: true });
+        }
       }
     };
-  }, [active, containerRef, initialFocus, onEscape, restoreFocus]);
+  }, [active, autoFocus, containerRef, initialFocus, onEscape, restoreFocus]);
 };
 
 export default useFocusTrap;

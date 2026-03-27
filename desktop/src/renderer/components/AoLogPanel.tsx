@@ -17,6 +17,7 @@ type AoLogPanelProps = {
   onToggleTail: (next?: boolean) => void;
   onClear: () => void;
   onExport: (format: "csv") => void;
+  ariaLabel?: string;
 };
 
 const formatTimestamp = (iso?: string) => {
@@ -76,6 +77,7 @@ const AoLogPanel: React.FC<AoLogPanelProps> = ({
   onToggleTail,
   onClear,
   onExport,
+  ariaLabel,
 }) => {
   const [kindFilter, setKindFilter] = useState<AoLogFilter>("all");
   const [severityFilter, setSeverityFilter] = useState<AoLogSeverity | "all">("all");
@@ -152,7 +154,7 @@ const AoLogPanel: React.FC<AoLogPanelProps> = ({
   };
 
   return (
-    <div className="ao-log-panel">
+    <section className="ao-log-panel" role="region" aria-label={ariaLabel ?? "AO console log"} tabIndex={-1}>
       <div className="ao-log-panel-header">
         <div>
           <p className="eyebrow">AO console log</p>
@@ -463,7 +465,7 @@ const AoLogPanel: React.FC<AoLogPanelProps> = ({
           </tbody>
         </table>
       </div>
-    </div>
+    </section>
   );
 };
 

@@ -410,6 +410,12 @@ const es: Messages = {
       offline: "Alternar modo offline / air-gap",
       whatsNew: "Abrir novedades",
     },
+    panels: {
+      catalog: "Panel de catálogo",
+      preview: "Vista previa de composición",
+      inspector: "Inspector de propiedades",
+      aoLog: "Registro de consola AO",
+    },
   },
   paletteUi: {
     eyebrow: "Paleta de comandos",
