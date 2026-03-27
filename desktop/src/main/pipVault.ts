@@ -2,6 +2,7 @@ import { app, safeStorage } from "electron";
 import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
+import { Algorithm, Version, hashRaw } from "@node-rs/argon2";
 
 export interface PipDocument {
   tenant?: string;
@@ -55,6 +56,12 @@ export type VaultIntegrityIssue = {
   error: string;
 };
 
+export type VaultTelemetryEvent = {
+  event: string;
+  at?: string;
+  detail?: Record<string, unknown>;
+};
+
 export type VaultKeyMode = "safeStorage" | "plain" | "password";
 
 interface VaultEnvelope {
@@ -95,31 +102,53 @@ interface KeyEnvelopeV2 {
   };
 }
 
-type AnyKeyEnvelope = KeyEnvelopeV1 | KeyEnvelopeV2;
+interface KeyEnvelopeV3 {
+  version: 3;
+  mode: VaultKeyMode;
+  value?: string;
+  kdf?: KdfMeta;
+  hardwarePlaceholder?: boolean;
+}
+
+type AnyKeyEnvelope = KeyEnvelopeV1 | KeyEnvelopeV2 | KeyEnvelopeV3;
 
 interface VaultBackupBundle {
   format: "pip-vault-bundle";
   version: 1;
   createdAt: string;
   mode: VaultKeyMode;
-  key: KeyEnvelopeV2;
+  key: KeyEnvelopeV3;
   vault: VaultStoreV2;
 }
 
 const VAULT_FILENAME = "pip-vault.json";
 const KEY_FILENAME = "pip-vault.key.json";
 const BACKUP_DIRNAME = "pip-vault-backups";
+const REPAIR_DIRNAME = "pip-vault-repair";
 const KEY_SIZE = 32;
 const KDF_ITERATIONS = 100_000;
 const KDF_DIGEST = "sha256";
 const KDF_SALT_BYTES = 16;
-type KdfMeta = {
+const ARGON2_TIME_COST = 3;
+const ARGON2_MEMORY_KIB = 64 * 1024;
+const ARGON2_PARALLELISM = 1;
+const ARGON2_VERSION = Version.V0x13;
+type Pbkdf2KdfMeta = {
   algorithm: "pbkdf2";
   iterations: number;
-  salt?: string;
+  salt: string;
   digest: typeof KDF_DIGEST;
   version: number;
 };
+type Argon2KdfMeta = {
+  algorithm: "argon2id";
+  iterations: number;
+  salt: string;
+  memoryKiB: number;
+  parallelism: number;
+  version: number;
+};
+type KdfMeta = Pbkdf2KdfMeta | Argon2KdfMeta;
 
 const vaultPath = () => path.join(app.getPath("userData"), VAULT_FILENAME);
 const keyPath = () => path.join(app.getPath("userData"), KEY_FILENAME);
@@ -164,6 +193,17 @@ const auditEvent = (action: VaultAuditAction, status: VaultAuditStatus, meta: Pa
   ...meta,
 });
 
+export function recordVaultTelemetry(event: VaultTelemetryEvent): { ok: true } {
+  const payload = { ...event, at: event.at ?? nowIso() };
+  try {
+    // eslint-disable-next-line no-console
+    console.info("[vault:telemetry]", payload);
+  } catch {
+    // ignore telemetry logging failures
+  }
+  return { ok: true };
+}
+
 const ensureBackupDir = async (): Promise<void> => {
   await fs.mkdir(backupDirPath(), { recursive: true });
 };
@@ -177,24 +217,114 @@ const writeBackupFile = async (bundle: string): Promise<{ path: string; filename
   return { path: targetPath, filename, savedAt };
 };
 
+const ensureRepairDir = async (): Promise<void> => {
+  await fs.mkdir(repairDirPath(), { recursive: true });
+};
+
+const writeRepairFile = async (
+  record: VaultEnvelope,
+  envelope: KeyEnvelopeV3,
+  pipMeta?: Partial<PipDocument> | null,
+): Promise<{ path: string; filename: string; savedAt: string }> => {
+  await ensureRepairDir();
+  const savedAt = nowIso();
+  const filename = `pip-vault-repair-${record.id}-${savedAt.replace(/[:.]/g, "-")}.json`;
+  const targetPath = path.join(repairDirPath(), filename);
+  const sanitizedEnvelope: Partial<KeyEnvelopeV3> = {
+    version: envelope.version,
+    mode: envelope.mode,
+    kdf: envelope.kdf,
+    hardwarePlaceholder: envelope.hardwarePlaceholder,
+  };
+  const payload = {
+    format: "pip-vault-repair",
+    savedAt,
+    recordId: record.id,
+    envelope: sanitizedEnvelope,
+    record,
+    pip: pipMeta ? { manifestTx: pipMeta.manifestTx, tenant: pipMeta.tenant, site: pipMeta.site } : null,
+  };
+  await fs.writeFile(targetPath, JSON.stringify(payload, null, 2), "utf-8");
+  return { path: targetPath, filename, savedAt };
+};
+
 const buildRecordKey = (pip: PipDocument): string =>
   [normalizeText(pip.tenant).toLowerCase(), normalizeText(pip.site).toLowerCase(), normalizeText(pip.manifestTx).toLowerCase()]
     .join("|");
 
 let cachedMasterKey: Buffer | null = null;
-let cachedEnvelope: KeyEnvelopeV2 | null = null;
+let cachedEnvelope: KeyEnvelopeV3 | null = null;
 let lastLockAt: string | null = null;
 
-const normalizeKeyEnvelope = (raw: AnyKeyEnvelope | null): KeyEnvelopeV2 | null => {
+const repairDirPath = () => path.join(app.getPath("userData"), REPAIR_DIRNAME);
+
+const ensurePbkdfMeta = (meta?: Partial<Pbkdf2KdfMeta> | null): Pbkdf2KdfMeta => {
+  const salt = meta?.salt ?? encode(crypto.randomBytes(KDF_SALT_BYTES));
+  if (!salt) {
+    throw new Error("Vault key metadata is missing the KDF salt");
+  }
+
+  return {
+    algorithm: "pbkdf2",
+    iterations: meta?.iterations ?? KDF_ITERATIONS,
+    salt,
+    digest: meta?.digest ?? KDF_DIGEST,
+    version: meta?.version ?? 1,
+  };
+};
+
+const ensureArgon2Meta = (meta?: Partial<Argon2KdfMeta> | null): Argon2KdfMeta => {
+  const salt = meta?.salt ?? encode(crypto.randomBytes(KDF_SALT_BYTES));
+  if (!salt) {
+    throw new Error("Vault key metadata is missing the KDF salt");
+  }
+
+  return {
+    algorithm: "argon2id",
+    iterations: meta?.iterations ?? ARGON2_TIME_COST,
+    salt,
+    memoryKiB: meta?.memoryKiB ?? ARGON2_MEMORY_KIB,
+    parallelism: meta?.parallelism ?? ARGON2_PARALLELISM,
+    version: meta?.version ?? ARGON2_VERSION,
+  };
+};
+
+const normalizeKdfMeta = (meta?: KdfMeta | KeyEnvelopeV2["kdf"] | null): KdfMeta | undefined => {
+  if (!meta) return undefined;
+  if ((meta as KdfMeta).algorithm === "argon2id") {
+    return ensureArgon2Meta(meta as Partial<Argon2KdfMeta>);
+  }
+  if ((meta as KdfMeta).algorithm === "pbkdf2") {
+    return ensurePbkdfMeta(meta as Partial<Pbkdf2KdfMeta>);
+  }
+  return ensurePbkdfMeta(meta as Partial<Pbkdf2KdfMeta>);
+};
+
+const normalizeKeyEnvelope = (raw: AnyKeyEnvelope | null): KeyEnvelopeV3 | null => {
   if (!raw) return null;
 
+  if ("version" in raw && raw.version === 3) {
+    const env = raw as KeyEnvelopeV3;
+    return {
+      ...env,
+      kdf: env.mode === "password" ? normalizeKdfMeta(env.kdf) ?? ensurePbkdfMeta() : normalizeKdfMeta(env.kdf),
+    };
+  }
+
   if ("version" in raw && raw.version === 2) {
-    return raw as KeyEnvelopeV2;
+    const env2 = raw as KeyEnvelopeV2;
+    return {
+      version: 3,
+      mode: env2.mode,
+      value: env2.value,
+      kdf: env2.mode === "password" ? normalizeKdfMeta(env2.kdf) ?? ensurePbkdfMeta(env2.kdf) : normalizeKdfMeta(env2.kdf),
+      hardwarePlaceholder: false,
+    };
   }
 
   if ("mode" in raw && "value" in raw) {
     const legacy = raw as KeyEnvelopeV1;
-    return { version: 2, mode: legacy.mode, value: legacy.value } as KeyEnvelopeV2;
+    return { version: 3, mode: legacy.mode, value: legacy.value, hardwarePlaceholder: false };
   }
 
   return null;
@@ -218,16 +348,30 @@ const normalizeVaultStore = (loaded: VaultStoreV2 | LegacyVaultEnvelope | null):
   return { version: 2, records: [normalizeLegacyEnvelope(loaded as LegacyVaultEnvelope)] };
 };
 
-const derivePasswordKey = (password: string, salt: Buffer, iterations: number): Buffer =>
-  crypto.pbkdf2Sync(password, salt, iterations, KEY_SIZE, KDF_DIGEST);
+const derivePasswordKey = async (password: string, kdf: KdfMeta): Promise<Buffer> => {
+  if (kdf.algorithm === "argon2id") {
+    const result = await hashRaw(password, {
+      salt: decode(kdf.salt),
+      memoryCost: kdf.memoryKiB,
+      timeCost: kdf.iterations,
+      parallelism: kdf.parallelism ?? ARGON2_PARALLELISM,
+      outputLen: KEY_SIZE,
+      algorithm: Algorithm.Argon2id,
+      version: kdf.version ?? ARGON2_VERSION,
+    });
+    return Buffer.from(result);
+  }
 
-const cacheMasterKey = (key: Buffer, envelope: KeyEnvelopeV2) => {
+  return crypto.pbkdf2Sync(password, decode(kdf.salt), kdf.iterations, KEY_SIZE, kdf.digest);
+};
+
+const cacheMasterKey = (key: Buffer, envelope: KeyEnvelopeV3) => {
   cachedMasterKey = key;
   cachedEnvelope = envelope;
   lastLockAt = null;
 };
 
-const loadMasterKeyFromEnvelope = async (envelope: KeyEnvelopeV2, password?: string): Promise<Buffer> => {
+const loadMasterKeyFromEnvelope = async (envelope: KeyEnvelopeV3, password?: string): Promise<Buffer> => {
   if (envelope.mode === "safeStorage") {
     if (!envelope.value) {
       throw new Error("Vault key payload missing for safeStorage mode");
@@ -249,7 +393,11 @@ const loadMasterKeyFromEnvelope = async (envelope: KeyEnvelopeV2, password?: str
   }
 
   if (envelope.mode === "password") {
-    if (!envelope.kdf?.salt) {
+    if (!envelope.kdf) {
+      throw new Error("Vault key metadata is missing the KDF parameters");
+    }
+    const kdf = normalizeKdfMeta(envelope.kdf) as KdfMeta;
+    if (!kdf?.salt) {
       throw new Error("Vault key metadata is missing the KDF salt");
     }
 
@@ -257,30 +405,30 @@ const loadMasterKeyFromEnvelope = async (envelope: KeyEnvelopeV2, password?: str
       throw new Error("Vault password required");
     }
 
-    const salt = decode(envelope.kdf.salt);
-    const iterations = envelope.kdf.iterations ?? KDF_ITERATIONS;
-    return derivePasswordKey(password, salt, iterations);
+    return derivePasswordKey(password, kdf);
   }
 
-  throw new Error(`Unsupported vault key mode: ${String((envelope as KeyEnvelopeV2).mode)}`);
+  throw new Error(`Unsupported vault key mode: ${String((envelope as KeyEnvelopeV3).mode)}`);
 };
 
-const ensureKeyEnvelope = async (): Promise<KeyEnvelopeV2> => {
+const ensureKeyEnvelope = async (): Promise<KeyEnvelopeV3> => {
   const existingRaw = await readJsonFile<AnyKeyEnvelope>(keyPath());
   const normalized = normalizeKeyEnvelope(existingRaw);
   if (normalized) return normalized;
 
   const masterKey = crypto.randomBytes(KEY_SIZE);
-  const envelope: KeyEnvelopeV2 = safeStorage.isEncryptionAvailable()
+  const envelope: KeyEnvelopeV3 = safeStorage.isEncryptionAvailable()
     ? {
-        version: 2,
+        version: 3,
         mode: "safeStorage",
         value: encode(safeStorage.encryptString(encode(masterKey))),
+        hardwarePlaceholder: false,
       }
     : {
-        version: 2,
+        version: 3,
         mode: "plain",
         value: encode(masterKey),
+        hardwarePlaceholder: false,
       };
 
   await writeJsonFile(keyPath(), envelope);
@@ -288,7 +436,7 @@ const ensureKeyEnvelope = async (): Promise<KeyEnvelopeV2> => {
   return envelope;
 };
 
-async function loadMasterKey(password?: string): Promise<{ key: Buffer; envelope: KeyEnvelopeV2 }> {
+async function loadMasterKey(password?: string): Promise<{ key: Buffer; envelope: KeyEnvelopeV3 }> {
   if (cachedMasterKey && cachedEnvelope) {
     return { key: cachedMasterKey, envelope: cachedEnvelope };
   }
@@ -478,6 +626,7 @@ export async function describePipVault(): Promise<{
   lockedAt?: string;
   recordCount: number;
   kdf: KdfMeta;
+  hardwarePlaceholder?: boolean;
 }> {
   const envelope = normalizeKeyEnvelope(await readJsonFile<AnyKeyEnvelope>(keyPath()));
   const store = normalizeVaultStore(await readVaultStore());
@@ -488,13 +637,7 @@ export async function describePipVault(): Promise<{
 
   const mode: VaultKeyMode = envelope?.mode ?? (safeStorage.isEncryptionAvailable() ? "safeStorage" : "plain");
   const locked = mode === "password" && !cachedMasterKey;
-  const kdf: KdfMeta = {
-    algorithm: "pbkdf2",
-    iterations: envelope?.kdf?.iterations ?? KDF_ITERATIONS,
-    salt: envelope?.kdf?.salt,
-    digest: envelope?.kdf?.digest ?? KDF_DIGEST,
-    version: 1,
-  };
+  const kdf: KdfMeta = envelope?.kdf ?? ensurePbkdfMeta();
 
   return {
     exists: store.records.length > 0,
@@ -502,16 +645,20 @@ export async function describePipVault(): Promise<{
     encrypted: true,
     path: vaultPath(),
     mode,
-    iterations: envelope?.kdf?.iterations,
-    salt: envelope?.kdf?.salt,
+    iterations: kdf.iterations,
+    salt: kdf.salt,
     locked,
     lockedAt: locked ? lastLockAt ?? undefined : undefined,
     recordCount: store.records.length,
     kdf,
+    hardwarePlaceholder: envelope?.hardwarePlaceholder ?? false,
   };
 }
 
-export async function enableVaultPassword(password: string): Promise<{ ok: true; mode: VaultKeyMode; iterations: number; salt: string; records: number }> {
+export async function enableVaultPassword(
+  password: string,
+  options?: { kdf?: Partial<KdfMeta>; hardwarePlaceholder?: boolean },
+): Promise<{ ok: true; mode: VaultKeyMode; kdf: KdfMeta; records: number; hardwarePlaceholder?: boolean }> {
   const trimmed = (password ?? "").trim();
   if (!trimmed) {
     throw new Error("Password is required to enable password mode");
@@ -519,6 +666,19 @@ export async function enableVaultPassword(password: string): Promise<{ ok: true;
 
   const currentEnvelope = await ensureKeyEnvelope();
   const store = normalizeVaultStore(await readVaultStore());
+  const desiredHardwarePlaceholder = options?.hardwarePlaceholder ?? currentEnvelope.hardwarePlaceholder ?? false;
+
+  const resolveKdf = (fallback?: KdfMeta): KdfMeta => {
+    if (options?.kdf) {
+      const meta = options.kdf;
+      if ((meta as KdfMeta).algorithm === "argon2id") {
+        return ensureArgon2Meta(meta as Partial<Argon2KdfMeta>);
+      }
+      return ensurePbkdfMeta(meta as Partial<Pbkdf2KdfMeta>);
+    }
+    if (fallback) return normalizeKdfMeta(fallback) ?? ensurePbkdfMeta();
+    return ensurePbkdfMeta();
+  };
 
   // If already password protected, either unlock (when locked) or rotate to the new password (when unlocked).
   if (currentEnvelope.mode === "password") {
@@ -538,34 +698,38 @@ export async function enableVaultPassword(password: string): Promise<{ ok: true;
         }
       }
 
-      cacheMasterKey(currentMasterKey, currentEnvelope);
+      const unlockedEnvelope: KeyEnvelopeV3 = {
+        ...currentEnvelope,
+        hardwarePlaceholder: desiredHardwarePlaceholder,
+        kdf: currentEnvelope.kdf ?? ensurePbkdfMeta(),
+      };
+
+      cacheMasterKey(currentMasterKey, unlockedEnvelope);
+      await writeJsonFile(keyPath(), unlockedEnvelope);
 
       return {
         ok: true,
-        mode: currentEnvelope.mode,
-        iterations: currentEnvelope.kdf?.iterations ?? KDF_ITERATIONS,
-        salt: currentEnvelope.kdf?.salt ?? "",
+        mode: unlockedEnvelope.mode,
+        kdf: unlockedEnvelope.kdf ?? ensurePbkdfMeta(),
         records: store.records.length,
+        hardwarePlaceholder: unlockedEnvelope.hardwarePlaceholder,
       };
     }
 
     // Rotate: re-encrypt vault with the new password while the current master key is in memory.
-    const salt = crypto.randomBytes(KDF_SALT_BYTES);
-    const derivedKey = derivePasswordKey(trimmed, salt, KDF_ITERATIONS);
+    const nextKdf = resolveKdf(currentEnvelope.kdf ?? undefined);
+    const derivedKey = await derivePasswordKey(trimmed, nextKdf);
 
     const rewrappedRecords = store.records.map((record) => {
       const pip = decrypt(currentMasterKey, record);
       return encrypt(derivedKey, record.id, pip, record.createdAt, record.updatedAt);
     });
 
-    const nextEnvelope: KeyEnvelopeV2 = {
-      version: 2,
+    const nextEnvelope: KeyEnvelopeV3 = {
+      version: 3,
       mode: "password",
-      kdf: {
-        salt: encode(salt),
-        iterations: KDF_ITERATIONS,
-        digest: KDF_DIGEST,
-      },
+      kdf: nextKdf,
+      hardwarePlaceholder: desiredHardwarePlaceholder,
     };
 
     await writeVaultStore({ version: 2, records: rewrappedRecords });
@@ -575,65 +739,75 @@ export async function enableVaultPassword(password: string): Promise<{ ok: true;
     return {
       ok: true,
       mode: nextEnvelope.mode,
-      iterations: nextEnvelope.kdf!.iterations,
-      salt: nextEnvelope.kdf!.salt,
       records: rewrappedRecords.length,
+      kdf: nextKdf,
+      hardwarePlaceholder: desiredHardwarePlaceholder,
     };
   }
 
   const { key: currentMasterKey } = await loadMasterKey();
-  const salt = crypto.randomBytes(KDF_SALT_BYTES);
-  const derivedKey = derivePasswordKey(trimmed, salt, KDF_ITERATIONS);
+  const nextKdf = resolveKdf();
+  const derivedKey = await derivePasswordKey(trimmed, nextKdf);
 
   const reencryptedRecords = store.records.map((record) => {
     const pip = decrypt(currentMasterKey, record);
     return encrypt(derivedKey, record.id, pip, record.createdAt, record.updatedAt);
   });
 
-  const nextEnvelope: KeyEnvelopeV2 = {
-    version: 2,
+  const nextEnvelope: KeyEnvelopeV3 = {
+    version: 3,
     mode: "password",
-    kdf: {
-      salt: encode(salt),
-      iterations: KDF_ITERATIONS,
-      digest: KDF_DIGEST,
-    },
+    kdf: nextKdf,
+    hardwarePlaceholder: desiredHardwarePlaceholder,
   };
 
   await writeVaultStore({ version: 2, records: reencryptedRecords });
   await writeJsonFile(keyPath(), nextEnvelope);
   cacheMasterKey(derivedKey, nextEnvelope);
 
-  const kdf = nextEnvelope.kdf!;
-
   return {
     ok: true,
     mode: nextEnvelope.mode,
-    iterations: kdf.iterations,
-    salt: kdf.salt,
     records: reencryptedRecords.length,
+    kdf: nextKdf,
+    hardwarePlaceholder: desiredHardwarePlaceholder,
   };
 }
 
 export async function disableVaultPassword(): Promise<{ ok: true; mode: VaultKeyMode }> {
-  const { key: masterKey } = await loadMasterKey();
+  const { key: masterKey, envelope: currentEnvelope } = await loadMasterKey();
+  const hardwarePlaceholder = currentEnvelope.hardwarePlaceholder ?? false;
 
-  const envelope: KeyEnvelopeV2 = safeStorage.isEncryptionAvailable()
+  const envelope: KeyEnvelopeV3 = safeStorage.isEncryptionAvailable()
     ? {
-        version: 2,
+        version: 3,
         mode: "safeStorage",
         value: encode(safeStorage.encryptString(encode(masterKey))),
+        hardwarePlaceholder,
       }
     : {
-        version: 2,
+        version: 3,
         mode: "plain",
         value: encode(masterKey),
+        hardwarePlaceholder,
       };
 
   await writeJsonFile(keyPath(), envelope);
   cacheMasterKey(masterKey, envelope);
 
   return { ok: true, mode: envelope.mode };
+}
+
+export async function setHardwarePlaceholder(enabled: boolean): Promise<{ ok: true; hardwarePlaceholder: boolean }> {
+  const envelope = await ensureKeyEnvelope();
+  const nextEnvelope: KeyEnvelopeV3 = { ...envelope, hardwarePlaceholder: Boolean(enabled) };
+  await writeJsonFile(keyPath(), nextEnvelope);
+  if (cachedMasterKey) {
+    cacheMasterKey(cachedMasterKey, nextEnvelope);
+  } else {
+    cachedEnvelope = nextEnvelope;
+  }
+  return { ok: true, hardwarePlaceholder: nextEnvelope.hardwarePlaceholder ?? false };
 }
 
 export function lockVault(): { ok: true; locked: boolean; lockedAt: string } {
@@ -655,13 +829,7 @@ export async function exportPipVault(): Promise<{
   const envelope = await ensureKeyEnvelope();
   const store = normalizeVaultStore(await readVaultStore());
   const createdAt = nowIso();
-  const kdf: KdfMeta = {
-    algorithm: "pbkdf2",
-    iterations: envelope.kdf?.iterations ?? KDF_ITERATIONS,
-    salt: envelope.kdf?.salt,
-    digest: envelope.kdf?.digest ?? KDF_DIGEST,
-    version: 1,
-  };
+  const kdf: KdfMeta = envelope.kdf ?? ensurePbkdfMeta();
 
   const bundle: VaultBackupBundle = {
     format: "pip-vault-bundle",
@@ -677,6 +845,77 @@ export async function exportPipVault(): Promise<{
   const bytes = Buffer.byteLength(serialized, "utf-8");
 
   return { ok: true, bundle: serialized, checksum, bytes, createdAt, recordCount: store.records.length, kdf };
+}
+
+export async function repairVaultRecord(
+  id: string,
+  options?: { strategy?: "rewrap" | "quarantine"; deleteAfter?: boolean; password?: string },
+): Promise<{ ok: true; repaired: boolean; quarantinedPath?: string; removed?: boolean; message?: string } | { ok: false; error: string }> {
+  const store = normalizeVaultStore(await readVaultStore());
+  const target = store.records.find((record) => record.id === id);
+  if (!target) {
+    return { ok: false, error: "Record not found" };
+  }
+
+  const strategy = options?.strategy ?? "rewrap";
+  const deleteAfter = options?.deleteAfter ?? false;
+  const { key: masterKey, envelope } = await loadMasterKey(options?.password);
+
+  let pip: PipDocument | null = null;
+  try {
+    pip = decrypt(masterKey, target);
+  } catch (err) {
+    if (strategy === "rewrap") {
+      const message = err instanceof Error ? err.message : "Unable to decrypt vault record";
+      return { ok: false, error: message === "Unsupported state or unable to authenticate data" ? "Authentication failed" : message };
+    }
+  }
+
+  let nextRecords = store.records;
+  let repaired = false;
+  let removed = false;
+  let quarantinedPath: string | undefined;
+
+  const pipMeta = pip ? { manifestTx: pip.manifestTx, tenant: pip.tenant, site: pip.site } : null;
+
+  if (strategy === "quarantine" || deleteAfter) {
+    const repairFile = await writeRepairFile(target, envelope, pipMeta);
+    quarantinedPath = repairFile.path;
+  }
+
+  if (strategy === "rewrap" && pip) {
+    const healed = encrypt(masterKey, target.id, pip, target.createdAt, nowIso());
+    nextRecords = store.records.map((record) => (record.id === id ? healed : record));
+    repaired = true;
+  }
+
+  if (deleteAfter) {
+    nextRecords = nextRecords.filter((record) => record.id !== id);
+    removed = true;
+  }
+
+  if (repaired || removed) {
+    if (nextRecords.length === 0) {
+      await deleteFileIfExists(vaultPath());
+    } else {
+      await writeVaultStore({ version: 2, records: nextRecords });
+    }
+  }
+
+  return {
+    ok: true,
+    repaired,
+    quarantinedPath,
+    removed,
+    message:
+      strategy === "quarantine"
+        ? removed
+          ? "Record quarantined and removed"
+          : "Record quarantined"
+        : repaired
+          ? "Record re-wrapped with fresh authentication tag"
+          : undefined,
+  };
 }
 
 const parseBundleInput = (bundleInput: unknown): VaultBackupBundle => {
@@ -705,7 +944,10 @@ const parseBundleInput = (bundleInput: unknown): VaultBackupBundle => {
   return parsed;
 };
 
-export async function importPipVault(bundleInput: unknown, password?: string): Promise<{ ok: true; mode: VaultKeyMode; records: number }> {
+export async function importPipVault(
+  bundleInput: unknown,
+  password?: string,
+): Promise<{ ok: true; mode: VaultKeyMode; records: number; kdf?: KdfMeta; hardwarePlaceholder?: boolean }> {
   const bundle = parseBundleInput(bundleInput);
   const envelope = normalizeKeyEnvelope(bundle.key);
 
@@ -730,7 +972,13 @@ export async function importPipVault(bundleInput: unknown, password?: string): P
   await writeJsonFile(keyPath(), envelope);
   cacheMasterKey(masterKey, envelope);
 
-  return { ok: true, mode: envelope.mode, records: store.records.length };
+  return {
+    ok: true,
+    mode: envelope.mode,
+    records: store.records.length,
+    kdf: envelope.kdf,
+    hardwarePlaceholder: envelope.hardwarePlaceholder,
+  };
 }
 
 export async function scanVaultIntegrity(password?: string): Promise<{

@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, IpcRendererEvent } from "electron";
 
 type WalletResponse = { path: string; wallet: Record<string, unknown> };
 type PipVaultReadResult = { exists: boolean; updatedAt?: string; pip?: Record<string, unknown> };
@@ -10,6 +10,15 @@ type PipVaultRecord = {
   tenant?: string;
   site?: string;
 };
+type PipVaultKdfMeta = {
+  algorithm: "pbkdf2" | "argon2id";
+  iterations?: number;
+  salt?: string;
+  memoryKiB?: number;
+  parallelism?: number;
+  digest?: string;
+  version?: number;
+};
 type PipVaultDescribeResult = {
   exists: boolean;
   updatedAt?: string;
@@ -20,6 +29,9 @@ type PipVaultDescribeResult = {
   salt?: string;
   locked: boolean;
   recordCount: number;
+  kdf?: PipVaultKdfMeta;
+  hardwarePlaceholder?: boolean;
+  lockedAt?: string;
 };
 type PipVaultExportResult = {
   ok: true;
@@ -28,6 +40,7 @@ type PipVaultExportResult = {
   bytes: number;
   createdAt: string;
   recordCount: number;
+  kdf?: PipVaultKdfMeta;
 };
 type PipVaultIntegrityResult = {
   ok: true;
@@ -37,6 +50,14 @@ type PipVaultIntegrityResult = {
   recordCount: number;
 };
 type PipVaultLockResult = { ok: true; locked: boolean; lockedAt: string };
+type UpdateStatus =
+  | { status: "disabled" }
+  | { status: "checking" }
+  | { status: "available"; info: unknown }
+  | { status: "idle"; info?: unknown }
+  | { status: "downloading"; progress: unknown }
+  | { status: "downloaded"; info: unknown }
+  | { status: "error"; message: string };
 
 const walletApi = {
   readWallet: async (walletPath: string): Promise<WalletResponse> => {
@@ -60,13 +81,34 @@ contextBridge.exposeInMainWorld("pipVault", {
   list: (): Promise<{ exists: boolean; records: PipVaultRecord[] }> => ipcRenderer.invoke("pipVault:list"),
   loadRecord: (id: string): Promise<PipVaultReadResult> => ipcRenderer.invoke("pipVault:readRecord", id),
   deleteRecord: (id: string): Promise<{ ok: true; removed: boolean }> => ipcRenderer.invoke("pipVault:deleteRecord", id),
-  enablePasswordMode: (password: string) => ipcRenderer.invoke("pipVault:enablePassword", password),
+  enablePasswordMode: (password: string, options?: { kdf?: PipVaultKdfMeta; hardwarePlaceholder?: boolean }) =>
+    ipcRenderer.invoke("pipVault:enablePassword", password, options),
   disablePasswordMode: () => ipcRenderer.invoke("pipVault:disablePassword"),
   exportVault: (): Promise<PipVaultExportResult> => ipcRenderer.invoke("pipVault:export"),
   importVault: (bundle: unknown, password?: string) => ipcRenderer.invoke("pipVault:import", bundle, password),
   scanIntegrity: (password?: string): Promise<PipVaultIntegrityResult> =>
     ipcRenderer.invoke("pipVault:scanIntegrity", password),
   lock: (): Promise<PipVaultLockResult> => ipcRenderer.invoke("pipVault:lock"),
+  repairRecord: (
+    id: string,
+    options?: { strategy?: "rewrap" | "quarantine"; deleteAfter?: boolean },
+  ): Promise<{ ok: true; repaired: boolean; quarantinedPath?: string; removed?: boolean; message?: string }> =>
+    ipcRenderer.invoke("pipVault:repairRecord", id, options),
+  setHardwarePlaceholder: (enabled: boolean): Promise<{ ok: true; hardwarePlaceholder: boolean }> =>
+    ipcRenderer.invoke("pipVault:setHardwarePlaceholder", enabled),
+  telemetry: (event: { event: string; at?: string; detail?: Record<string, unknown> }) =>
+    ipcRenderer.invoke("pipVault:telemetry", event),
+});
+
+contextBridge.exposeInMainWorld("updates", {
+  onStatus: (listener: (status: UpdateStatus) => void) => {
+    const channel = "autoUpdate:status";
+    const handler = (_event: IpcRendererEvent, payload: UpdateStatus) => listener(payload);
+    ipcRenderer.on(channel, handler);
+    return () => ipcRenderer.removeListener(channel, handler);
+  },
+  checkNow: () => ipcRenderer.invoke("autoUpdate:check"),
+  quitAndInstall: () => ipcRenderer.invoke("autoUpdate:install"),
 });
 
 export {};

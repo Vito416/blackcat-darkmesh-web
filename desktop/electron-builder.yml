@@ -2,17 +2,27 @@ appId: com.blackcat.desktop
 productName: Blackcat Desktop
 asar: true
 compression: maximum
+npmRebuild: false
 
 directories:
   output: release
+  buildResources: build
 
 files:
   - dist/**/*
   - package.json
   - node_modules/**/*
+  - "!**/tests/**"
+  - "!**/test-results/**"
 
 extraMetadata:
   main: dist/desktop/src/main.js
+
+publish:
+  - provider: github
+    owner: blackcat-labs
+    repo: blackcat-mesh-nexus
+    releaseType: draft
 
 mac:
   target:
@@ -27,6 +37,11 @@ mac:
   category: public.app-category.productivity
   identity: null
   artifactName: "${name}-${version}-mac-${arch}.${ext}"
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  notarize: false
 
 win:
   target:
@@ -37,9 +52,16 @@ win:
       arch:
         - x64
   artifactName: "${name}-${version}-win-${arch}.${ext}"
+  publisherName:
+    - Blackcat Labs
+  verifyUpdateCodeSignature: false
 
 nsis:
   artifactName: "${name}-${version}-win-${arch}-setup.${ext}"
+  oneClick: true
+  perMachine: false
+  allowToChangeInstallationDirectory: false
+  differentialPackage: true
 
 portable:
   artifactName: "${name}-${version}-win-${arch}-portable.${ext}"
@@ -54,5 +76,6 @@ linux:
         - x64
   category: Utility
   artifactName: "${name}-${version}-linux-${arch}.${ext}"
+  maintainer: "Blackcat Labs <ops@blackcat.labs>"
 
-publish: never
+afterSign: scripts/notarize.js

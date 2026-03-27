@@ -2,6 +2,22 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import ErrorBoundary from "./components/ErrorBoundary";
+import stylesUrl from "./styles.css?url";
+import themeCssUrl from "./theme.generated.css?url";
+
+const preloadStyle = (href: string) => {
+  if (typeof document === "undefined") return;
+  if (document.head.querySelector(`link[rel=\"preload\"][href=\"${href}\"]`)) return;
+  const link = document.createElement("link");
+  link.rel = "preload";
+  link.as = "style";
+  link.href = href;
+  link.crossOrigin = "anonymous";
+  document.head.appendChild(link);
+};
+
+preloadStyle(themeCssUrl);
+preloadStyle(stylesUrl);
 
 // Minimal process shim so browser-only renderer can load Node-oriented deps (e.g. aoconnect bundles
 // readable-stream) without crashing on `process` access.

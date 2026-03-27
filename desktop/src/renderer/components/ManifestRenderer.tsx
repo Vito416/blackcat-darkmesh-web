@@ -212,7 +212,10 @@ const RenderBranch: React.FC<{
     <div className="tree-branch">
       <article
         className={`tree-card ${isSelected ? "selected" : ""} ${isSelected && !isPrimary ? "selected-secondary" : ""} ${isPrimary ? "primary-selected" : ""} ${isDropTarget ? `drop-target drop-${dropPlacement ?? "inside"}` : ""} ${blockedMoveTarget ? "drop-blocked" : ""} ${highlightKind ? `diff-${highlightKind}` : ""} ${hasOpenComments ? "has-review" : ""}`}
+        data-testid="tree-card"
         data-node-id={node.id}
+        data-drop-placement={isDropTarget ? dropPlacement ?? "inside" : undefined}
+        data-drop-mode={isDropTarget ? dropMode ?? undefined : undefined}
         onClick={(event) =>
           onSelect?.(node.id, { shiftKey: event.shiftKey, metaKey: event.metaKey, ctrlKey: event.ctrlKey })
         }

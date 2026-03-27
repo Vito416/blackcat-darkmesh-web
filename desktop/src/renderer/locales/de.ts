@@ -402,6 +402,14 @@ const de: Messages = {
   app: {
     skipToContent: "Zum Hauptinhalt springen",
     brandEyebrow: "Darkmesh Editor",
+    controls: {
+      workspaceNav: "Workspace-Navigation",
+      theme: "Theme-Auswahl",
+      effects: "Hohe Effekte umschalten",
+      cursorTrail: "Neon-Cursor-Spur umschalten",
+      offline: "Offline- / Air-Gap-Modus umschalten",
+      whatsNew: "Neuigkeiten öffnen",
+    },
   },
   paletteUi: {
     eyebrow: "Befehls-Palette",

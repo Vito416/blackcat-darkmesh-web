@@ -16,9 +16,14 @@ import {
   readPipVaultRecord,
   lockVault,
   writePipVault,
+  repairVaultRecord,
+  setHardwarePlaceholder,
+  recordVaultTelemetry,
 } from "./main/pipVault";
+import { registerUpdateIpc, wireAutoUpdates } from "./main/updates";
 
 const isDev = process.env.NODE_ENV !== "production";
+let mainWindow: BrowserWindow | null = null;
 
 async function waitForPort(host: string, port: number, attempts = 50, intervalMs = 200): Promise<void> {
   for (let i = 0; i < attempts; i++) {
@@ -53,10 +58,16 @@ async function createWindow() {
     },
   });
 
+  mainWindow = win;
+
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
 
   win.on("ready-to-show", () => {
     if (!win.isDestroyed()) win.show();
+  });
+
+  win.on("closed", () => {
+    mainWindow = null;
   });
 
   win.webContents.on("did-fail-load", (_e, code, desc, validatedURL) => {
@@ -95,13 +106,17 @@ async function createWindow() {
       await win.loadFile(path.join(__dirname, "renderer/index.html"));
     }
   }
+
+  return win;
 }
 
 process.on("unhandledRejection", (err) => {
   console.error("Unhandled rejection in main process:", err);
 });
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  registerUpdateIpc();
+
   ipcMain.handle("pipVault:read", async () => {
     return readPipVault();
   });
@@ -143,12 +158,13 @@ app.whenReady().then(() => {
     return deletePipVaultRecord(id);
   });
 
-  ipcMain.handle("pipVault:enablePassword", async (_event, password: unknown) => {
+  ipcMain.handle("pipVault:enablePassword", async (_event, password: unknown, options?: unknown) => {
     if (typeof password !== "string") {
       throw new Error("Password must be a string");
     }
 
-    return enableVaultPassword(password);
+    const opts = options && typeof options === "object" ? (options as Record<string, unknown>) : undefined;
+    return enableVaultPassword(password, opts as Parameters<typeof enableVaultPassword>[1]);
   });
 
   ipcMain.handle("pipVault:disablePassword", async () => {
@@ -171,6 +187,26 @@ app.whenReady().then(() => {
   ipcMain.handle("pipVault:scanIntegrity", async (_event, password?: unknown) => {
     const pwd = typeof password === "string" ? password : undefined;
     return scanVaultIntegrity(pwd);
+  });
+
+  ipcMain.handle("pipVault:setHardwarePlaceholder", async (_event, enabled: unknown) => {
+    if (typeof enabled !== "boolean") {
+      throw new Error("Hardware placeholder flag must be a boolean");
+    }
+    return setHardwarePlaceholder(enabled);
+  });
+
+  ipcMain.handle("pipVault:repairRecord", async (_event, id: unknown, options?: unknown) => {
+    if (typeof id !== "string" || !id.trim()) {
+      throw new Error("Invalid PIP vault record id");
+    }
+    const opts = options && typeof options === "object" ? (options as Record<string, unknown>) : undefined;
+    return repairVaultRecord(id, opts as Parameters<typeof repairVaultRecord>[1]);
+  });
+
+  ipcMain.handle("pipVault:telemetry", async (_event, payload: unknown) => {
+    const safePayload = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : { event: "unknown" };
+    return recordVaultTelemetry(safePayload as any);
   });
 
   ipcMain.handle("wallet:read", async (_event, walletPath: unknown) => {
@@ -257,9 +293,14 @@ app.whenReady().then(() => {
     }
   });
 
-  createWindow();
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  const win = await createWindow();
+  wireAutoUpdates(win);
+
+  app.on("activate", async () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      const reopened = await createWindow();
+      wireAutoUpdates(reopened);
+    }
   });
 }).catch((err) => {
   console.error("Failed to start app", err);

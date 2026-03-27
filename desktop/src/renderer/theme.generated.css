@@ -8,6 +8,11 @@
   --glow-pulse: 0 0 22px rgba(var(--accent-rgb), 0.22);
   --glow-pulse-strong: 0 0 30px rgba(var(--accent-strong-rgb), 0.28);
   --page-noise-strength: 0.12;
+  --fx-roughness: 0.36;
+  --fx-metalness: 0.14;
+  --fx-emissive-boost: 0.16;
+  --fx-env-intensity: 0.18;
+  --fx-fresnel: 0.32;
 }
 
 :root[data-theme="neon-wasteland-v2"] {
@@ -74,6 +79,11 @@
   --shadow-depth-2: 0 24px 62px rgba(0, 0, 0, 0.6);
   --shadow-depth-3: 0 36px 88px rgba(0, 0, 0, 0.7);
   --glow-pulse: 0 0 26px rgba(255, 65, 198, 0.26);
+  --fx-roughness: 0.32;
+  --fx-metalness: 0.16;
+  --fx-emissive-boost: 0.22;
+  --fx-env-intensity: 0.26;
+  --fx-fresnel: 0.42;
   --accent-rgb: 164, 255, 63;
   --accent-strong-rgb: 255, 65, 198;
   --warn-rgb: 247, 193, 90;
@@ -143,6 +153,11 @@
   --shadow-depth-2: 0 26px 64px rgba(0, 0, 0, 0.62);
   --shadow-depth-3: 0 38px 88px rgba(0, 0, 0, 0.72);
   --glow-pulse: 0 0 28px rgba(106, 243, 255, 0.26);
+  --fx-roughness: 0.28;
+  --fx-metalness: 0.18;
+  --fx-emissive-boost: 0.18;
+  --fx-env-intensity: 0.30;
+  --fx-fresnel: 0.38;
   --accent-rgb: 106, 243, 255;
   --accent-strong-rgb: 158, 122, 255;
   --warn-rgb: 242, 174, 77;
@@ -212,6 +227,11 @@
   --shadow-depth-2: 0 24px 60px rgba(0, 0, 0, 0.6);
   --shadow-depth-3: 0 34px 84px rgba(0, 0, 0, 0.68);
   --glow-pulse: 0 0 24px rgba(94, 208, 197, 0.26);
+  --fx-roughness: 0.38;
+  --fx-metalness: 0.12;
+  --fx-emissive-boost: 0.14;
+  --fx-env-intensity: 0.22;
+  --fx-fresnel: 0.34;
   --accent-rgb: 94, 208, 197;
   --accent-strong-rgb: 245, 193, 99;
   --warn-rgb: 245, 158, 85;

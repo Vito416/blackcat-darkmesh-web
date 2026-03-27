@@ -402,6 +402,14 @@ const cs: Messages = {
   app: {
     skipToContent: "Přeskočit na hlavní obsah",
     brandEyebrow: "Darkmesh editor",
+    controls: {
+      workspaceNav: "Navigace workspace",
+      theme: "Předvolba motivu",
+      effects: "Přepnout silné efekty",
+      cursorTrail: "Přepnout neonovou stopu kurzoru",
+      offline: "Přepnout offline / air-gap režim",
+      whatsNew: "Otevřít novinky",
+    },
   },
   paletteUi: {
     eyebrow: "Příkazová paleta",

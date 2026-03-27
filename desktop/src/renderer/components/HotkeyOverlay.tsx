@@ -104,10 +104,16 @@ const HotkeyOverlay: React.FC<HotkeyOverlayProps> = ({
     labels.formatCount ? labels.formatCount(sectionCount) : `${sectionCount} items`;
 
   return (
-    <div className="hotkey-overlay-backdrop" role="presentation" onMouseDown={onClose}>
+    <div
+      className="hotkey-overlay-backdrop"
+      role="presentation"
+      data-testid="hotkey-overlay-backdrop"
+      onMouseDown={onClose}
+    >
       <section
         ref={dialogRef}
         className={`hotkey-overlay ${printable ? "printable" : ""}`}
+        data-testid="hotkey-overlay"
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -124,6 +130,8 @@ const HotkeyOverlay: React.FC<HotkeyOverlayProps> = ({
               <button
                 type="button"
                 className={`ghost small ${scopeFilter === "active" ? "active" : ""}`}
+                data-testid="hotkey-scope-active"
+                aria-pressed={scopeFilter === "active"}
                 onClick={() => onScopeChange?.("active")}
               >
                 {labels.view.activeWorkspace}
@@ -131,6 +139,8 @@ const HotkeyOverlay: React.FC<HotkeyOverlayProps> = ({
               <button
                 type="button"
                 className={`ghost small ${scopeFilter === "all" ? "active" : ""}`}
+                data-testid="hotkey-scope-all"
+                aria-pressed={scopeFilter === "all"}
                 onClick={() => onScopeChange?.("all")}
               >
                 {labels.view.allWorkspaces}
@@ -140,6 +150,8 @@ const HotkeyOverlay: React.FC<HotkeyOverlayProps> = ({
               <button
                 type="button"
                 className={`ghost small ${learnMode ? "active" : ""}`}
+                data-testid="hotkey-learn-toggle"
+                aria-pressed={learnMode}
                 onClick={onToggleLearn}
               >
                 {learnMode ? labels.view.learnOn : labels.view.learnOff}
@@ -148,11 +160,18 @@ const HotkeyOverlay: React.FC<HotkeyOverlayProps> = ({
                 type="button"
                 className={`ghost small ${printable ? "active" : ""}`}
                 title={labels.view.printableHint}
+                data-testid="hotkey-print-toggle"
+                aria-pressed={printable}
                 onClick={onTogglePrintable}
               >
                 {printable ? labels.view.printableOn : labels.view.printableOff}
               </button>
-              <button type="button" className="ghost small" onClick={() => onHighlight?.(null)}>
+              <button
+                type="button"
+                className="ghost small"
+                data-testid="hotkey-highlight-reset"
+                onClick={() => onHighlight?.(null)}
+              >
                 {labels.view.reset}
               </button>
             </div>
@@ -198,6 +217,8 @@ const HotkeyOverlay: React.FC<HotkeyOverlayProps> = ({
                             return (
                               <tr
                                 key={key}
+                                tabIndex={0}
+                                data-hotkey-target={item.target ?? undefined}
                                 onMouseEnter={() => handleHighlight(item.target)}
                                 onMouseLeave={() => onHighlight?.(null)}
                                 onFocus={() => handleHighlight(item.target)}

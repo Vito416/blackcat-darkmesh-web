@@ -401,6 +401,14 @@ const en = {
   app: {
     skipToContent: "Skip to main content",
     brandEyebrow: "Darkmesh editor",
+    controls: {
+      workspaceNav: "Workspace navigation",
+      theme: "Theme preset",
+      effects: "Toggle high visual effects",
+      cursorTrail: "Toggle neon cursor trail",
+      offline: "Toggle offline / air-gap mode",
+      whatsNew: "Open what's new panel",
+    },
   },
   paletteUi: {
     eyebrow: "Command palette",

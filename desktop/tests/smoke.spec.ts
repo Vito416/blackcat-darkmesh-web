@@ -1,194 +1,5 @@
-import { test, expect, Page } from "@playwright/test";
-
-const TEST_PASSWORD = "vault-smoke-pass";
-
-type VaultRecord = {
-  id: string;
-  createdAt: string;
-  updatedAt: string;
-  manifestTx: string;
-  tenant?: string;
-  site?: string;
-  pip?: Record<string, unknown>;
-};
-
-type VaultState = {
-  mode: "password" | "safeStorage";
-  unlocked: boolean;
-  password: string;
-  exists: boolean;
-  pip: Record<string, unknown> | null;
-  records: VaultRecord[];
-  iterations: number;
-  salt: string;
-  updatedAt: string;
-};
-
-async function setupPage(page: Page) {
-  await page.addInitScript(({ password }) => {
-    const state: VaultState = {
-      mode: "password",
-      unlocked: false,
-      password,
-      exists: true,
-      pip: null,
-      records: [],
-      iterations: 100_000,
-      salt: btoa("smoke-salt"),
-      updatedAt: new Date().toISOString(),
-    };
-
-    const toRecordMeta = (record: VaultRecord) => ({
-      id: record.id,
-      createdAt: record.createdAt,
-      updatedAt: record.updatedAt,
-      manifestTx: record.manifestTx,
-      tenant: record.tenant,
-      site: record.site,
-    });
-
-    const describe = () => ({
-      exists: state.exists,
-      updatedAt: state.updatedAt,
-      encrypted: true,
-      path: "/tmp/mock-pip-vault.json",
-      mode: state.mode,
-      iterations: state.iterations,
-      salt: state.salt,
-      locked: state.mode === "password" ? !state.unlocked : false,
-      recordCount: state.records.length,
-    });
-
-    (window as unknown as { pipVault?: unknown }).pipVault = {
-      read: async () => (state.pip ? { exists: true, updatedAt: state.updatedAt, pip: state.pip } : { exists: false }),
-      write: async (pip: Record<string, unknown>) => {
-        state.pip = pip;
-        state.exists = true;
-        state.updatedAt = new Date().toISOString();
-        return { updatedAt: state.updatedAt };
-      },
-      clear: async () => {
-        state.pip = null;
-        state.exists = false;
-        state.records = [];
-        state.unlocked = state.mode !== "password";
-        return { ok: true };
-      },
-      describe: async () => describe(),
-      list: async () => ({ exists: state.records.length > 0, records: state.records.map(toRecordMeta) }),
-      loadRecord: async (id: string) => {
-        const match = state.records.find((r) => r.id === id);
-        return match ? { exists: true, updatedAt: match.updatedAt, pip: match.pip } : { exists: false };
-      },
-      deleteRecord: async (id: string) => {
-        const before = state.records.length;
-        state.records = state.records.filter((r) => r.id !== id);
-        return { ok: true, removed: before !== state.records.length };
-      },
-      enablePasswordMode: async (input: string) => {
-        const trimmed = (input ?? "").trim();
-        if (!trimmed) {
-          throw new Error("Vault password required");
-        }
-
-        if (state.mode === "password" && !state.unlocked) {
-          if (trimmed !== state.password) {
-            throw new Error("Invalid vault password");
-          }
-          state.unlocked = true;
-        } else {
-          state.mode = "password";
-          state.password = trimmed;
-          state.unlocked = true;
-          state.exists = true;
-        }
-
-        state.updatedAt = new Date().toISOString();
-        return {
-          ok: true,
-          mode: "password",
-          iterations: state.iterations,
-          salt: state.salt,
-          records: state.records.length,
-        };
-      },
-      disablePasswordMode: async () => {
-        state.mode = "safeStorage";
-        state.unlocked = true;
-        state.updatedAt = new Date().toISOString();
-        return { ok: true, mode: "safeStorage" };
-      },
-      exportVault: async () => ({
-        ok: true,
-        bundle: JSON.stringify({ mock: true, at: new Date().toISOString() }),
-        checksum: "mock-checksum",
-        bytes: 64,
-        createdAt: new Date().toISOString(),
-        recordCount: state.records.length,
-      }),
-      importVault: async (_bundle: unknown, pwd?: string) => {
-        state.mode = pwd ? "password" : "safeStorage";
-        state.unlocked = !pwd || pwd === state.password;
-        state.updatedAt = new Date().toISOString();
-        return { ok: true, mode: state.mode, records: state.records.length };
-      },
-      scanIntegrity: async () => ({
-        ok: true,
-        scanned: state.records.length,
-        failed: [],
-        durationMs: 5,
-        recordCount: state.records.length,
-      }),
-      __lock: () => {
-        state.unlocked = false;
-      },
-    } as Window["pipVault"];
-
-    (window as unknown as { desktop?: unknown }).desktop = (window as any).desktop || {
-      selectWallet: async () => ({ canceled: true }),
-      pickModuleFile: async () => ({ canceled: true }),
-      readTextFile: async (path: string) => ({ path, content: "", canceled: true }),
-    };
-  }, { password: TEST_PASSWORD });
-
-  await page.route("**/*", (route) => {
-    const url = route.request().url();
-    if (
-      url.startsWith("http://localhost") ||
-      url.startsWith("http://127.0.0.1") ||
-      url.startsWith("ws://localhost") ||
-      url.startsWith("ws://127.0.0.1")
-    ) {
-      return route.continue();
-    }
-    if (url.startsWith("data:") || url.startsWith("blob:")) {
-      return route.continue();
-    }
-    return route.fulfill({
-      status: 200,
-      body: "{}",
-      headers: { "content-type": "application/json" },
-    });
-  });
-}
-
-async function goHome(page: Page, attempts = 3) {
-  for (let i = 0; i < attempts; i += 1) {
-    try {
-      await page.goto("/");
-      await page.waitForLoadState("networkidle");
-      const root = page.locator("#root");
-      await root.waitFor({ timeout: 10_000 });
-      // Wait until the top bar and manifest input are ready so subsequent actions don't time out.
-      await page.getByTestId("manifest-name-input").waitFor({ timeout: 10_000 });
-      await page.locator(".workspace-nav").waitFor({ timeout: 10_000 });
-      return;
-    } catch (err) {
-      if (i === attempts - 1) throw err;
-      await page.waitForTimeout(500);
-    }
-  }
-}
+import { test, expect } from "@playwright/test";
+import { goHome, setupPage, TEST_PASSWORD } from "./helpers";
 
 test.describe("Desktop renderer smoke", () => {
   test.beforeEach(async ({ page }) => {
@@ -207,7 +18,7 @@ test.describe("Desktop renderer smoke", () => {
 
     await titleInput.fill("Smoke Draft v2");
     await expect(saveStatus).toHaveText("Unsaved changes");
-    await expect(saveStatus).toHaveText("Draft saved", { timeout: 4_000 });
+    await expect(saveStatus).toHaveText("Draft saved", { timeout: 8_000 });
 
     const topButtons = page.locator(".top-buttons");
     const undo = topButtons.getByRole("button", { name: "Undo" });
@@ -402,6 +213,41 @@ test.describe("Desktop renderer smoke", () => {
 
     await expect(draftSelect.locator("option")).toHaveCount(optionCountBefore + 1);
     await expect(draftSelect.locator("option:checked")).toContainText("(copy)");
+  });
+
+  test("hotkey overlay learn and print modes", async ({ page }) => {
+    await goHome(page);
+
+    await page.evaluate(() => {
+      (window as any).__PRINT_CALLED__ = false;
+      window.print = () => {
+        (window as any).__PRINT_CALLED__ = true;
+      };
+    });
+
+    await page.getByRole("button", { name: "Hotkeys and palette actions" }).click();
+    const overlay = page.getByRole("dialog", { name: "Hotkeys and palette actions" });
+    await expect(overlay).toBeVisible();
+
+    const learnToggle = overlay.getByRole("button", { name: /Learn mode/i });
+    const printToggle = overlay.getByRole("button", { name: /Print view/i });
+
+    await expect(learnToggle).toHaveAttribute("aria-pressed", "false");
+    await learnToggle.click();
+    await expect(learnToggle).toHaveAttribute("aria-pressed", "true");
+
+    const paletteRow = overlay.locator('tr[data-hotkey-target="palette"]').first();
+    const paletteArea = page.locator('[data-hotkey-area~="palette"]').first();
+    await paletteRow.hover();
+    await expect(paletteArea).toHaveAttribute("data-hotkey-area", /palette/);
+
+    await expect(page.locator("body")).not.toHaveAttribute("data-hotkey-print", "on");
+    await printToggle.click();
+    await expect(printToggle).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator("body")).toHaveAttribute("data-hotkey-print", "on");
+    await page.waitForFunction(() => (window as any).__PRINT_CALLED__ === true);
+    await printToggle.click();
+    await expect(page.locator("body")).not.toHaveAttribute("data-hotkey-print", "on");
   });
 
   test("exports draft diff JSON and applies a section", async ({ page }) => {

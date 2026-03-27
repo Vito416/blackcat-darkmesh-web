@@ -51,6 +51,12 @@ export const useFocusTrap = (
       window.setTimeout(() => target?.focus({ preventScroll: true }), 0);
     }
 
+    const handleFocusIn = (event: FocusEvent) => {
+      if (!container.contains(event.target as Node)) {
+        (initialFocus ?? first)?.focus({ preventScroll: true });
+      }
+    };
+
     const handleKeydown = (event: KeyboardEvent) => {
       if (event.key === "Tab" && focusables.length) {
         const updated = getFocusable(container);
@@ -75,8 +81,10 @@ export const useFocusTrap = (
       }
     };
 
+    document.addEventListener("focusin", handleFocusIn);
     container.addEventListener("keydown", handleKeydown);
     return () => {
+      document.removeEventListener("focusin", handleFocusIn);
       container.removeEventListener("keydown", handleKeydown);
       if (restoreFocus && lastFocusedRef.current instanceof HTMLElement) {
         lastFocusedRef.current.focus({ preventScroll: true });

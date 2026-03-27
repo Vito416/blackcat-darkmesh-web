@@ -3,7 +3,8 @@ import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState, typ
 import "./styles.css";
 import ErrorBoundary from "./components/ErrorBoundary";
 import type { DraftDiffOption } from "./components/DraftDiffPanel";
-import CyberBlockPreview from "./components/CyberBlockPreview";
+import type { CyberBlockPreviewProps } from "./components/CyberBlockPreview";
+import FxBadge from "./components/FxBadge";
 import { fetchCatalog, catalogItems as seedCatalog } from "./services/catalog";
 import whatsNewData from "./whats-new.json";
 import {
@@ -33,7 +34,10 @@ import {
   importPipVaultBundle,
   inspectVaultBundle,
   lockPipVault,
+  repairPipVaultRecord,
   scanPipVaultIntegrity,
+  sendVaultTelemetry,
+  setVaultHardwarePlaceholder,
   type PipVaultIntegrityIssue,
   type PipVaultKdfMeta,
   type PipVaultRecord,
@@ -53,6 +57,9 @@ type DraftDiffPanelModule = typeof import("./components/DraftDiffPanel");
 type AoLogPanelModule = typeof import("./components/AoLogPanel");
 type ManifestRendererModule = typeof import("./components/ManifestRenderer");
 type AoHolomapModule = typeof import("./components/AoHolomap");
+type HeroCanvasModule = typeof import("./components/HeroCanvas");
+type CyberBlockPreviewModule = typeof import("./components/CyberBlockPreview");
+type VaultCrystalModule = typeof import("./components/VaultCrystal");
 const loadDraftDiffPanel = (() => {
   let modPromise: Promise<DraftDiffPanelModule> | null = null;
   return () => {
@@ -89,10 +96,39 @@ const loadAoHolomap = (() => {
     return modPromise;
   };
 })();
+const loadHeroCanvas = (() => {
+  let modPromise: Promise<HeroCanvasModule> | null = null;
+  return () => {
+    if (!modPromise) {
+      modPromise = import("./components/HeroCanvas");
+    }
+    return modPromise;
+  };
+})();
+const loadCyberBlockPreview = (() => {
+  let modPromise: Promise<CyberBlockPreviewModule> | null = null;
+  return () => {
+    if (!modPromise) {
+      modPromise = import("./components/CyberBlockPreview");
+    }
+    return modPromise;
+  };
+})();
+const loadVaultCrystal = (() => {
+  let modPromise: Promise<VaultCrystalModule> | null = null;
+  return () => {
+    if (!modPromise) {
+      modPromise = import("./components/VaultCrystal");
+    }
+    return modPromise;
+  };
+})();
 const DraftDiffPanel = React.lazy(loadDraftDiffPanel);
 const AoLogPanel = React.lazy(loadAoLogPanel);
 const ManifestRenderer = React.lazy(loadManifestRenderer);
 const AoHolomap = React.lazy(loadAoHolomap);
+const HeroCanvas = React.lazy(loadHeroCanvas);
+const VaultCrystal = React.lazy(loadVaultCrystal);
 const prefetchDraftDiffPanel = () => {
   void loadDraftDiffPanel();
 };
@@ -162,8 +198,8 @@ import {
   validateWalletJsonInput,
   validateWalletPathInput,
   type WalletFieldValidation,
-} from "./services/aoDeploy";
-import VaultCrystal, { type VaultCrystalPulse, type VaultCrystalState } from "./components/VaultCrystal";
+} from "./services/aoValidation";
+import type { VaultCrystalPulse, VaultCrystalState } from "./components/VaultCrystal";
 import CommandPalette, { type CommandPaletteAction, type CommandPaletteSection } from "./components/CommandPalette";
 import {
   diff,
@@ -179,7 +215,6 @@ import {
 import { aoLogToCsv } from "./utils/aoLog";
 import { diffManifests, type DraftDiffEntry, type DraftDiffKind } from "./utils/draftDiff";
 import HotkeyOverlay, { type HotkeyOverlayGroup, type HotkeyOverlaySection } from "./components/HotkeyOverlay";
-import HeroCanvas from "./components/HeroCanvas";
 import HologramBlocks from "./components/HologramBlocks";
 import useNeonCursorTrail from "./hooks/useNeonCursorTrail";
 import useFocusTrap from "./hooks/useFocusTrap";
@@ -245,9 +280,18 @@ const HelpTip = ({ copy, label }: { copy: string; label?: string }) => (
 
 type AoDeployModule = typeof import("./services/aoDeploy");
 
+declare global {
+  interface Window {
+    __AO_TEST_MODULE__?: Partial<AoDeployModule>;
+  }
+}
+
 const loadAoDeployModule = (() => {
   let modPromise: Promise<AoDeployModule> | null = null;
   return () => {
+    if (typeof window !== "undefined" && window.__AO_TEST_MODULE__) {
+      return Promise.resolve({ ...window.__AO_TEST_MODULE__ } as AoDeployModule);
+    }
     if (!modPromise) {
       modPromise = import("./services/aoDeploy");
     }
@@ -656,6 +700,7 @@ type PipVaultSnapshot = {
   lockedAt?: string;
   recordCount: number;
   kdf?: PipVaultKdfMeta;
+  hardwarePlaceholder?: boolean;
 };
 type PipVaultIssue = {
   field: string;
@@ -663,7 +708,7 @@ type PipVaultIssue = {
   severity: "error" | "warn";
 };
 type PipVaultKdfProfile = PipVaultKdfMeta & { version?: number };
-type BreachCheckStatus = "idle" | "checking" | "clear" | "maybe";
+type BreachCheckStatus = "idle" | "checking" | "clear" | "maybe" | "error";
 
 type VaultImportOptions = {
   useVaultPassword?: boolean;
@@ -701,6 +746,22 @@ const HEALTH_SLA_LATENCY_STORAGE_KEY = "health-sla-latency";
 const LAST_MODULE_TX_STORAGE_KEY = "ao-last-module-tx";
 const LAST_SPAWN_STORAGE_KEY = "ao-last-spawn";
 const AO_PINNED_IDS_STORAGE_KEY = "ao-console-pins";
+
+const setDocumentLanguage = (value: LocaleKey) => {
+  if (typeof document !== "undefined") {
+    document.documentElement.setAttribute("lang", value);
+    document.documentElement.setAttribute("data-locale", value);
+  }
+};
+
+const persistLocalePreference = (value: LocaleKey) => {
+  setDocumentLanguage(value);
+  if (typeof window !== "undefined") {
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, value);
+  }
+  saveSettings({ locale: value });
+};
+
 const getEnv = (key: string): string | undefined => resolveEnvWithSettings(key);
 const parsePositiveNumber = (value: string | undefined, fallback: number): number => {
   const parsed = Number(value);
@@ -799,6 +860,7 @@ declare global {
         locked: boolean;
         lockedAt?: string;
         recordCount: number;
+        hardwarePlaceholder?: boolean;
         kdf?: {
           algorithm: "pbkdf2" | "argon2id";
           iterations?: number;
@@ -812,12 +874,15 @@ declare global {
       list: () => Promise<{ exists: boolean; records: PipVaultRecord[] }>;
       loadRecord: (id: string) => Promise<{ exists: boolean; updatedAt?: string; pip?: Record<string, unknown> }>;
       deleteRecord: (id: string) => Promise<{ ok: true; removed: boolean }>;
-      enablePasswordMode: (password: string) => Promise<{
+      enablePasswordMode: (
+        password: string,
+        options?: { kdf?: PipVaultKdfMeta; hardwarePlaceholder?: boolean },
+      ) => Promise<{
         ok: true;
         mode: "safeStorage" | "plain" | "password";
-        iterations?: number;
-        salt?: string;
+        kdf?: PipVaultKdfMeta;
         records?: number;
+        hardwarePlaceholder?: boolean;
       }>;
       disablePasswordMode: () => Promise<{ ok: true; mode: "safeStorage" | "plain" | "password" }>;
       exportVault: () => Promise<{
@@ -827,24 +892,25 @@ declare global {
         bytes: number;
         createdAt: string;
         recordCount: number;
-        kdf?: {
-          algorithm: "pbkdf2" | "argon2id";
-          iterations?: number;
-          salt?: string;
-          memoryKiB?: number;
-          parallelism?: number;
-          digest?: string;
-          version?: number;
-        };
+        hardwarePlaceholder?: boolean;
+        kdf?: PipVaultKdfMeta;
       }>;
       importVault: (bundle: string | ArrayBuffer, password?: string) => Promise<{
         ok: true;
         mode: "safeStorage" | "plain" | "password";
         records: number;
+        kdf?: PipVaultKdfMeta;
+        hardwarePlaceholder?: boolean;
       }>;
       scanIntegrity: (
         password?: string,
       ) => Promise<{ ok: true; scanned: number; failed: { id: string; error: string }[]; durationMs: number; recordCount: number }>;
+      repairRecord: (
+        id: string,
+        options?: { strategy?: "rewrap" | "quarantine"; deleteAfter?: boolean },
+      ) => Promise<{ ok: true; repaired: boolean; quarantinedPath?: string; removed?: boolean; message?: string }>;
+      setHardwarePlaceholder: (enabled: boolean) => Promise<{ ok: true; hardwarePlaceholder: boolean }>;
+      telemetry: (event: { event: string; at?: string; detail?: Record<string, unknown> }) => Promise<{ ok: true }>;
       lock: () => Promise<{ ok: true; locked: boolean; lockedAt: string }>;
     };
     __HEALTH_AUTO_REFRESH_MS__?: number;
@@ -2128,7 +2194,12 @@ function App() {
     const settingsLocale = loadSettings().locale;
     const storedLocale = window.localStorage.getItem(LOCALE_STORAGE_KEY);
     const navigatorLocale = typeof navigator !== "undefined" ? navigator.language : undefined;
-    return resolveLocale(settingsLocale ?? storedLocale ?? navigatorLocale);
+    const resolved = resolveLocale(settingsLocale ?? storedLocale ?? navigatorLocale);
+    setDocumentLanguage(resolved);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(LOCALE_STORAGE_KEY, resolved);
+    }
+    return resolved;
   });
   const messages = useMemo(() => getMessages(locale), [locale]);
   const t = useMemo(() => makeTranslator(messages), [messages]);
@@ -2144,6 +2215,8 @@ function App() {
   const [workspace, setWorkspace] = useState<Workspace>("studio");
   const [catalog, setCatalog] = useState<CatalogItem[]>(seedCatalog);
   const [catalogLoading, setCatalogLoading] = useState(false);
+  const [cyberPreviewComponent, setCyberPreviewComponent] =
+    useState<React.ComponentType<CyberBlockPreviewProps> | null>(null);
   const [search, setSearch] = useState("");
   const [activeTypes, setActiveTypes] = useState<string[]>([]);
   const [activeTags, setActiveTags] = useState<string[]>([]);
@@ -2222,6 +2295,8 @@ function App() {
   const [pipVaultError, setPipVaultError] = useState<string | null>(null);
   const [pipVaultPasswordError, setPipVaultPasswordError] = useState<string | null>(null);
   const [pipVaultBreachStatus, setPipVaultBreachStatus] = useState<BreachCheckStatus>("idle");
+  const [pipVaultBreachMessage, setPipVaultBreachMessage] = useState<string | null>(null);
+  const [pipVaultBreachCount, setPipVaultBreachCount] = useState<number | null>(null);
   type PipVaultTaskKind = "import" | "export" | "unlock" | "records-export" | "integrity";
   const [pipVaultTask, setPipVaultTask] = useState<{
     kind: PipVaultTaskKind;
@@ -2873,13 +2948,21 @@ function App() {
   const breachStatusLabel =
     pipVaultBreachStatus === "checking"
       ? "Checking…"
-      : pipVaultBreachStatus === "clear"
-        ? "No breach signal"
-        : pipVaultBreachStatus === "maybe"
-          ? "Potential breach"
-          : "Not checked";
+      : pipVaultBreachStatus === "error"
+        ? pipVaultBreachMessage ?? "Breach check failed"
+        : pipVaultBreachStatus === "clear"
+          ? pipVaultBreachMessage ?? "No breach signal"
+          : pipVaultBreachStatus === "maybe"
+            ? pipVaultBreachMessage ?? "Potential breach"
+            : pipVaultBreachMessage ?? "Not checked";
   const breachStatusTone =
-    pipVaultBreachStatus === "clear" ? "accent" : pipVaultBreachStatus === "maybe" ? "issue" : "ghost";
+    pipVaultBreachStatus === "clear"
+      ? "accent"
+      : pipVaultBreachStatus === "maybe"
+        ? "issue"
+        : pipVaultBreachStatus === "error"
+          ? "issue"
+          : "ghost";
   const vaultKdfLabel = useMemo(
     () => (pipVaultSnapshot?.kdf?.algorithm === "argon2id" ? "Argon2id" : "PBKDF2"),
     [pipVaultSnapshot?.kdf?.algorithm],
@@ -3469,6 +3552,11 @@ function App() {
     const result = await describePipVault();
     if (result.ok) {
       setPipVaultSnapshot(result);
+      if (typeof result.hardwarePlaceholder === "boolean") {
+        setPipVaultHardwarePlaceholder((current) =>
+          current === result.hardwarePlaceholder ? current : result.hardwarePlaceholder ?? current,
+        );
+      }
       setPipVaultError(null);
       return result;
     }
@@ -3942,6 +4030,8 @@ function App() {
 
   useEffect(() => {
     setPipVaultBreachStatus("idle");
+    setPipVaultBreachMessage(null);
+    setPipVaultBreachCount(null);
   }, [pipVaultPassword]);
 
   useEffect(() => {
@@ -3980,12 +4070,7 @@ function App() {
   }, [neonCursorEnabled]);
 
   useEffect(() => {
-    if (typeof document !== "undefined") {
-      document.documentElement.setAttribute("lang", locale);
-    }
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(LOCALE_STORAGE_KEY, locale);
-    }
+    persistLocalePreference(locale);
   }, [locale]);
 
   useEffect(() => {
@@ -4745,28 +4830,70 @@ function App() {
   const handleSaveKdfProfile = useCallback(() => {
     const saved = persistKdfProfile(pipVaultKdfProfile);
     setPipVaultKdfProfile(saved);
-    setPipVaultStatus(`Saved ${saved.algorithm} tuning (UI stub)`);
-    flashStatus("KDF tuning stored for upcoming Argon2id support");
+    const message = saved.algorithm === "argon2id" ? "Saved Argon2id tuning" : "Saved PBKDF2 preference";
+    setPipVaultStatus(message);
+    flashStatus(message);
   }, [flashStatus, pipVaultKdfProfile]);
 
-  const handleBreachCheck = useCallback(() => {
-    if (!pipVaultPassword.trim()) {
+  const handleBreachCheck = useCallback(async () => {
+    const password = pipVaultPassword.trim();
+    if (!password) {
       setPipVaultBreachStatus("idle");
+      setPipVaultBreachMessage(null);
+      setPipVaultBreachCount(null);
       flashStatus("Enter a password first");
       return;
     }
     setPipVaultBreachStatus("checking");
-    window.setTimeout(() => {
-      const weakPattern = COMMON_PASSWORD_PATTERNS.some((regex) => regex.test(pipVaultPassword));
-      const short = pipVaultPassword.length < 12;
-      const status: BreachCheckStatus = weakPattern || short ? "maybe" : "clear";
+    setPipVaultBreachMessage(null);
+    setPipVaultBreachCount(null);
+    try {
+      const hashBuffer = await window.crypto.subtle.digest("SHA-1", new TextEncoder().encode(password));
+      const hex = Array.from(new Uint8Array(hashBuffer))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("")
+        .toUpperCase();
+      const prefix = hex.slice(0, 5);
+      const suffix = hex.slice(5);
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 8000);
+      const resp = await fetch(`https://api.pwnedpasswords.com/range/${prefix}`, {
+        headers: { "Add-Padding": "true" },
+        signal: controller.signal,
+      });
+      window.clearTimeout(timeout);
+      if (!resp.ok) {
+        throw new Error(`Breach API responded ${resp.status}`);
+      }
+      const text = await resp.text();
+      const hitLine = text
+        .split("\n")
+        .map((line) => line.trim())
+        .find((line) => line.startsWith(suffix));
+      const count = hitLine ? Number(hitLine.split(":")[1] ?? "0") || 0 : 0;
+      setPipVaultBreachCount(count);
+      const status: BreachCheckStatus = count > 0 ? "maybe" : "clear";
       setPipVaultBreachStatus(status);
-      const message =
-        status === "clear" ? "No breach indicators found (stub only)" : "Password may be weak or previously breached (stub)";
+      const message = count > 0 ? `Found in ${count.toLocaleString()} breach entries` : "No breach entries found";
+      setPipVaultBreachMessage(message);
       setPipVaultStatus(message);
       flashStatus(message);
-    }, 420);
-  }, [flashStatus, pipVaultPassword]);
+      void sendVaultTelemetry({ event: "vault.breachCheck", detail: { status, count } });
+    } catch (err) {
+      const message =
+        err instanceof DOMException && err.name === "AbortError"
+          ? "Breach check timed out"
+          : err instanceof Error
+            ? err.message
+            : "Breach API unavailable";
+      setPipVaultBreachStatus("error");
+      setPipVaultBreachMessage(message);
+      setPipVaultStatus(message);
+      setPipVaultError(message);
+      flashStatus(message);
+      void sendVaultTelemetry({ event: "vault.breachCheck", detail: { status: "error", message } });
+    }
+  }, [flashStatus, pipVaultPassword, sendVaultTelemetry]);
 
   const handleRunIntegrityScan = () => {
     if (pipVaultLocked) {
@@ -4919,7 +5046,7 @@ function App() {
     }
   };
 
-  const handleRepairVaultIssue = async (issue: PipVaultIntegrityIssue) => {
+  const handleRepairVaultIssue = async (issue: PipVaultIntegrityIssue, strategy: "quarantine" | "delete" | "rewrap" = "quarantine") => {
     if (pipVaultLocked) {
       const message = "Unlock the vault with its password first";
       setPipVaultStatus(message);
@@ -4928,21 +5055,41 @@ function App() {
       return;
     }
 
-    if (!window.confirm(`Attempt repair by deleting record ${issue.id}?`)) {
+    if (strategy === "delete" && !window.confirm(`Delete record ${issue.id}? This cannot be undone.`)) {
       return;
     }
 
     setPipVaultBusy(true);
     try {
-      const result = await deletePipVaultRecordStorage(issue.id);
-      if (!result.ok) {
-        setPipVaultStatus(result.error);
-        setPipVaultError(result.error);
-        flashStatus(result.error);
-        return;
+      if (strategy === "delete") {
+        const result = await deletePipVaultRecordStorage(issue.id);
+        if (!result.ok) {
+          setPipVaultStatus(result.error);
+          setPipVaultError(result.error);
+          flashStatus(result.error);
+          return;
+        }
+        flashStatus("Record removed; re-scanning integrity");
+      } else {
+        const result = await repairPipVaultRecord(issue.id, { strategy, deleteAfter: false });
+        if (!result.ok) {
+          const message = result.error;
+          setPipVaultStatus(message);
+          setPipVaultError(message);
+          flashStatus(message);
+          return;
+        }
+        const message =
+          result.message ??
+          (strategy === "rewrap" ? "Record re-wrapped with a fresh tag" : "Record copied to repair folder");
+        setPipVaultStatus(message);
+        setPipVaultError(null);
+        flashStatus(message);
+        void sendVaultTelemetry({
+          event: "vault.repair",
+          detail: { strategy, quarantined: Boolean(result.quarantinedPath), repaired: result.repaired },
+        });
       }
-
-      flashStatus("Record removed; re-scanning integrity");
       await refreshPipVaultSnapshot();
       await refreshPipVaultRecords();
       void runVaultIntegrityScan("manual");
@@ -4976,7 +5123,15 @@ function App() {
       });
 
       try {
-        const result = await enableVaultPassword(trimmed);
+        const kdfPreference: PipVaultKdfMeta =
+          pipVaultKdfProfile.algorithm === "argon2id"
+            ? pipVaultKdfProfile
+            : { algorithm: "pbkdf2", iterations: pipVaultKdfProfile.iterations };
+
+        const result = await enableVaultPassword(trimmed, {
+          kdf: kdfPreference,
+          hardwarePlaceholder: pipVaultHardwarePlaceholder,
+        });
         if (!result.ok) {
           setPipVaultStatus(result.error);
           setPipVaultError(result.error);
@@ -4993,7 +5148,7 @@ function App() {
               ? "Vault unlocked"
               : "Password rotated"
             : "Password mode enabled";
-        const kdfNote = pipVaultKdfProfile.algorithm === "argon2id" ? " · Argon2id tuning saved (UI only)" : "";
+        const kdfNote = result.kdf?.algorithm === "argon2id" ? " · Argon2id active" : "";
         const statusMessage = options?.auto ? `${message} (remembered)` : message;
         setPipVaultStatus(`${statusMessage}${kdfNote}`);
         setPipVaultError(null);
@@ -5006,6 +5161,17 @@ function App() {
         await refreshPipVaultSnapshot();
         await refreshPipVaultRecords();
         markVaultActivity();
+        void sendVaultTelemetry({
+          event: "vault.enablePassword",
+          detail: {
+            mode: result.mode,
+            algorithm: result.kdf?.algorithm,
+            iterations: result.kdf?.iterations,
+            memoryKiB: result.kdf?.memoryKiB,
+            parallelism: result.kdf?.parallelism,
+            hardwarePlaceholder: result.hardwarePlaceholder ?? pipVaultHardwarePlaceholder,
+          },
+        });
       } catch (err) {
         const message = err instanceof Error ? err.message : "Unable to enable password";
         setPipVaultStatus(null);
@@ -5028,6 +5194,11 @@ function App() {
       refreshPipVaultSnapshot,
       refreshPipVaultRecords,
       pipVaultKdfProfile.algorithm,
+      pipVaultKdfProfile.iterations,
+      pipVaultKdfProfile.memoryKiB,
+      pipVaultKdfProfile.parallelism,
+      pipVaultHardwarePlaceholder,
+      sendVaultTelemetry,
     ],
   );
 
@@ -5098,14 +5269,34 @@ function App() {
     autoUnlockAttemptRef.current = false;
   };
 
-  const handleToggleHardwarePlaceholder = useCallback(() => {
-    setPipVaultHardwarePlaceholder((current) => {
-      const next = !current;
-      persistHardwarePlaceholder(next);
-      flashStatus(next ? "Hardware key placeholder added" : "Hardware key placeholder removed");
-      return next;
-    });
-  }, [flashStatus, persistHardwarePlaceholder]);
+  const handleToggleHardwarePlaceholder = useCallback(async () => {
+    const next = !pipVaultHardwarePlaceholder;
+    setPipVaultHardwarePlaceholder(next);
+    persistHardwarePlaceholder(next);
+    try {
+      const result = await setVaultHardwarePlaceholder(next);
+      if (!result.ok) {
+        throw new Error(result.error);
+      }
+      setPipVaultHardwarePlaceholder(result.hardwarePlaceholder);
+      flashStatus(result.hardwarePlaceholder ? "Hardware key placeholder saved" : "Hardware key placeholder removed");
+      await refreshPipVaultSnapshot();
+      void sendVaultTelemetry({ event: "vault.hardwarePlaceholder", detail: { enabled: result.hardwarePlaceholder } });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unable to update hardware placeholder";
+      setPipVaultHardwarePlaceholder(!next);
+      setPipVaultStatus(message);
+      setPipVaultError(message);
+      flashStatus(message);
+    }
+  }, [
+    flashStatus,
+    persistHardwarePlaceholder,
+    pipVaultHardwarePlaceholder,
+    refreshPipVaultSnapshot,
+    sendVaultTelemetry,
+    setVaultHardwarePlaceholder,
+  ]);
 
   const handleConfirmVaultMode = useCallback(async () => {
     if (!pipVaultModeConfirm) return;
@@ -6982,7 +7173,6 @@ function App() {
         return;
       }
       setLocale(next);
-      saveSettings({ locale: next });
       flashStatus(nextTranslator("statuses.localeChanged", { language: nextMessages.meta.languageNative }));
     },
     [flashStatus, locale],
@@ -7778,9 +7968,9 @@ function App() {
     const target = mainContentRef.current;
     if (target) {
       target.focus({ preventScroll: true });
-      target.scrollIntoView({ behavior: "smooth", block: "start" });
+      target.scrollIntoView({ behavior: prefersReducedMotion ? "auto" : "smooth", block: "start" });
     }
-  }, []);
+  }, [prefersReducedMotion]);
 
   const hasHealthAlert =
     !offlineMode && healthSummary.failing.some((item) => item.status !== "offline");
@@ -7788,18 +7978,35 @@ function App() {
   const hologramActive = previewHologramActive && !prefersReducedMotion;
   const holomapEnabled = workspace === "preview" && highEffects && !prefersReducedMotion;
   const showCyberPreviews = highEffects && !prefersReducedMotion;
-  const renderBlockPreview = (type: string, variant: "card" | "compact" = "card") =>
-    showCyberPreviews ? (
-      <CyberBlockPreview
+  useEffect(() => {
+    if (!showCyberPreviews) return;
+    let cancelled = false;
+    loadCyberBlockPreview().then((mod) => {
+      if (!cancelled) {
+        setCyberPreviewComponent(() => mod.default);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [showCyberPreviews]);
+
+  const renderBlockPreview = (type: string, variant: "card" | "compact" = "card") => {
+    const PreviewComponent = cyberPreviewComponent;
+    if (!showCyberPreviews || !PreviewComponent) {
+      return <BlockPlaceholder type={type} />;
+    }
+
+    return (
+      <PreviewComponent
         shape={blockShapeForType(type)}
         theme={theme}
         highEffects={highEffects}
         reducedMotion={prefersReducedMotion}
         variant={variant}
       />
-    ) : (
-      <BlockPlaceholder type={type} />
     );
+  };
 
   return (
     <I18nContext.Provider value={{ locale, messages, t, setLocale }}>
@@ -7807,7 +8014,9 @@ function App() {
       <a className="skip-link" href="#main-content" onClick={handleSkipToContent}>
         {messages.app.skipToContent}
       </a>
-      <HeroCanvas theme={theme} highEffects={highEffects} />
+      <Suspense fallback={null}>
+        <HeroCanvas theme={theme} highEffects={highEffects} />
+      </Suspense>
       <header className={`top-bar ${catalogDragging ? "dragging-block" : ""}`}>
         <div className="brand-area" data-hotkey-area="palette language">
           <div className="brand">
@@ -7823,7 +8032,7 @@ function App() {
               />
             </div>
           </div>
-          <div className="theme-picker" title="Select a theme preset" data-hotkey-area="theme">
+          <div className="theme-picker" title={messages.app.controls.theme} data-hotkey-area="theme">
             <div className="theme-picker-head">
               <span className="eyebrow">Theme</span>
               <span className="theme-picker-current">{getThemeLabel(theme)}</span>
@@ -7834,7 +8043,7 @@ function App() {
                 id="theme-select"
                 value={theme}
                 onChange={(e) => setTheme(resolveTheme(e.target.value))}
-                aria-label="Theme preset"
+                aria-label={messages.app.controls.theme}
               >
                 {themePresets.map((preset) => (
                   <option key={preset.id} value={preset.id}>
@@ -7858,11 +8067,13 @@ function App() {
               checked={highEffects}
               onChange={(e) => setHighEffects(e.target.checked)}
               disabled={prefersReducedMotion}
-              aria-pressed={highEffects}
-              aria-label="Toggle high visual effects"
+              aria-label={messages.app.controls.effects}
             />
             <span>{highEffects ? "FX on" : "FX off"}</span>
           </label>
+          <div className="fx-badge-slot" aria-hidden>
+            <FxBadge active={highEffects && !prefersReducedMotion} reducedMotion={prefersReducedMotion} />
+          </div>
           <label
             className={`toggle cursor-trail-toggle ${prefersReducedMotion ? "disabled" : ""} ${offlineMode || !highEffects ? "paused" : ""}`}
             title={
@@ -7880,8 +8091,7 @@ function App() {
               checked={cursorTrailPref && !prefersReducedMotion}
               onChange={(e) => setCursorTrailPref(e.target.checked)}
               disabled={prefersReducedMotion}
-              aria-pressed={cursorTrailPref}
-              aria-label="Toggle neon cursor trail"
+              aria-label={messages.app.controls.cursorTrail}
             />
             <span>{cursorTrailLabel}</span>
           </label>
@@ -7890,8 +8100,7 @@ function App() {
               type="checkbox"
               checked={offlineMode}
               onChange={(e) => setOfflineMode(e.target.checked)}
-              aria-pressed={offlineMode}
-              aria-label="Toggle offline / air-gap mode"
+              aria-label={messages.app.controls.offline}
             />
             <span>{offlineMode ? "Offline" : "Online"}</span>
           </label>
@@ -7899,8 +8108,8 @@ function App() {
             className="ghost small whats-new-button"
             type="button"
             onClick={() => setWhatsNewOpen(true)}
-            aria-label="Open what's new modal"
-            title="See recent changes"
+            aria-label={messages.app.controls.whatsNew}
+            title={messages.app.controls.whatsNew}
           >
             What&rsquo;s new
           </button>
@@ -7911,11 +8120,12 @@ function App() {
             aria-label={messages.hotkeys.title}
             title={messages.hotkeys.title}
             data-hotkey-area="palette"
+            data-testid="hotkey-help-button"
           >
             ?
           </button>
         </div>
-        <div className="workspace-nav" data-hotkey-area="workspaces">
+        <nav className="workspace-nav" data-hotkey-area="workspaces" aria-label={messages.app.controls.workspaceNav}>
           {[
             { id: "studio", label: "Creator Studio" },
             { id: "ao", label: "AO Console" },
@@ -7925,6 +8135,7 @@ function App() {
             <button
               key={item.id}
               className={`chip ${workspace === (item.id as Workspace) ? "active" : ""}`}
+              aria-pressed={workspace === (item.id as Workspace)}
               onClick={() => switchWorkspace(item.id as Workspace)}
               onMouseEnter={item.id === "ao" ? prefetchAoLogPanel : undefined}
               onFocus={item.id === "ao" ? prefetchAoLogPanel : undefined}
@@ -7933,7 +8144,7 @@ function App() {
               {item.label}
             </button>
           ))}
-        </div>
+        </nav>
         {draftConflict ? (
           <div className="conflict-banner" role="alert">
             <div className="conflict-copy">
@@ -8395,7 +8606,11 @@ function App() {
               <button className="primary icon-lead" data-icon="💾" onClick={handleSaveDraft} disabled={saving}>
                 {saving ? "Saving…" : "Save draft"}
               </button>
-              {pipVaultStatus && <span className="pill ghost pip-vault-pill">{pipVaultStatus}</span>}
+              {pipVaultStatus && (
+                <span className="pill ghost pip-vault-pill" data-testid="vault-status-pill">
+                  {pipVaultStatus}
+                </span>
+              )}
             </div>
           )}
           <section className="draft-history-panel" aria-label="Draft save history">
@@ -8467,7 +8682,7 @@ function App() {
         </div>
       </header>
 
-      <main id="main-content" ref={mainContentRef} tabIndex={-1} data-hotkey-area="preview">
+      <main id="main-content" ref={mainContentRef} tabIndex={-1} role="main" data-hotkey-area="preview">
         <HotkeyOverlay
           open={hotkeyOverlayOpen}
           groups={hotkeyGroups}
@@ -8511,7 +8726,9 @@ function App() {
               </p>
             </div>
             <div className="pip-vault-header-actions">
-              <VaultCrystal state={vaultCrystalState} pulse={vaultCrystalPulse} />
+              <Suspense fallback={<span className="pill ghost">Vault FX</span>}>
+                <VaultCrystal state={vaultCrystalState} pulse={vaultCrystalPulse} />
+              </Suspense>
               <span className={`pill ${pipVaultSnapshot?.exists ? "accent" : "ghost"}`}>
                 {pipVaultSnapshot?.exists ? "Vault present" : "Vault empty"}
               </span>
@@ -8615,18 +8832,20 @@ function App() {
               </div>
               <div>
                 <span>KDF</span>
-                <strong className="mono">{vaultKdfLabel}</strong>
+                <strong className="mono" data-testid="vault-kdf-label">
+                  {vaultKdfLabel}
+                </strong>
                 <span className="hint mono">{vaultKdfDetail}</span>
               </div>
               <div>
                 <span>KDF preference</span>
-                <strong className="mono">
-                  {kdfProfile.algorithm === "argon2id" ? "Argon2id (UI)" : "PBKDF2"}
+                <strong className="mono" data-testid="vault-kdf-preference">
+                  {kdfProfile.algorithm === "argon2id" ? "Argon2id" : "PBKDF2"}
                 </strong>
                 <span className="hint mono">
                   {kdfProfile.algorithm === "argon2id"
-                    ? `${Math.round(kdfMemory / 1024)} MiB · t=${kdfIterations}`
-                    : "Stored locally"}
+                    ? `${Math.round(kdfMemory / 1024)} MiB · t=${kdfIterations} · p=${kdfParallelism}`
+                    : "PBKDF2 · 100k"}
                 </span>
               </div>
               <div>
@@ -8755,7 +8974,10 @@ function App() {
             <div className="pip-vault-breach">
               <div className="pip-vault-breach-copy">
                 <span className={`pill ${breachStatusTone}`}>{breachStatusLabel}</span>
-                <span className="hint">Stubbed offline check; a live breach API will replace this.</span>
+                <span className="hint">
+                  {pipVaultBreachMessage ?? "Checks HIBP with k-anonymity; only the SHA-1 prefix leaves this device."}
+                  {pipVaultBreachCount != null ? ` · Hits: ${pipVaultBreachCount.toLocaleString()}` : ""}
+                </span>
               </div>
               <button
                 className="ghost small"
@@ -8812,6 +9034,7 @@ function App() {
                     <button
                       type="button"
                       className={`chip ${pipVaultKdfProfile.algorithm === "pbkdf2" ? "active" : ""}`}
+                      data-testid="vault-kdf-pbkdf2"
                       onClick={() => setPipVaultKdfProfile((current) => ({ ...current, algorithm: "pbkdf2" }))}
                     >
                       PBKDF2
@@ -8819,11 +9042,12 @@ function App() {
                     <button
                       type="button"
                       className={`chip ${pipVaultKdfProfile.algorithm === "argon2id" ? "active" : ""}`}
+                      data-testid="vault-kdf-argon2"
                       onClick={() => setPipVaultKdfProfile((current) => ({ ...current, algorithm: "argon2id" }))}
                     >
                       Argon2id
                     </button>
-                    <span className="pill ghost mono">
+                    <span className="pill ghost mono" data-testid="vault-kdf-active-pill">
                       {pipVaultSnapshot?.kdf?.algorithm ? `${pipVaultSnapshot.kdf.algorithm} active` : "pbkdf2 active"}
                     </span>
                   </div>
@@ -8837,6 +9061,7 @@ function App() {
                         min={16 * 1024}
                         max={256 * 1024}
                         step={16 * 1024}
+                        data-testid="vault-kdf-memory"
                         value={kdfMemory}
                         onChange={(e) =>
                           setPipVaultKdfProfile((current) => ({
@@ -8855,6 +9080,7 @@ function App() {
                         type="number"
                         min={2}
                         max={6}
+                        data-testid="vault-kdf-iterations"
                         value={kdfIterations}
                         onChange={(e) =>
                           setPipVaultKdfProfile((current) => ({
@@ -8866,32 +9092,41 @@ function App() {
                     </label>
                     <label>
                       Parallelism (p)
-                        <input
-                          type="number"
-                          min={1}
-                          max={4}
-                          value={kdfParallelism}
-                          onChange={(e) =>
-                            setPipVaultKdfProfile((current) => ({
-                              ...current,
-                              parallelism: Math.max(1, Math.min(4, Number(e.target.value) || 1)),
-                            }))
+                      <input
+                        type="number"
+                        min={1}
+                        max={4}
+                        data-testid="vault-kdf-parallelism"
+                        value={kdfParallelism}
+                        onChange={(e) =>
+                          setPipVaultKdfProfile((current) => ({
+                            ...current,
+                            parallelism: Math.max(1, Math.min(4, Number(e.target.value) || 1)),
+                          }))
                         }
                       />
                     </label>
                   </div>
                 ) : (
                   <p className="hint">
-                    PBKDF2 is active today; Argon2id tuning is stored locally and will apply once encrypted-at-rest upgrades land.
+                    PBKDF2 (100k rounds) will be used for new passwords. Switch to Argon2id for stronger password derivation on the
+                    next enable/rotate.
                   </p>
                 )}
                 <div className="pip-vault-kdf-actions">
-                  <button className="ghost small" type="button" onClick={handleSaveKdfProfile} disabled={pipVaultBusy}>
+                  <button
+                    className="ghost small"
+                    type="button"
+                    data-testid="vault-kdf-save"
+                    onClick={handleSaveKdfProfile}
+                    disabled={pipVaultBusy}
+                  >
                     Save tuning
                   </button>
                   <button
                     className="ghost small"
                     type="button"
+                    data-testid="vault-kdf-reset"
                     onClick={() => setPipVaultKdfProfile(DEFAULT_ARGON2_PROFILE)}
                     disabled={pipVaultBusy}
                   >
@@ -8947,16 +9182,36 @@ function App() {
                       <div className="pip-vault-integrity-copy">
                         <strong className="mono">{issue.id}</strong>
                         <p>{issue.error}</p>
-                        <span className="hint">Repair suggestion: delete record then re-import from trusted backup.</span>
+                        <span className="hint">
+                          Repair options: re-wrap if decryptable, or quarantine the encrypted record before deleting.
+                        </span>
                       </div>
-                      <button
-                        className="ghost small danger"
-                        type="button"
-                        onClick={() => void handleRepairVaultIssue(issue)}
-                        disabled={pipVaultBusy || pipVaultLocked}
-                      >
-                        Delete record
-                      </button>
+                      <div className="pip-vault-integrity-actions">
+                        <button
+                          className="ghost small"
+                          type="button"
+                          onClick={() => void handleRepairVaultIssue(issue, "quarantine")}
+                          disabled={pipVaultBusy || pipVaultLocked}
+                        >
+                          Quarantine copy
+                        </button>
+                        <button
+                          className="ghost small"
+                          type="button"
+                          onClick={() => void handleRepairVaultIssue(issue, "rewrap")}
+                          disabled={pipVaultBusy || pipVaultLocked}
+                        >
+                          Attempt repair
+                        </button>
+                        <button
+                          className="ghost small danger"
+                          type="button"
+                          onClick={() => void handleRepairVaultIssue(issue, "delete")}
+                          disabled={pipVaultBusy || pipVaultLocked}
+                        >
+                          Delete record
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -9281,7 +9536,9 @@ function App() {
         </div>
         {pipVaultStatus && (
           <div className="pip-vault-footer">
-            <span className="pill ghost pip-vault-pill">{pipVaultStatus}</span>
+            <span className="pill ghost pip-vault-pill" data-testid="vault-status-pill">
+              {pipVaultStatus}
+            </span>
           </div>
         )}
         </Vault>
@@ -9624,6 +9881,9 @@ function App() {
               <div className="drop-ghost-layer" aria-hidden>
                 <div
                   className={`drop-ghost drop-${dropGhost.placement} ${dropGhost.mode === "move" ? "move" : "add"}`}
+                  data-testid="drop-ghost"
+                  data-drop-placement={dropGhost.placement}
+                  data-drop-mode={dropGhost.mode ?? "catalog"}
                   style={{
                     width: dropGhost.rect.width,
                     height: dropGhost.rect.height,
@@ -9695,7 +9955,12 @@ function App() {
             <div className="props-body">
               <div className="review-toggle-row">
                 <label className="toggle">
-                  <input type="checkbox" checked={reviewMode} onChange={(e) => setReviewMode(e.target.checked)} />
+                  <input
+                    type="checkbox"
+                    data-testid="review-mode-toggle"
+                    checked={reviewMode}
+                    onChange={(e) => setReviewMode(e.target.checked)}
+                  />
                   <span>Review mode</span>
                 </label>
                 <span className="pill ghost">
@@ -9721,14 +9986,26 @@ function App() {
                         <div
                           key={comment.id}
                           className={`review-comment ${comment.resolvedAt ? "resolved" : ""}`}
+                          data-testid="review-comment"
+                          data-comment-id={comment.id}
                         >
                           <div className="review-comment-head">
                             <span className="mono">{formatTime(comment.createdAt)}</span>
                             <div className="review-comment-actions">
-                              <button className="ghost micro" type="button" onClick={() => toggleReviewComment(comment.id)}>
+                              <button
+                                className="ghost micro"
+                                type="button"
+                                data-testid="review-comment-resolve"
+                                onClick={() => toggleReviewComment(comment.id)}
+                              >
                                 {comment.resolvedAt ? "Reopen" : "Resolve"}
                               </button>
-                              <button className="ghost micro" type="button" onClick={() => deleteReviewComment(comment.id)}>
+                              <button
+                                className="ghost micro"
+                                type="button"
+                                data-testid="review-comment-delete"
+                                onClick={() => deleteReviewComment(comment.id)}
+                              >
                                 Delete
                               </button>
                             </div>
@@ -9743,6 +10020,7 @@ function App() {
                     <span>Add review note</span>
                     <textarea
                       ref={commentInputRef}
+                      data-testid="review-comment-input"
                       value={reviewDraft}
                       onChange={(e) => setReviewDraft(e.target.value)}
                       rows={3}
@@ -9753,6 +10031,7 @@ function App() {
                     <button
                       className="primary small"
                       type="button"
+                      data-testid="review-pin-btn"
                       onClick={() => selectedNodeId && addReviewComment(selectedNodeId, reviewDraft)}
                       disabled={!selectedNodeId || !reviewDraft.trim()}
                     >
@@ -10162,6 +10441,7 @@ function App() {
                 type="button"
                 ref={wizardWalletRef}
                 aria-pressed={walletMode === "ipc"}
+                data-testid="wallet-mode-ipc"
                 onClick={() => {
                   setWalletMode("ipc");
                   setWalletFieldError(null);
@@ -10173,6 +10453,7 @@ function App() {
                 className={`chip ${walletMode === "path" ? "active" : ""}`}
                 type="button"
                 aria-pressed={walletMode === "path"}
+                data-testid="wallet-mode-path"
                 onClick={() => {
                   setWalletMode("path");
                   setWalletFieldError(null);
@@ -10184,6 +10465,7 @@ function App() {
                 className={`chip ${walletMode === "jwk" ? "active" : ""}`}
                 type="button"
                 aria-pressed={walletMode === "jwk"}
+                data-testid="wallet-mode-jwk"
                 onClick={() => {
                   setWalletMode("jwk");
                   setWalletFieldError(null);
@@ -10245,6 +10527,7 @@ function App() {
                   <span>Wallet JSON</span>
                   <textarea
                     rows={7}
+                    data-testid="wallet-jwk-input"
                     placeholder='{"kty":"RSA",...}'
                     value={walletJwkInput}
                     onChange={(e) => {
@@ -10285,6 +10568,7 @@ function App() {
               </span>
               <input
                 placeholder="/path/to/module.js"
+                data-testid="ao-module-path"
                 value={modulePath}
                 onChange={(e) => {
                   setModulePath(e.target.value);
@@ -10308,6 +10592,7 @@ function App() {
               <textarea
                 ref={wizardModuleRef}
                 rows={8}
+                data-testid="ao-module-source"
                 value={moduleSource}
                 onChange={(e) => {
                   setModuleSource(e.target.value);
@@ -10321,6 +10606,7 @@ function App() {
               <label className={`toggle dry-run-toggle ${deployDryRun ? "active" : ""}`}>
                 <input
                   type="checkbox"
+                  data-testid="ao-dry-run-toggle"
                   checked={deployDryRun}
                   onChange={(e) => setDeployDryRun(e.target.checked)}
                 />
@@ -10329,6 +10615,7 @@ function App() {
               <button
                 className="primary"
                 onClick={handleDeployModuleClick}
+                data-testid="ao-deploy-btn"
                 disabled={deploying || (offlineMode && !deployDryRun)}
                 type="button"
                 aria-label="Deploy module"
@@ -10343,7 +10630,10 @@ function App() {
                 {deploying ? "Deploying…" : "Deploy module"}
               </button>
               {(deployOutcome || deployStep) && (
-                <span className={`pill ${deployState === "error" ? "error" : "ghost"}`}>
+                <span
+                  className={`pill ${deployState === "error" ? "error" : "ghost"}`}
+                  data-testid="ao-deploy-status"
+                >
                   {deployOutcome || deployStep}
                 </span>
               )}
@@ -10375,6 +10665,7 @@ function App() {
               <input
                 ref={wizardSpawnRef}
                 placeholder="Manifest transaction id"
+                data-testid="ao-manifest-tx-input"
                 value={manifestTxInput}
                 onChange={(e) => {
                   setManifestTxInput(e.target.value);
@@ -10399,6 +10690,7 @@ function App() {
               </span>
               <input
                 placeholder="Module transaction id"
+                data-testid="ao-module-tx-input"
                 value={moduleTxInput}
                 onChange={(e) => {
                   setModuleTxInput(e.target.value);
@@ -10418,6 +10710,7 @@ function App() {
               </span>
               <input
                 placeholder="Scheduler process id"
+                data-testid="ao-scheduler-input"
                 value={scheduler}
                 onChange={(e) => {
                   setScheduler(e.target.value);
@@ -10430,6 +10723,7 @@ function App() {
               <button
                 className="primary"
                 onClick={() => void handleSpawnProcessClick()}
+                data-testid="ao-spawn-btn"
                 disabled={spawning || !canSpawn || offlineMode}
                 type="button"
                 aria-label="Spawn process"
@@ -10893,9 +11187,13 @@ function App() {
         </div>
       )}
 
-      {status && <div className="status-bar toast">{status}</div>}
+      {status && (
+        <div className="status-bar toast" role="status" aria-live="polite">
+          {status}
+        </div>
+      )}
       {(pip?.manifestTx || remoteError) && (
-        <div className="status-bar ghost">
+        <div className="status-bar ghost" role="status" aria-live="polite">
           {pip?.manifestTx && <span className="pill ghost">manifestTx: {pip.manifestTx}</span>}
           {remoteError && <span className="error">{remoteError}</span>}
         </div>

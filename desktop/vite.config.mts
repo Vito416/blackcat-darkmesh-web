@@ -29,14 +29,28 @@ export default defineConfig({
       output: {
         manualChunks(id) {
           const normalized = id.replace(/\\/g, "/");
+
+          // Vendor bundles
           if (id.includes("node_modules")) {
-            if (id.includes("@permaweb/aoconnect")) return "ao-connect";
-            if (id.includes("three")) return "three";
-            if (id.includes("dexie")) return "dexie";
-            if (id.includes("react")) return "react";
+            if (id.includes("@permaweb/aoconnect")) return "vendor-ao-connect";
+            if (id.includes("three")) return "vendor-three";
+            if (id.includes("dexie")) return "vendor-dexie";
+            if (id.includes("react")) return "vendor-react";
           }
-          if (normalized.includes("/components/ManifestRenderer")) return "manifest-renderer";
-          if (normalized.includes("/components/AoHolomap")) return "ao-holomap";
+
+          // Feature / panel chunks (keep heavier panels isolated)
+          const featureChunks: Record<string, string> = {
+            "/components/ManifestRenderer": "chunk-manifest-renderer",
+            "/components/AoHolomap": "chunk-ao-holomap",
+            "/components/AoLogPanel": "chunk-ao-log",
+            "/components/DraftDiffPanel": "chunk-draft-diff",
+            "/components/HeroCanvas": "chunk-fx-hero",
+            "/components/CyberBlockPreview": "chunk-fx-preview",
+            "/components/VaultCrystal": "chunk-fx-vault",
+          };
+
+          const matched = Object.entries(featureChunks).find(([key]) => normalized.includes(key));
+          if (matched) return matched[1];
         },
       },
     },

@@ -12,7 +12,7 @@ Cross‑platform desktop shell for blackcat write:
 npm run clean         # remove dist/ + release/ artifacts
 npm run dev           # start Vite (renderer) + Electron (main) with live reload
 npm run build         # production build (renderer bundle + compiled main/preload)
-npm run package       # build installer(s) for the current OS into release/
+npm run package       # build installer(s) for the current OS into release/ (no publish)
 npm run package:mac   # macOS dmg + zip for arm64 + x64 (run on macOS)
 npm run package:win   # Windows x64 nsis installer + portable exe (run on Windows)
 npm run package:linux # Linux x64 AppImage + deb (run on Linux)
@@ -22,11 +22,23 @@ npm run lint          # eslint (placeholder)
 ### Packaging (electron-builder)
 
 - Config lives in `electron-builder.yml`; outputs land in `release/`.
+- `npm run build` generates theme CSS from `src/renderer/theme/tokens.json` before bundling.
 - Targets: macOS dmg + zip (arm64 + x64, unsigned by default), Windows nsis installer + portable exe (x64), Linux AppImage + deb (x64).
 - Artifact names: `blackcat-desktop-${version}-mac-${arch}.{dmg|zip}`, `blackcat-desktop-${version}-win-${arch}-setup.exe`, `blackcat-desktop-${version}-win-${arch}-portable.exe`, `blackcat-desktop-${version}-linux-${arch}.{AppImage|deb}`.
 - Builds rely on `dist/desktop/src/main.js` + `dist/renderer` from `npm run build`; the `clean` script wipes both build + release artifacts.
 - Run platform-specific scripts on their host OS (electron-builder requires macOS to produce dmg/zip and Windows for signed exe/msi-equivalents).
 - Unsigned builds: keep `CSC_IDENTITY_AUTO_DISCOVERY=false` to avoid code-sign prompts. If you do want signing later, export the usual `CSC_LINK` / `CSC_KEY_PASSWORD` (or Apple ID creds for notarization) before rerunning the package command.
+
+### Auto-update + release flow
+- Auto-update is wired via `electron-updater` and defaults to channel `latest`. Set `BLACKCAT_UPDATE_URL` or `BLACKCAT_UPDATE_BASE_URL` to override the feed (otherwise the packaged `app-update.yml` is used).
+- The packaged update config targets GitHub draft releases under `blackcat-labs/blackcat-mesh-nexus`; adjust `electron-builder.yml` if you publish elsewhere.
+- Disable auto-update with `BLACKCAT_DISABLE_AUTO_UPDATE=1`; allow pre-release by setting `BLACKCAT_UPDATE_CHANNEL=beta` (or any channel) and optionally `BLACKCAT_UPDATE_PRERELEASE=1`.
+- Manual IPC hooks exposed to the renderer: `window.updates.onStatus`, `window.updates.checkNow()`, and `window.updates.quitAndInstall()`.
+- macOS notarization stub runs only when `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID` are set; see `scripts/notarize.js` and `build/entitlements.mac.plist`.
+- Draft release notes template lives at `templates/RELEASE_NOTES_TEMPLATE.md` — copy/fill for each release before uploading artifacts.
+
+### CI
+- `.github/workflows/ci.yml` now uploads platform build artifacts (`release/`) for macOS, Windows, and Linux after Playwright smoke tests. Builds run `npm run package:<platform>` with `--publish=never` so nothing is pushed automatically.
 
 ### PIP worker env (renderer + main)
 

@@ -29,6 +29,7 @@ export type PipVaultDescribeResult =
       lockedAt?: string;
       recordCount: number;
       kdf?: PipVaultKdfMeta;
+      hardwarePlaceholder?: boolean;
     }
   | { ok: false; error: string };
 
@@ -40,6 +41,7 @@ export type PipVaultExportSuccess = {
   createdAt: string;
   recordCount: number;
   kdf?: PipVaultKdfMeta;
+  hardwarePlaceholder?: boolean;
 };
 
 export type PipVaultExportResult = PipVaultExportSuccess | { ok: false; error: string };
@@ -68,19 +70,29 @@ export type PipVaultKdfMeta = {
   version?: number;
 };
 
+export type PipVaultRepairResult =
+  | { ok: true; repaired: boolean; quarantinedPath?: string; removed?: boolean; message?: string }
+  | { ok: false; error: string };
+
+export type VaultTelemetryEvent = { event: string; at?: string; detail?: Record<string, unknown> };
+
 const bridge = (): PipVaultBridge | undefined => {
   if (typeof window === "undefined") return undefined;
   return window.pipVault;
 };
 
-const normalizeKdfMeta = (value: { kdf?: PipVaultKdfMeta; iterations?: number; salt?: string }): PipVaultKdfMeta | undefined => {
+const normalizeKdfMeta = (
+  value: { kdf?: PipVaultKdfMeta; iterations?: number; salt?: string; algorithm?: PipVaultKdfMeta["algorithm"]; memoryKiB?: number; parallelism?: number },
+): PipVaultKdfMeta | undefined => {
   if (value.kdf) return value.kdf;
-  if (value.iterations || value.salt) {
+  if (value.iterations || value.salt || value.algorithm || value.memoryKiB || value.parallelism) {
     return {
-      algorithm: "pbkdf2",
+      algorithm: value.algorithm ?? "pbkdf2",
       iterations: value.iterations,
       salt: value.salt,
-      digest: "sha256",
+      memoryKiB: value.memoryKiB,
+      parallelism: value.parallelism,
+      digest: value.algorithm === "argon2id" ? undefined : "sha256",
       version: 1,
     };
   }
@@ -217,15 +229,23 @@ export async function describePipVault(): Promise<PipVaultDescribeResult> {
 
 export async function enableVaultPassword(
   password: string,
-): Promise<{ ok: true; mode: string; iterations?: number; salt?: string; records?: number } | { ok: false; error: string }> {
+  options?: { kdf?: PipVaultKdfMeta; hardwarePlaceholder?: boolean },
+): Promise<
+  | { ok: true; mode: string; kdf?: PipVaultKdfMeta; records?: number; hardwarePlaceholder?: boolean }
+  | { ok: false; error: string }
+> {
   const api = bridge();
   if (!api?.enablePasswordMode) {
     return { ok: false, error: "PIP vault IPC bridge is unavailable" };
   }
 
   try {
-    const result = await api.enablePasswordMode(password);
-    return result as { ok: true; mode: string; iterations?: number; salt?: string; records?: number };
+    const result = await api.enablePasswordMode(password, options);
+    return {
+      ...(result as { ok: true; mode: string; records?: number; hardwarePlaceholder?: boolean; kdf?: PipVaultKdfMeta }),
+      ok: true,
+      kdf: normalizeKdfMeta(result) ?? (result as { kdf?: PipVaultKdfMeta }).kdf,
+    };
   } catch (err) {
     return {
       ok: false,
@@ -267,6 +287,7 @@ export async function exportPipVaultBundle(): Promise<PipVaultExportResult> {
       createdAt: result.createdAt,
       recordCount: result.recordCount,
       kdf: result.kdf ?? normalizeKdfMeta(result),
+      hardwarePlaceholder: result.hardwarePlaceholder,
     };
   } catch (err) {
     return {
@@ -279,7 +300,7 @@ export async function exportPipVaultBundle(): Promise<PipVaultExportResult> {
 export async function importPipVaultBundle(
   bundle: string | ArrayBuffer,
   password?: string,
-): Promise<{ ok: true; mode: string; records: number } | { ok: false; error: string }> {
+): Promise<{ ok: true; mode: string; records: number; kdf?: PipVaultKdfMeta; hardwarePlaceholder?: boolean } | { ok: false; error: string }> {
   const api = bridge();
   if (!api?.importVault) {
     return { ok: false, error: "PIP vault IPC bridge is unavailable" };
@@ -287,7 +308,10 @@ export async function importPipVaultBundle(
 
   try {
     const result = await api.importVault(bundle, password);
-    return result as { ok: true; mode: string; records: number };
+    return {
+      ...(result as { ok: true; mode: string; records: number; kdf?: PipVaultKdfMeta; hardwarePlaceholder?: boolean }),
+      kdf: normalizeKdfMeta(result) ?? (result as { kdf?: PipVaultKdfMeta }).kdf,
+    };
   } catch (err) {
     return {
       ok: false,
@@ -310,6 +334,46 @@ export async function lockPipVault(): Promise<{ ok: true; locked: boolean; locke
       ok: false,
       error: err instanceof Error ? err.message : "Unable to lock PIP vault",
     };
+  }
+}
+
+export async function repairPipVaultRecord(
+  id: string,
+  options?: { strategy?: "rewrap" | "quarantine"; deleteAfter?: boolean },
+): Promise<PipVaultRepairResult> {
+  const api = bridge();
+  if (!api?.repairRecord) {
+    return { ok: false, error: "PIP vault IPC bridge is unavailable" };
+  }
+
+  try {
+    const result = await api.repairRecord(id, options);
+    return result as PipVaultRepairResult;
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Unable to repair vault record" };
+  }
+}
+
+export async function setVaultHardwarePlaceholder(enabled: boolean): Promise<{ ok: true; hardwarePlaceholder: boolean } | { ok: false; error: string }> {
+  const api = bridge();
+  if (!api?.setHardwarePlaceholder) {
+    return { ok: false, error: "PIP vault IPC bridge is unavailable" };
+  }
+
+  try {
+    return (await api.setHardwarePlaceholder(enabled)) as { ok: true; hardwarePlaceholder: boolean };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Unable to persist hardware placeholder" };
+  }
+}
+
+export async function sendVaultTelemetry(event: VaultTelemetryEvent): Promise<void> {
+  const api = bridge();
+  if (!api?.telemetry) return;
+  try {
+    await api.telemetry(event);
+  } catch {
+    // Ignore telemetry failures to avoid blocking UX
   }
 }
 

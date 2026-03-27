@@ -33,6 +33,7 @@ declare global {
         locked: boolean;
         lockedAt?: string;
         recordCount: number;
+        hardwarePlaceholder?: boolean;
         kdf?: {
           algorithm: "pbkdf2" | "argon2id";
           iterations?: number;
@@ -63,7 +64,17 @@ declare global {
       deleteRecord: (id: string) => Promise<{ ok: true; removed: boolean } | undefined>;
       enablePasswordMode: (
         password: string,
-      ) => Promise<{ ok: true; mode: "safeStorage" | "plain" | "password"; iterations?: number; salt?: string; records?: number }>;
+        options?: {
+          kdf?: { algorithm: "pbkdf2" | "argon2id"; iterations?: number; salt?: string; memoryKiB?: number; parallelism?: number };
+          hardwarePlaceholder?: boolean;
+        },
+      ) => Promise<{
+        ok: true;
+        mode: "safeStorage" | "plain" | "password";
+        kdf?: { algorithm: "pbkdf2" | "argon2id"; iterations?: number; salt?: string; memoryKiB?: number; parallelism?: number };
+        records?: number;
+        hardwarePlaceholder?: boolean;
+      }>;
       disablePasswordMode: () => Promise<{ ok: true; mode: "safeStorage" | "plain" | "password" }>;
       exportVault: () => Promise<{
         ok: true;
@@ -72,6 +83,7 @@ declare global {
         bytes: number;
         createdAt: string;
         recordCount: number;
+        hardwarePlaceholder?: boolean;
         kdf?: {
           algorithm: "pbkdf2" | "argon2id";
           iterations?: number;
@@ -82,10 +94,48 @@ declare global {
           version?: number;
         };
       }>;
-      importVault: (bundle: unknown, password?: string) => Promise<{ ok: true; mode: string; records: number }>;
+      importVault: (
+        bundle: unknown,
+        password?: string,
+      ) => Promise<{
+        ok: true;
+        mode: string;
+        records: number;
+        kdf?: { algorithm: "pbkdf2" | "argon2id"; iterations?: number; salt?: string; memoryKiB?: number; parallelism?: number };
+        hardwarePlaceholder?: boolean;
+      }>;
       scanIntegrity: (
         password?: string,
       ) => Promise<{ ok: true; scanned: number; failed: { id: string; error: string }[]; durationMs: number; recordCount: number }>;
+      repairRecord: (
+        id: string,
+        options?: { strategy?: "rewrap" | "quarantine"; deleteAfter?: boolean },
+      ) => Promise<{ ok: true; repaired: boolean; quarantinedPath?: string; removed?: boolean; message?: string }>;
+      setHardwarePlaceholder: (enabled: boolean) => Promise<{ ok: true; hardwarePlaceholder: boolean }>;
+      telemetry: (event: { event: string; at?: string; detail?: Record<string, unknown> }) => Promise<{ ok: true }>;
+      lock: () => Promise<{ ok: true; locked: boolean; lockedAt: string }>;
     };
+    updates?: {
+      onStatus: (
+        listener: (
+          status:
+            | { status: "disabled" }
+            | { status: "checking" }
+            | { status: "available"; info: unknown }
+            | { status: "idle"; info?: unknown }
+            | { status: "downloading"; progress: unknown }
+            | { status: "downloaded"; info: unknown }
+            | { status: "error"; message: string },
+        ) => void,
+      ) => () => void;
+      checkNow: () => Promise<unknown>;
+      quitAndInstall: () => Promise<{ installed: boolean; reason?: string }>;
+    };
+  }
+
+  // Vite asset imports with ?url in TSX
+  declare module "*.css?url" {
+    const url: string;
+    export default url;
   }
 }
