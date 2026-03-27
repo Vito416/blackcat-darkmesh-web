@@ -5,6 +5,7 @@ Cross‑platform desktop shell for blackcat write:
 - **Electron + Vite + React + TypeScript**
 - **SQLite (better-sqlite3) + Y.js** (planned) for offline state
 - **@permaweb/aoconnect** for AO deploy (to be wired)
+- **Roadmap:** see [../ROADMAP.md](../ROADMAP.md) for phased plans.
 
 ## Commands (after `npm install`)
 

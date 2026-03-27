@@ -308,6 +308,25 @@ export async function setupPage(page: Page, options: SetupOptions = {}) {
   });
 }
 
+// In CI some sticky layers (top bar, quick cards, canvases) occasionally intercept clicks.
+// Use sparingly within tests that need deterministic pointer behavior.
+export async function suppressPointerInterceptors(page: Page) {
+  await page.addStyleTag({
+    content: `
+      .top-bar,
+      .panels,
+      .quick-card-title-row,
+      .cyber-block-canvas,
+      .pill,
+      .chip,
+      .filter-row,
+      .app-shell {
+        pointer-events: none !important;
+      }
+    `,
+  });
+}
+
 export async function goHome(page: Page, attempts = 3) {
   for (let i = 0; i < attempts; i += 1) {
     try {

@@ -12,6 +12,7 @@
     "dev:main": "cross-env NODE_ENV=development electron dist/desktop/src/main.js",
     "watch:main": "tsc -p tsconfig.json --outDir dist --watch",
     "build": "npm run clean && npm run build:themes && npm run build:renderer && npm run build:main",
+    "build:report": "BUNDLE_REPORT=true npm run build",
     "build:renderer": "vite build",
     "build:themes": "node scripts/build-theme-css.js",
     "build:main": "tsc -p tsconfig.json --outDir dist",

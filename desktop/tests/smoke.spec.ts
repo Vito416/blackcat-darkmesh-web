@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { goHome, setupPage, TEST_PASSWORD } from "./helpers";
+import { goHome, setupPage, suppressPointerInterceptors, TEST_PASSWORD } from "./helpers";
 
 test.describe("Desktop renderer smoke", () => {
   test.beforeEach(async ({ page }) => {
@@ -100,8 +100,7 @@ test.describe("Desktop renderer smoke", () => {
   test("shows draft diff after manifest changes", async ({ page }) => {
     await goHome(page);
 
-    // Prevent sticky header from eating clicks when catalog items are near top.
-    await page.addStyleTag({ content: ".top-bar{pointer-events:none !important;}" });
+    await suppressPointerInterceptors(page);
 
     const titleInput = page.getByTestId("manifest-name-input");
     await titleInput.fill("Diff Baseline");
