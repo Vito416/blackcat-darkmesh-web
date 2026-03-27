@@ -8,11 +8,21 @@ on:
   workflow_dispatch:
 
 jobs:
-  desktop-smoke:
+  desktop-tests:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: desktop
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - name: smoke
+            command: npm run test:smoke -- --project=chromium --reporter=line -- tests/smoke.spec.ts
+          - name: vault
+            command: npm run test:smoke -- --project=chromium --reporter=line -- tests/vault.spec.ts
+          - name: ao
+            command: npm run test:smoke -- --project=chromium --reporter=line -- tests/ao.spec.ts
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,8 +40,8 @@ jobs:
       - name: Install Playwright (chromium)
         run: npx playwright install --with-deps chromium
 
-      - name: Smoke tests (chromium)
-        run: npm run test:smoke -- --project=chromium --reporter=line -- tests/smoke.spec.ts
+      - name: Run ${{ matrix.suite.name }} tests
+        run: ${{ matrix.suite.command }}
 
       - name: Upload bundle report (if present)
         if: always()
