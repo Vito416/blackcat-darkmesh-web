@@ -9844,12 +9844,13 @@ function App() {
                     placeholder={pipVaultSnapshot?.mode === "password" ? "Enter vault password" : "Set a vault password"}
                     aria-label="Vault password"
                     aria-describedby="vault-password-help"
+                    data-testid="vault-password-input"
                   />
                   <button
                     type="button"
                     className="ghost small password-visibility-toggle"
                     onClick={() => setPipVaultPasswordVisible((visible) => !visible)}
-                    aria-label={`${pipVaultPasswordVisible ? "Hide" : "Show"} vault password`}
+                    aria-label="Toggle password visibility"
                   >
                     {pipVaultPasswordVisible ? "Hide" : "Show"}
                   </button>
@@ -9948,7 +9949,7 @@ function App() {
                           type="button"
                           className="ghost small password-visibility-toggle"
                           onClick={() => setVaultResetCurrentVisible((visible) => !visible)}
-                          aria-label={`${vaultResetCurrentVisible ? "Hide" : "Show"} current password`}
+                          aria-label="Toggle current password visibility"
                         >
                           {vaultResetCurrentVisible ? "Hide" : "Show"}
                         </button>
@@ -9971,7 +9972,7 @@ function App() {
                           type="button"
                           className="ghost small password-visibility-toggle"
                           onClick={() => setVaultResetNewVisible((visible) => !visible)}
-                          aria-label={`${vaultResetNewVisible ? "Hide" : "Show"} new password`}
+                          aria-label="Toggle new password visibility"
                         >
                           {vaultResetNewVisible ? "Hide" : "Show"}
                         </button>
@@ -9994,7 +9995,7 @@ function App() {
                           type="button"
                           className="ghost small password-visibility-toggle"
                           onClick={() => setVaultResetConfirmVisible((visible) => !visible)}
-                          aria-label={`${vaultResetConfirmVisible ? "Hide" : "Show"} confirmation`}
+                          aria-label="Toggle confirmation visibility"
                         >
                           {vaultResetConfirmVisible ? "Hide" : "Show"}
                         </button>
@@ -12454,7 +12455,7 @@ function App() {
                   type="button"
                   className="ghost small password-visibility-toggle"
                   onClick={() => setPipVaultPasswordVisible((visible) => !visible)}
-                  aria-label={`${pipVaultPasswordVisible ? "Hide" : "Show"} vault password`}
+                  aria-label="Toggle password visibility"
                 >
                   {pipVaultPasswordVisible ? "Hide" : "Show"}
                 </button>

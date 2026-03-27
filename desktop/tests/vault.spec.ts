@@ -13,7 +13,7 @@ const openVaultPanel = async (page: Page, options?: Parameters<typeof setupPage>
 };
 
 const unlockVault = async (page: Page) => {
-  await page.getByLabel("Vault password").fill(TEST_PASSWORD);
+  await page.getByTestId("vault-password-input").fill(TEST_PASSWORD);
   await page.getByTestId("vault-unlock-btn").click();
   await expect(page.locator(".pip-vault-header-actions")).toContainText("Unlocked");
 };
@@ -54,7 +54,7 @@ test.describe("Vault password and Argon2 UI", () => {
     );
 
     await openVaultPanel(page);
-    await page.getByLabel("Vault password").fill(TEST_PASSWORD);
+    await page.getByTestId("vault-password-input").fill(TEST_PASSWORD);
     await page.getByRole("button", { name: "Run breach check" }).click();
 
     const breachPill = page.locator(".pip-vault-breach .pill");

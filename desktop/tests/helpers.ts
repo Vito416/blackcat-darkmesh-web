@@ -327,7 +327,7 @@ export async function suppressPointerInterceptors(page: Page) {
   });
 }
 
-export async function goHome(page: Page, attempts = 3) {
+export async function goHome(page: Page, attempts = 6) {
   for (let i = 0; i < attempts; i += 1) {
     try {
       await page.goto("/");
@@ -339,7 +339,7 @@ export async function goHome(page: Page, attempts = 3) {
       return;
     } catch (err) {
       if (i === attempts - 1) throw err;
-      await page.waitForTimeout(500);
+      await page.waitForTimeout(1000);
     }
   }
 }

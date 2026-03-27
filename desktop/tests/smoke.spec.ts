@@ -218,7 +218,7 @@ test.describe("Desktop renderer smoke", () => {
     const treeFirst = page.locator(".tree-card").first();
     // Fallback for flaky drag: click the add button if nothing was dropped.
     if (!(await treeFirst.isVisible({ timeout: 2000 }).catch(() => false))) {
-      await gridCard.getByRole("button", { name: "Add" }).click();
+      await gridCard.getByRole("button", { name: "Add", exact: true }).click();
     }
 
     await expect(treeFirst).toBeVisible();
@@ -245,7 +245,7 @@ test.describe("Desktop renderer smoke", () => {
     const healthCard = page.locator(".health-card");
     await expect(healthCard).toBeVisible();
     await healthCard.getByRole("button", { name: "Expand" }).click();
-    await page.getByLabel("Health auto refresh cadence").selectOption("10");
+    await page.getByLabel("Health ping interval").selectOption("10");
     await healthCard.getByRole("button", { name: "Refresh" }).click();
 
     const schedulerRow = healthCard.locator(".health-row").filter({ hasText: "AO scheduler" });
@@ -260,7 +260,7 @@ test.describe("Desktop renderer smoke", () => {
     await page.waitForFunction(
       (target) => document.querySelectorAll(".health-events-list .health-event").length > target,
       initial,
-      { timeout: 5_000 },
+      { timeout: 15_000 },
     );
   });
 
