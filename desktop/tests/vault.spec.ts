@@ -60,6 +60,7 @@ test.describe("Vault password and Argon2 UI", () => {
     const breachPill = page.locator(".pip-vault-breach .pill");
     await expect(breachPill).toContainText("Found in 42 breach entries");
     await expect(page.locator(".pip-vault-breach .hint")).toContainText("Hits: 42");
+    await expect(page.getByTestId("vault-breach-meta")).toContainText("Checked");
   });
 
   test("repairs integrity issues via re-wrap path", async ({ page }) => {
@@ -127,19 +128,23 @@ test.describe("Vault password and Argon2 UI", () => {
   test("remembers unlock and auto-unlocks on reload", async ({ page }) => {
     await openVaultPanel(page);
     const header = page.locator(".pip-vault-header-actions");
+    const rememberHint = page.getByTestId("vault-remember-hint");
 
     await page.getByLabel("Vault password").fill(TEST_PASSWORD);
     await page.getByLabel("Remember unlock for this session").check();
+    await expect(rememberHint).toHaveText(/(will cache after unlock|auto-unlock ready)/i);
     await expect.poll(async () => page.evaluate(() => window.sessionStorage.getItem("pip-vault-remember-password"))).toBe(
       REMEMBERED_PASSWORD_B64,
     );
 
     await page.getByTestId("vault-unlock-btn").click();
     await expect(header).toContainText("Unlocked");
+    await expect(rememberHint).toHaveText(/auto-unlock ready/i);
 
     await page.reload();
     await page.getByRole("button", { name: "Data Core" }).click();
     const reloadedHeader = page.locator(".pip-vault-header-actions");
     await expect(reloadedHeader).toContainText("Unlocked", { timeout: 7000 });
+    await expect(page.getByTestId("vault-remember-hint")).toHaveText(/auto-unlock ready/i, { timeout: 7000 });
   });
 });

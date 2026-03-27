@@ -1384,6 +1384,8 @@ const blockShapeForType = (type: string): CatalogShape => {
   return "grid";
 };
 
+const quickTagFilters = ["marketing", "data", "media", "commerce", "support"] as const;
+
 const quickShapeFilters = [
   { id: "hero", label: "Hero", sampleType: "block.hero", hint: "Headlines & CTA" },
   { id: "cta", label: "CTA", sampleType: "block.cta", hint: "Banners & prompts" },
@@ -2297,6 +2299,7 @@ function App() {
   const [pipVaultBreachStatus, setPipVaultBreachStatus] = useState<BreachCheckStatus>("idle");
   const [pipVaultBreachMessage, setPipVaultBreachMessage] = useState<string | null>(null);
   const [pipVaultBreachCount, setPipVaultBreachCount] = useState<number | null>(null);
+  const [pipVaultBreachCheckedAt, setPipVaultBreachCheckedAt] = useState<string | null>(null);
   type PipVaultTaskKind = "import" | "export" | "unlock" | "records-export" | "integrity";
   const [pipVaultTask, setPipVaultTask] = useState<{
     kind: PipVaultTaskKind;
@@ -2961,6 +2964,12 @@ function App() {
     () => (pipVaultRememberUnlock ? readRememberedPassword() : null),
     [pipVaultRememberUnlock, pipVaultPassword, readRememberedPassword],
   );
+  const rememberedUnlockCopy = useMemo(() => {
+    if (!pipVaultRememberUnlock) return "Auto-unlock off";
+    if (rememberedVaultPassword) return "Auto-unlock ready";
+    if (pipVaultPassword.trim()) return "Will cache after unlock";
+    return "Cache after unlock";
+  }, [pipVaultPassword, pipVaultRememberUnlock, rememberedVaultPassword]);
   const breachStatusLabel =
     pipVaultBreachStatus === "checking"
       ? "Checking…"
@@ -2979,6 +2988,7 @@ function App() {
         : pipVaultBreachStatus === "error"
           ? "issue"
           : "ghost";
+  const breachCheckedLabel = pipVaultBreachCheckedAt ? formatTimeShort(pipVaultBreachCheckedAt) : null;
   const vaultKdfLabel = useMemo(
     () => (pipVaultSnapshot?.kdf?.algorithm === "argon2id" ? "Argon2id" : "PBKDF2"),
     [pipVaultSnapshot?.kdf?.algorithm],
@@ -4088,6 +4098,7 @@ function App() {
     setPipVaultBreachStatus("idle");
     setPipVaultBreachMessage(null);
     setPipVaultBreachCount(null);
+    setPipVaultBreachCheckedAt(null);
   }, [pipVaultPassword]);
 
   useEffect(() => {
@@ -4932,6 +4943,7 @@ function App() {
       setPipVaultBreachStatus(status);
       const message = count > 0 ? `Found in ${count.toLocaleString()} breach entries` : "No breach entries found";
       setPipVaultBreachMessage(message);
+      setPipVaultBreachCheckedAt(new Date().toISOString());
       setPipVaultStatus(message);
       flashStatus(message);
       void sendVaultTelemetry({ event: "vault.breachCheck", detail: { status, count } });
@@ -4944,6 +4956,7 @@ function App() {
             : "Breach API unavailable";
       setPipVaultBreachStatus("error");
       setPipVaultBreachMessage(message);
+      setPipVaultBreachCheckedAt(new Date().toISOString());
       setPipVaultStatus(message);
       setPipVaultError(message);
       flashStatus(message);
@@ -8034,6 +8047,24 @@ function App() {
   const hologramActive = previewHologramActive && !prefersReducedMotion;
   const holomapEnabled = workspace === "preview" && highEffects && !prefersReducedMotion;
   const showCyberPreviews = highEffects && !prefersReducedMotion;
+  const deployStatusLabel =
+    deployState === "pending"
+      ? "Deploying"
+      : deployState === "success"
+        ? "Deploy ready"
+        : deployState === "error"
+          ? "Deploy error"
+          : "Deploy idle";
+  const spawnStatusLabel =
+    spawnState === "pending"
+      ? "Spawning"
+      : spawnState === "success"
+        ? "Spawn ready"
+        : spawnState === "error"
+          ? "Spawn error"
+          : "Spawn idle";
+  const deployLiveLabel = deployOutcome || deployStep || deployStatusLabel;
+  const spawnLiveLabel = spawnOutcome || spawnStep || spawnStatusLabel;
   useEffect(() => {
     if (!showCyberPreviews) return;
     let cancelled = false;
@@ -8168,10 +8199,21 @@ function App() {
               />
             </div>
           </div>
-          <div className="theme-picker" title={messages.app.controls.theme} data-hotkey-area="theme">
+          <div
+            className="theme-picker"
+            title={messages.app.controls.theme}
+            data-hotkey-area="theme"
+            role="group"
+            aria-labelledby="theme-picker-label"
+            aria-describedby="theme-picker-desc"
+          >
             <div className="theme-picker-head">
-              <span className="eyebrow">Theme</span>
-              <span className="theme-picker-current">{getThemeLabel(theme)}</span>
+              <span className="eyebrow" id="theme-picker-label">
+                Theme
+              </span>
+              <span className="theme-picker-current" aria-live="polite">
+                {getThemeLabel(theme)}
+              </span>
             </div>
             <div className="theme-select">
               <span className="theme-swatch" aria-hidden />
@@ -8180,6 +8222,7 @@ function App() {
                 value={theme}
                 onChange={(e) => setTheme(resolveTheme(e.target.value))}
                 aria-label={messages.app.controls.theme}
+                aria-describedby="theme-picker-desc"
               >
                 {themePresets.map((preset) => (
                   <option key={preset.id} value={preset.id}>
@@ -8188,6 +8231,9 @@ function App() {
                 ))}
               </select>
             </div>
+            <p className="sr-only" id="theme-picker-desc">
+              Choose a color theme for the app interface.
+            </p>
           </div>
           <label
             className={`toggle effects-toggle ${prefersReducedMotion ? "disabled" : ""}`}
@@ -8666,7 +8712,9 @@ function App() {
                   onClick={() => void openDraftDiffPanel()}
                   onMouseEnter={prefetchDraftDiffPanel}
                   onFocus={prefetchDraftDiffPanel}
-                  aria-label="Open draft diff panel"
+                  aria-label="Open draft diff dialog"
+                  aria-haspopup="dialog"
+                  aria-expanded={draftDiffOpen}
                 >
                   Draft diff
                 </button>
@@ -8766,7 +8814,14 @@ function App() {
                 <button className="ghost small" type="button" onClick={handleSaveRestorePoint} disabled={saving}>
                   Save restore point
                 </button>
-                <button className="ghost small" type="button" onClick={() => void openDraftDiffPanel()}>
+                <button
+                  className="ghost small"
+                  type="button"
+                  onClick={() => void openDraftDiffPanel()}
+                  aria-label="Open draft diff dialog"
+                  aria-haspopup="dialog"
+                  aria-expanded={draftDiffOpen}
+                >
                   Diff
                 </button>
               </div>
@@ -8850,7 +8905,7 @@ function App() {
           describedBy="pip-vault-desc"
           data-hotkey-area="vault"
         >
-          <div className="panel-header">
+          <div className="panel-header neon-hover-glow">
             <div>
               <p className="eyebrow">PIP vault</p>
               <div className="title-with-help">
@@ -8879,6 +8934,12 @@ function App() {
               </span>
               <span className={`pill ${pipVaultLocked ? "issue" : "ghost"}`}>
                 {pipVaultLocked ? "Locked" : "Unlocked"}
+              </span>
+              <span
+                className={`pill ${pipVaultRememberUnlock ? (rememberedVaultPassword ? "accent" : "ghost") : "ghost"}`}
+                data-testid="vault-remember-pill"
+              >
+                {rememberedUnlockCopy}
               </span>
               <span className="pill ghost">{vaultKdfLabel ? `KDF ${vaultKdfLabel}` : "KDF"}</span>
               <span className={`pill ${pipVaultAutoLockMinutes ? "ghost" : "warn"}`}>
@@ -9086,7 +9147,9 @@ function App() {
                   onChange={(e) => handleRememberUnlockToggle(e.target.checked)}
                 />
                 Remember unlock for this session
-                {rememberedVaultPassword ? <span className="remember-hint">Stored for this session</span> : null}
+                <span className="remember-hint" data-testid="vault-remember-hint" aria-hidden="true">
+                  {rememberedUnlockCopy}
+                </span>
               </label>
               <div className={`pip-vault-strength ${pipVaultStrengthClass} ${pipVaultPasswordStrength.score ? "" : "muted"}`}>
                 <div className="strength-meter">
@@ -9110,9 +9173,10 @@ function App() {
             <div className="pip-vault-breach">
               <div className="pip-vault-breach-copy">
                 <span className={`pill ${breachStatusTone}`}>{breachStatusLabel}</span>
-                <span className="hint">
+                <span className="hint" data-testid="vault-breach-meta">
                   {pipVaultBreachMessage ?? "Checks HIBP with k-anonymity; only the SHA-1 prefix leaves this device."}
                   {pipVaultBreachCount != null ? ` · Hits: ${pipVaultBreachCount.toLocaleString()}` : ""}
+                  {breachCheckedLabel ? ` · Checked ${breachCheckedLabel}` : " · Not checked yet"}
                 </span>
               </div>
               <button
@@ -9687,7 +9751,7 @@ function App() {
           aria-label={messages.app.panels.catalog}
           tabIndex={-1}
         >
-          <div className="panel-header">
+          <div className="panel-header neon-hover-glow">
             <div>
               <p className="eyebrow">Catalog</p>
               <h3 id="catalog-heading">Blocks</h3>
@@ -9704,31 +9768,59 @@ function App() {
             />
           </div>
           <div className="filter-chips">
+            <div className="filter-row quick-tag-row">
+              <span className="filter-label">Quick tags</span>
+              <div className="quick-tag-pills">
+                {quickTagFilters.map((tag) => {
+                  const active = activeTags.includes(tag);
+                  return (
+                    <button
+                      key={tag}
+                      className={`chip quick ${active ? "active" : ""}`}
+                      onClick={() => toggleTagFilter(tag)}
+                      type="button"
+                      aria-pressed={active}
+                      data-testid={`quick-tag-chip-${tag}`}
+                    >
+                      #{tag}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
             <div className="filter-row">
               <span className="filter-label">Types</span>
-              {catalogTypes.map((type) => (
-                <button
-                  key={type}
-                  className={`chip ${activeTypes.includes(type) ? "active" : ""}`}
-                  onClick={() => toggleTypeFilter(type)}
-                  type="button"
-                >
-                  {type.replace(/^block\./, "")}
-                </button>
-              ))}
+              {catalogTypes.map((type) => {
+                const active = activeTypes.includes(type);
+                return (
+                  <button
+                    key={type}
+                    className={`chip ${active ? "active" : ""}`}
+                    onClick={() => toggleTypeFilter(type)}
+                    type="button"
+                    aria-pressed={active}
+                  >
+                    {type.replace(/^block\./, "")}
+                  </button>
+                );
+              })}
             </div>
             <div className="filter-row">
               <span className="filter-label">Tags</span>
-              {catalogTags.map((tag) => (
-                <button
-                  key={tag}
-                  className={`chip ${activeTags.includes(tag) ? "active" : ""}`}
-                  onClick={() => toggleTagFilter(tag)}
-                  type="button"
-                >
-                  {tag}
-                </button>
-              ))}
+              {catalogTags.map((tag) => {
+                const active = activeTags.includes(tag);
+                return (
+                  <button
+                    key={tag}
+                    className={`chip ${active ? "active" : ""}`}
+                    onClick={() => toggleTagFilter(tag)}
+                    type="button"
+                    aria-pressed={active}
+                  >
+                    {tag}
+                  </button>
+                );
+              })}
             </div>
             {(activeTypes.length > 0 || activeTags.length > 0) && (
               <button
@@ -9763,7 +9855,7 @@ function App() {
                 return (
                   <button
                     key={shape.id}
-                    className={`quick-card ${active ? "active" : ""}`}
+                    className={`quick-card neon-hover-glow ${active ? "active" : ""}`}
                     type="button"
                     onClick={() => setQuickShape(active ? null : shape.id)}
                   >
@@ -9877,7 +9969,7 @@ function App() {
           aria-label={messages.app.panels.preview}
           tabIndex={-1}
         >
-          <div className="panel-header">
+          <div className="panel-header neon-hover-glow">
             <div>
               <p className="eyebrow">Preview</p>
               <h3 id="composition-heading">Composition</h3>
@@ -10091,7 +10183,7 @@ function App() {
           aria-label={messages.app.panels.inspector}
           tabIndex={-1}
         >
-          <div className="panel-header">
+          <div className="panel-header neon-hover-glow">
             <div>
               <p className="eyebrow">Inspector</p>
               <h3 id="inspector-heading">Properties</h3>
@@ -10478,7 +10570,7 @@ function App() {
         describedBy="ao-wizard-desc"
         data-hotkey-area="wizard"
       >
-        <div className="panel-header">
+        <div className="panel-header neon-hover-glow">
           <div>
             <p className="eyebrow">AO deploy</p>
             <h3 id="ao-wizard-heading">Wallet · Module · Process</h3>
@@ -10488,27 +10580,31 @@ function App() {
           </div>
           <div className="deploy-chips">
             {offlineMode && (
-              <span className="progress-chip offline" title="Offline mode blocks network actions">
+              <span
+                className="progress-chip offline"
+                title="Offline mode blocks network actions"
+                role="status"
+                aria-live="polite"
+                aria-label="Offline mode enabled; network actions are blocked"
+              >
                 Offline
               </span>
             )}
-            <span className={`progress-chip ${deployState}`}>
-              {deployState === "pending"
-                ? "Deploying"
-                : deployState === "success"
-                  ? "Deploy ready"
-                  : deployState === "error"
-                    ? "Deploy error"
-                    : "Deploy idle"}
+            <span
+              className={`progress-chip ${deployState}`}
+              role="status"
+              aria-live="polite"
+              aria-label={`Deploy status: ${deployStatusLabel}`}
+            >
+              {deployStatusLabel}
             </span>
-            <span className={`progress-chip ${spawnState}`}>
-              {spawnState === "pending"
-                ? "Spawning"
-                : spawnState === "success"
-                  ? "Spawn ready"
-                  : spawnState === "error"
-                    ? "Spawn error"
-                    : "Spawn idle"}
+            <span
+              className={`progress-chip ${spawnState}`}
+              role="status"
+              aria-live="polite"
+              aria-label={`Spawn status: ${spawnStatusLabel}`}
+            >
+              {spawnStatusLabel}
             </span>
             <div className="pill ghost">
               {deployedModuleTx
@@ -10788,6 +10884,9 @@ function App() {
                 <span
                   className={`progress-chip inline ${deployState}`}
                   data-testid="ao-deploy-status"
+                  role="status"
+                  aria-live="polite"
+                  aria-label={`Deploy status: ${deployLiveLabel}`}
                 >
                   {deployOutcome || deployStep}
                 </span>
@@ -10893,7 +10992,13 @@ function App() {
                 {spawning ? "Spawning…" : "Spawn process"}
               </button>
               {(spawnOutcome || spawnStep) && (
-                <span className={`progress-chip inline ${spawnState}`} data-testid="ao-spawn-status">
+                <span
+                  className={`progress-chip inline ${spawnState}`}
+                  data-testid="ao-spawn-status"
+                  role="status"
+                  aria-live="polite"
+                  aria-label={`Spawn status: ${spawnLiveLabel}`}
+                >
                   {spawnOutcome || spawnStep}
                 </span>
               )}

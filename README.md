@@ -4,7 +4,9 @@
 ![Web Banner](.github/blackcat-darkmesh-web-banner.jpg)
 
 ## Dev tips
-- **Bundle report (desktop UI)**: `cd desktop && npm run build:report` (creates `dist/renderer/bundle-report.html`).
+- **CI matrix**: `smoke` (Playwright + artifact upload), `vault` (sealed/vaulted creds), `ao` (AO harness) in `.github/workflows/ci.yml`.
+- **Bundle report (desktop UI)**: `cd desktop && BUNDLE_REPORT=1 npm run build:report` (creates `dist/renderer/bundle-report.html`).
+- **Neon hover utility**: add `class="neon-hover-glow"` (optional `--neon-hover-gradient`) for gradient hover/focus states across cyberpunk themes.
 - **Playwright install faster**: set `PLAYWRIGHT_SKIP_DOWNLOAD=1` if Chromium is preinstalled; otherwise `npx playwright install --with-deps chromium`.
 - **Headless on Linux CI**: `xvfb-run npm run test:smoke -- --project=chromium`.
 

@@ -8,7 +8,8 @@ Cross‑platform desktop shell for blackcat write:
 - **Roadmap:** see [../ROADMAP.md](../ROADMAP.md) for phased plans.
 
 ## Dev tips
-- Bundle report: `npm run build:report` (writes `dist/renderer/bundle-report.html` when `BUNDLE_REPORT=true`).
+- Bundle report: `BUNDLE_REPORT=1 npm run build:report` (writes `dist/renderer/bundle-report.html`).
+- Neon hover utility: add `class="neon-hover-glow"`; override `--neon-hover-gradient` per theme if needed.
 - Faster Playwright install: export `PLAYWRIGHT_SKIP_DOWNLOAD=1` if Chromium is already available.
 - Headless on Linux: `xvfb-run npm run test:smoke -- --project=chromium`.
 
@@ -44,7 +45,7 @@ npm run lint          # eslint (placeholder)
 - Draft release notes template lives at `templates/RELEASE_NOTES_TEMPLATE.md` — copy/fill for each release before uploading artifacts.
 
 ### CI
-- `.github/workflows/ci.yml` now uploads platform build artifacts (`release/`) for macOS, Windows, and Linux after Playwright smoke tests. Builds run `npm run package:<platform>` with `--publish=never` so nothing is pushed automatically.
+- Matrix runs `smoke` (Playwright + artifact upload), `vault` (sealed secrets), and `ao` (AO harness). Artifacts for macOS/Windows/Linux come from the `smoke` leg; builds run `npm run package:<platform>` with `--publish=never`.
 
 ### PIP worker env (renderer + main)
 

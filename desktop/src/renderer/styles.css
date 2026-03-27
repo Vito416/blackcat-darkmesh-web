@@ -604,54 +604,76 @@ body::before {
   background: var(--selection);
 }
 
-.neon-hover-glow {
+:where(.neon-hover-glow, button.primary, button.ghost, .quick-card, .panel-header) {
   position: relative;
   isolation: isolate;
+  --neon-hover-spread: 18px;
+  --neon-hover-gradient: var(--neon-gradient-aurora);
   transition:
     transform var(--motion-duration-fast) var(--motion-ease-standard),
     box-shadow var(--motion-duration-fast) var(--motion-ease-standard),
     filter var(--motion-duration-fast) var(--motion-ease-standard);
 }
 
-.neon-hover-glow::after {
+:where(.neon-hover-glow, button.primary, button.ghost, .quick-card, .panel-header)::after {
   content: "";
   position: absolute;
-  inset: -18px;
+  inset: calc(-1 * var(--neon-hover-spread));
   border-radius: inherit;
-  background: var(--neon-hover-gradient, var(--neon-gradient-aurora));
+  background: var(--neon-hover-gradient);
   opacity: 0;
-  filter: blur(26px);
+  filter: blur(calc(var(--neon-hover-spread) * 1.45));
   z-index: -1;
   pointer-events: none;
   transition: opacity var(--motion-duration-fast) var(--motion-ease-standard);
 }
 
-.neon-hover-glow:hover,
-.neon-hover-glow:focus-visible {
+:where(.neon-hover-glow, button.primary, button.ghost, .quick-card, .panel-header):hover,
+:where(.neon-hover-glow, button.primary, button.ghost, .quick-card, .panel-header):focus-visible {
   transform: translateY(-1px);
   box-shadow: var(--hover-glow);
   filter: drop-shadow(0 12px 28px rgba(var(--accent-rgb), 0.18));
 }
 
-.neon-hover-glow:hover::after,
-.neon-hover-glow:focus-visible::after {
+:where(.neon-hover-glow, button.primary, button.ghost, .quick-card, .panel-header):hover::after,
+:where(.neon-hover-glow, button.primary, button.ghost, .quick-card, .panel-header):focus-visible::after {
   opacity: 0.7;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .neon-hover-glow {
+  :where(.neon-hover-glow, button.primary, button.ghost, .quick-card, .panel-header) {
     transition: box-shadow 160ms ease;
   }
 
-  .neon-hover-glow:hover,
-  .neon-hover-glow:focus-visible {
+  :where(.neon-hover-glow, button.primary, button.ghost, .quick-card, .panel-header):hover,
+  :where(.neon-hover-glow, button.primary, button.ghost, .quick-card, .panel-header):focus-visible {
     transform: none;
     filter: none;
   }
 
-  .neon-hover-glow::after {
+  :where(.neon-hover-glow, button.primary, button.ghost, .quick-card, .panel-header)::after {
     transition: opacity 160ms ease;
   }
+}
+
+button.primary,
+button.ghost,
+.quick-card,
+.panel-header {
+  --neon-hover-gradient: var(--neon-gradient);
+}
+
+button.primary,
+button.ghost {
+  --neon-hover-spread: 14px;
+}
+
+.quick-card {
+  --neon-hover-spread: 15px;
+}
+
+.panel-header {
+  --neon-hover-spread: 12px;
 }
 
 .cursor-trail-layer {
@@ -1037,6 +1059,8 @@ body::before {
 
 .theme-select select:focus-visible {
   border-color: rgba(var(--accent-rgb), 0.5);
+  outline: 2px solid rgba(var(--accent-rgb), 0.7);
+  outline-offset: 2px;
   box-shadow: var(--focus-glow);
 }
 
@@ -2013,7 +2037,8 @@ button:active {
 }
 
 button:focus-visible {
-  outline: 2px solid transparent;
+  outline: 2px solid rgba(var(--accent-rgb), 0.8);
+  outline-offset: 2px;
   box-shadow: var(--focus-glow-strong, var(--focus-glow));
 }
 
@@ -2873,6 +2898,21 @@ button[disabled] {
   }
   to {
     transform: translateX(120%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pip-vault-progress-bar .fill {
+    animation: none;
+    transition: none;
+  }
+
+  .pip-vault-progress-bar .fill.has-progress {
+    transition: none;
+  }
+
+  .pip-vault-strength .strength-meter span {
+    transition: none;
   }
 }
 
@@ -4938,6 +4978,17 @@ button.tiny {
   align-items: center;
 }
 
+.filter-row.quick-tag-row {
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.quick-tag-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .filter-label {
   font-size: 12px;
   font-weight: 800;
@@ -4957,6 +5008,13 @@ button.tiny {
   transition: transform 120ms ease, border-color 120ms ease, background 120ms ease, color 120ms ease;
 }
 
+.chip:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-glow);
+  border-color: var(--accent-ring);
+  transform: translateY(-1px);
+}
+
 .chip:hover {
   border-color: rgba(14, 165, 233, 0.3);
   color: var(--accent);
@@ -4967,6 +5025,15 @@ button.tiny {
   border-color: rgba(var(--accent-rgb), 0.28);
   color: var(--ink-strong);
   box-shadow: 0 8px 18px rgba(var(--accent-rgb), 0.12);
+}
+
+.chip.quick {
+  background: linear-gradient(120deg, rgba(var(--accent-rgb), 0.1), rgba(var(--accent-strong-rgb), 0.08));
+  border-color: rgba(var(--accent-rgb), 0.32);
+}
+
+.chip.quick.active {
+  box-shadow: 0 10px 22px rgba(var(--accent-rgb), 0.16);
 }
 
 .chip.severity-success.active {

@@ -40,6 +40,31 @@ test.describe("Desktop renderer smoke", () => {
     }
   });
 
+  test("shows quick tag filter pills that respond to keyboard focus", async ({ page }) => {
+    await goHome(page);
+
+    const catalogItems = page.locator(".catalog-item");
+    await catalogItems.first().waitFor({ timeout: 10_000 });
+
+    const marketingQuick = page.getByTestId("quick-tag-chip-marketing");
+    await expect(marketingQuick).toBeVisible();
+
+    await marketingQuick.focus();
+    await expect(marketingQuick).toBeFocused();
+    await page.keyboard.press("Enter");
+
+    await expect(marketingQuick).toHaveClass(/active/);
+    await page.waitForFunction(() => {
+      const cards = Array.from(document.querySelectorAll(".catalog-item"));
+      const tagBlocks = Array.from(document.querySelectorAll(".catalog-item .tags"));
+      return (
+        cards.length > 0 &&
+        tagBlocks.length === cards.length &&
+        tagBlocks.every((el) => (el.textContent || "").toLowerCase().includes("marketing"))
+      );
+    });
+  });
+
   test("loads AO console log panel", async ({ page }) => {
     await goHome(page);
     const aoButton = page.getByRole("button", { name: "AO Console" });

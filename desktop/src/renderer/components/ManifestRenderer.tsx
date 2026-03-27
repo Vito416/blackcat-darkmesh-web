@@ -330,7 +330,7 @@ const RenderBranch: React.FC<{
             {canApplyDefaults && (
               <button
                 type="button"
-                className="ghost small node-quick-action"
+                className="ghost small node-quick-action neon-hover-glow"
                 title="Apply defaults to this node"
                 onClick={(event) => {
                   event.stopPropagation();
@@ -344,7 +344,7 @@ const RenderBranch: React.FC<{
             {reviewMode && onRequestComment && (
               <button
                 type="button"
-                className="ghost small node-quick-action"
+                className="ghost small node-quick-action neon-hover-glow"
                 title="Add a review comment"
                 onClick={(event) => {
                   event.stopPropagation();
