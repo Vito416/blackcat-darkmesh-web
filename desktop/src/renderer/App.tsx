@@ -2310,6 +2310,10 @@ function App() {
   const [pipVaultKdfProfile, setPipVaultKdfProfile] = useState<PipVaultKdfProfile>(() => loadKdfProfile());
   const [pipVaultError, setPipVaultError] = useState<string | null>(null);
   const [pipVaultPasswordError, setPipVaultPasswordError] = useState<string | null>(null);
+  const [lastVaultError, setLastVaultError] = useState<{ message: string; at: string } | null>(null);
+  const [pipVaultAuthPrompt, setPipVaultAuthPrompt] = useState<{ mode: "unlock" | "enable"; reason?: string } | null>(
+    null,
+  );
   const [pipVaultBreachStatus, setPipVaultBreachStatus] = useState<BreachCheckStatus>("idle");
   const [pipVaultBreachMessage, setPipVaultBreachMessage] = useState<string | null>(null);
   const [pipVaultBreachCount, setPipVaultBreachCount] = useState<number | null>(null);
@@ -2508,6 +2512,7 @@ function App() {
   const wizardModuleRef: React.RefObject<HTMLTextAreaElement> = useRef<HTMLTextAreaElement>(null);
   const wizardSpawnRef = useRef<HTMLInputElement>(null);
   const vaultPasswordRef = useRef<HTMLInputElement>(null);
+  const vaultAuthInputRef = useRef<HTMLInputElement>(null);
   const vaultFilterRef = useRef<HTMLInputElement>(null);
   const healthCardRef = useRef<HTMLDivElement>(null);
   const healthFailureInputRef = useRef<HTMLInputElement>(null);
@@ -2759,6 +2764,7 @@ function App() {
       ),
     [activeTags, activeTypes, catalog, quickShape],
   );
+  const paletteCatalog = useMemo(() => visibleCatalog.slice(0, 8), [visibleCatalog]);
   const manifestValidation = useMemo(() => {
     const byId: Record<string, NodeValidationSummary> = {};
     const issues: ManifestIssue[] = [];
@@ -2984,6 +2990,45 @@ function App() {
     if (pipVaultPassword.trim()) return "Will cache after unlock";
     return "Cache after unlock";
   }, [pipVaultPassword, pipVaultRememberUnlock, rememberedVaultPassword]);
+  useEffect(() => {
+    if (pipVaultError) {
+      setLastVaultError({ message: pipVaultError, at: new Date().toISOString() });
+    }
+  }, [pipVaultError]);
+  useEffect(() => {
+    if (!pipVaultAuthPrompt) return;
+    const timer = window.setTimeout(() => vaultAuthInputRef.current?.focus(), 80);
+    return () => window.clearTimeout(timer);
+  }, [pipVaultAuthPrompt]);
+  const validateVaultPassword = useCallback(
+    (intent: "unlock" | "enable", raw?: string) => {
+      const password = (raw ?? pipVaultPassword).trim();
+      const strength = evaluatePasswordStrength(password);
+      const usingRemembered =
+        intent === "unlock" && !password && pipVaultSnapshot?.mode === "password" && rememberedVaultPassword;
+
+      if (!password && !usingRemembered) {
+        const message = intent === "enable" ? "Enter a vault password first" : "Enter the vault password to unlock";
+        setPipVaultPasswordError(message);
+        return false;
+      }
+
+      if (intent === "enable") {
+        if (password.length < 14) {
+          setPipVaultPasswordError("Use at least 14 characters for vault password mode");
+          return false;
+        }
+        if (strength.score < 2) {
+          setPipVaultPasswordError("Password is too weak—aim for Fair or stronger");
+          return false;
+        }
+      }
+
+      setPipVaultPasswordError(null);
+      return true;
+    },
+    [pipVaultPassword, pipVaultSnapshot?.mode, rememberedVaultPassword],
+  );
   const breachStatusLabel =
     pipVaultBreachStatus === "checking"
       ? "Checking…"
@@ -3356,6 +3401,7 @@ function App() {
         .filter(Boolean) as { id: string; label: string; value: number }[],
     [health],
   );
+  const latestHealthError = useMemo(() => getLatestHealthError(health), [health]);
   const healthAlertCopy = useMemo(
     () =>
       healthSummary.failing
@@ -3712,6 +3758,20 @@ function App() {
     [],
   );
 
+  const openVaultAuthPrompt = useCallback(
+    (mode: "unlock" | "enable", reason?: string) => {
+      setPipVaultPasswordError(null);
+      setPipVaultAuthPrompt({ mode, reason });
+      flashStatus(mode === "unlock" ? "Vault locked—enter password" : "Encrypt the vault with a password");
+    },
+    [flashStatus],
+  );
+
+  const closeVaultAuthPrompt = useCallback(() => {
+    setPipVaultAuthPrompt(null);
+    setPipVaultPasswordError(null);
+  }, []);
+
   const refreshPipVaultRecords = useCallback(async () => {
     setPipVaultRecordsLoading(true);
     try {
@@ -3735,6 +3795,8 @@ function App() {
     setPipVaultTask(null);
     setPipVaultStatus(null);
     setPipVaultPasswordError(null);
+    setPipVaultAuthPrompt(null);
+    setLastVaultError(null);
     setPipVaultBusy(false);
     setPipVaultPassword("");
     setPipVaultSnapshot(null);
@@ -4726,6 +4788,7 @@ function App() {
       setPipVaultStatus(message);
       setPipVaultError(message);
       flashStatus(message);
+      openVaultAuthPrompt("unlock", "Unlock to load a PIP from the vault");
       return;
     }
 
@@ -4776,6 +4839,7 @@ function App() {
       setPipVaultStatus(message);
       setPipVaultError(message);
       flashStatus(message);
+      openVaultAuthPrompt("unlock", "Unlock to save this PIP into the vault");
       return;
     }
 
@@ -4880,6 +4944,14 @@ function App() {
       },
       onError: setVaultWizardImportError,
     });
+  };
+
+  const handleQuickVaultExport = () => {
+    void handleExportVaultBundle({ source: "panel" });
+  };
+
+  const handleQuickVaultImport = () => {
+    handleImportVaultBundle(undefined, { source: "panel" });
   };
 
   function handleExportPipVaultRecords() {
@@ -5031,6 +5103,7 @@ function App() {
       setPipVaultStatus(message);
       setPipVaultError(message);
       flashStatus(message);
+      openVaultAuthPrompt("unlock", "Unlock to delete the vault safely");
       return;
     }
 
@@ -5061,6 +5134,7 @@ function App() {
       setPipVaultStatus(message);
       setPipVaultError(message);
       flashStatus(message);
+      openVaultAuthPrompt("unlock", "Unlock to load saved vault records");
       return;
     }
 
@@ -5097,6 +5171,7 @@ function App() {
       setPipVaultStatus(message);
       setPipVaultError(message);
       flashStatus(message);
+      openVaultAuthPrompt("unlock", "Unlock to delete vault records");
       return;
     }
 
@@ -5135,6 +5210,7 @@ function App() {
       setPipVaultStatus(message);
       setPipVaultError(message);
       flashStatus(message);
+      openVaultAuthPrompt("unlock", "Unlock to repair vault issues");
       return;
     }
 
@@ -5182,14 +5258,14 @@ function App() {
   };
 
   const runEnableVaultPassword = useCallback(
-    async (password: string, options?: { auto?: boolean }) => {
+    async (password: string, options?: { auto?: boolean }): Promise<boolean> => {
       const trimmed = password.trim();
       if (!trimmed) {
         setPipVaultPasswordError("Enter a vault password first");
         if (!options?.auto) {
           flashStatus("Enter a vault password first");
         }
-        return;
+        return false;
       }
 
       setPipVaultPasswordError(null);
@@ -5222,7 +5298,7 @@ function App() {
             flashStatus(result.error);
           }
           rememberPasswordForSession(null, false);
-          return;
+          return false;
         }
 
         const message =
@@ -5255,6 +5331,7 @@ function App() {
             hardwarePlaceholder: result.hardwarePlaceholder ?? pipVaultHardwarePlaceholder,
           },
         });
+        return true;
       } catch (err) {
         const message = err instanceof Error ? err.message : "Unable to enable password";
         setPipVaultStatus(null);
@@ -5263,13 +5340,16 @@ function App() {
           flashStatus(message);
         }
         rememberPasswordForSession(null, false);
+        return false;
       } finally {
         setPipVaultBusy(false);
         setPipVaultTask(null);
       }
+      return false;
     },
     [
       enableVaultPassword,
+      flashStatus,
       markVaultActivity,
       pipVaultSnapshot?.mode,
       pipVaultLocked,
@@ -5282,6 +5362,44 @@ function App() {
       pipVaultKdfProfile.parallelism,
       pipVaultHardwarePlaceholder,
       sendVaultTelemetry,
+    ],
+  );
+
+  const runVaultPasswordFlow = useCallback(
+    async (intent?: "unlock" | "enable", passwordOverride?: string) => {
+      const action = intent ?? (pipVaultSnapshot?.mode === "password" ? "unlock" : "enable");
+      const rawPassword = (passwordOverride ?? pipVaultPassword).trim();
+      const usingRemembered =
+        action === "unlock" && !rawPassword && pipVaultSnapshot?.mode === "password" && rememberedVaultPassword;
+      const resolvedPassword = usingRemembered ? rememberedVaultPassword ?? "" : rawPassword;
+
+      if (!validateVaultPassword(action, resolvedPassword)) {
+        flashStatus(action === "enable" ? "Use a stronger vault password" : "Enter the vault password to unlock");
+        return false;
+      }
+
+      if (pipVaultSnapshot && pipVaultSnapshot.mode !== "password" && action !== "unlock") {
+        setPipVaultModeConfirm({ action: "enable", password: resolvedPassword });
+        setPipVaultAuthPrompt(null);
+        return false;
+      }
+
+      flashStatus(action === "unlock" ? "Unlocking vault…" : "Enabling password mode…");
+      const ok = await runEnableVaultPassword(resolvedPassword);
+      if (ok) {
+        setPipVaultAuthPrompt(null);
+      }
+      return ok;
+    },
+    [
+      flashStatus,
+      pipVaultPassword,
+      pipVaultSnapshot,
+      rememberedVaultPassword,
+      runEnableVaultPassword,
+      setPipVaultModeConfirm,
+      setPipVaultAuthPrompt,
+      validateVaultPassword,
     ],
   );
 
@@ -5319,23 +5437,11 @@ function App() {
       setPipVaultBusy(false);
       setPipVaultTask(null);
     }
-  }, [disableVaultPassword, rememberPasswordForSession, refreshPipVaultRecords, refreshPipVaultSnapshot, stopVaultAutoLock]);
+  }, [disableVaultPassword, flashStatus, rememberPasswordForSession, refreshPipVaultRecords, refreshPipVaultSnapshot, stopVaultAutoLock]);
 
-  const handleEnableVaultPassword = async () => {
-    const password = pipVaultPassword.trim();
-    if (!password && pipVaultSnapshot?.mode !== "password") {
-      setPipVaultPasswordError("Enter a vault password first");
-      flashStatus("Enter a vault password first");
-      return;
-    }
-
-    if (pipVaultSnapshot && pipVaultSnapshot.mode !== "password") {
-      setPipVaultModeConfirm({ action: "enable", password });
-      return;
-    }
-
-    await runEnableVaultPassword(password);
-  };
+  const handleEnableVaultPassword = useCallback(async () => {
+    await runVaultPasswordFlow();
+  }, [runVaultPasswordFlow]);
 
   const handleDisableVaultPassword = () => {
     setPipVaultModeConfirm({ action: "disable" });
@@ -5399,6 +5505,7 @@ function App() {
 
   const handleExportVaultBundle = async (options?: VaultExportOptions) => {
     if (pipVaultBusy) return;
+    flashStatus("Exporting vault backup…");
     const startedAt = new Date().toISOString();
     setPipVaultError(null);
     setPipVaultBusy(true);
@@ -5511,6 +5618,7 @@ function App() {
       setPipVaultPasswordError(null);
       setPipVaultError(null);
       setPipVaultBusy(true);
+      flashStatus("Importing vault backup…");
       try {
         const bundleBytes = payload.bytes ?? new TextEncoder().encode(payload.text).byteLength;
         const startedAt = new Date().toISOString();
@@ -8389,6 +8497,11 @@ function App() {
                         : `Target: < ${slaFailureThreshold} failures • ≤ ${slaLatencyThresholdMs} ms avg`}
                     </span>
                   </div>
+                  {latestHealthError?.lastError && (
+                    <p className="health-last-error" aria-live="polite">
+                      Last error • {latestHealthError.label} · {formatTimeShort(latestHealthError.checkedAt)} — {latestHealthError.lastError}
+                    </p>
+                  )}
                   <p id="health-sla-caption" className="sr-only">
                     Use Alt+Shift+H to focus the failure threshold and Alt+Shift+L to focus the latency threshold inputs.
                   </p>
@@ -8625,6 +8738,28 @@ function App() {
                     )}
                   </div>
                 </div>
+                <div className="health-events health-vault-status">
+                  <div className="health-events-head">
+                    <div>
+                      <p className="eyebrow">Vault</p>
+                      <h5>Latest vault status</h5>
+                    </div>
+                    <span className={`pill ${pipVaultLocked ? "warn" : "ghost"}`}>
+                      {pipVaultLocked ? "Locked" : "Unlocked"}
+                    </span>
+                  </div>
+                  {lastVaultError ? (
+                    <div className="health-last-error">
+                      <strong>Last vault error · {formatTimeShort(lastVaultError.at)}</strong>
+                      <p>{lastVaultError.message}</p>
+                      <button className="ghost small" type="button" onClick={() => setLastVaultError(null)}>
+                        Dismiss
+                      </button>
+                    </div>
+                  ) : (
+                    <p className="health-empty">No vault errors recorded</p>
+                  )}
+                </div>
                 <div className="health-list">
                   {health.length === 0 ? (
                     <p className="health-empty">No checks yet</p>
@@ -8734,7 +8869,10 @@ function App() {
                 >
                   Draft diff
                 </button>
-                <HelpTip copy="Open the draft diff panel to compare the current manifest against a saved draft and cherry-pick differences." />
+                <HelpTip
+                  copy="Open the draft diff panel to compare the current manifest against a saved draft and cherry-pick differences."
+                  label="Manifest comparison help"
+                />
               </div>
               <button
                 className={`ghost icon-lead ${draftDiffDocked ? "accent" : ""}`}
@@ -8834,7 +8972,7 @@ function App() {
                   className="ghost small"
                   type="button"
                   onClick={() => void openDraftDiffPanel()}
-                  aria-label="Open draft diff dialog"
+                  aria-label="Open revision diff dialog"
                   aria-haspopup="dialog"
                   aria-expanded={draftDiffOpen}
                 >
@@ -8926,7 +9064,10 @@ function App() {
               <p className="eyebrow">PIP vault</p>
               <div className="title-with-help">
                 <h3 id="pip-vault-heading">Local vault panel</h3>
-                <HelpTip copy="Manage the encrypted local PIP vault: unlock it, back it up, and restore records safely." />
+                <HelpTip
+                  copy="Manage the encrypted local PIP vault: unlock it, back it up, and restore records safely."
+                  label="Vault overview help"
+                />
               </div>
               <p id="pip-vault-desc" className="sr-only">
                 Vault section with snapshot, password controls, records, and issues. Use Alt+Shift+V to focus the password input and Alt+Shift+F to move to the records filter.
@@ -9031,7 +9172,10 @@ function App() {
                 <p className="eyebrow">Security</p>
                 <div className="title-with-help">
                   <h4>Password & backups</h4>
-                  <HelpTip copy="Enable password mode to encrypt the vault and backups; use the same password when importing an encrypted bundle." />
+                  <HelpTip
+                    copy="Enable password mode to encrypt the vault and backups; use the same password when importing an encrypted bundle."
+                    label="Vault security help"
+                  />
                 </div>
               </div>
               <span className={`pill ${pipVaultSnapshot?.mode === "password" ? "accent" : "ghost"}`}>
@@ -9185,6 +9329,23 @@ function App() {
                   </div>
                 </div>
               </div>
+            </div>
+            <div className="pip-vault-actions">
+              <button
+                className="ghost small"
+                type="button"
+                onClick={() =>
+                  openVaultAuthPrompt(
+                    pipVaultSnapshot?.mode === "password" ? "unlock" : "enable",
+                    pipVaultSnapshot?.mode === "password"
+                      ? "Unlock to manage the vault"
+                      : "Enable password mode with inline validation",
+                  )
+                }
+                disabled={pipVaultBusy}
+              >
+                Open password dialog
+              </button>
             </div>
             <div className="pip-vault-breach">
               <div className="pip-vault-breach-copy">
@@ -9381,6 +9542,24 @@ function App() {
                 disabled={pipVaultBusy || (!pipVaultSnapshot?.exists && !pipVaultRecords.length)}
               >
                 {pipVaultTask?.kind === "export" ? "Exporting…" : "Export backup"}
+              </button>
+            </div>
+            <div className="pip-vault-actions">
+              <button
+                className="ghost small"
+                type="button"
+                onClick={handleQuickVaultImport}
+                disabled={pipVaultBusy || pipVaultLocked}
+              >
+                Quick import (IPC)
+              </button>
+              <button
+                className="ghost small"
+                type="button"
+                onClick={handleQuickVaultExport}
+                disabled={pipVaultBusy || (!pipVaultSnapshot?.exists && !pipVaultRecords.length)}
+              >
+                Quick export (IPC)
               </button>
             </div>
             <div className="pip-vault-integrity-issues">
@@ -9778,9 +9957,11 @@ function App() {
           </div>
           <div className="input-wrap">
             <input
+              type="search"
               placeholder="Search blocks"
               value={search}
               onChange={(e) => handleSearchChange(e.target.value)}
+              aria-label="Search blocks by name, tag, or type"
             />
           </div>
           <div className="filter-chips">
@@ -9900,6 +10081,92 @@ function App() {
               })}
             </div>
           </div>
+          <div className="catalog-palette">
+            <div className="catalog-palette-head">
+              <span className="filter-label">Block placeholders</span>
+              <span className="hint">Drag into the composition or click Add.</span>
+            </div>
+            {catalogLoading ? (
+              <div className="catalog-grid" role="list" aria-label="Loading block placeholders">
+                {quickShapeFilters.slice(0, 6).map((shape, index) => (
+                  <div key={shape.id + index} className="catalog-grid-card skeleton">
+                    <div className="catalog-grid-preview" aria-hidden>
+                      <BlockPlaceholder type={shape.sampleType} />
+                    </div>
+                    <div className="catalog-grid-body">
+                      <LazySkeletonLine width="72%" />
+                      <LazySkeletonLine width="56%" />
+                      <div className="catalog-grid-tags">
+                        <LazySkeletonLine width="42%" />
+                        <LazySkeletonLine width="30%" />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : paletteCatalog.length ? (
+              <div className="catalog-grid" role="list" aria-label="Block placeholder grid">
+                {paletteCatalog.map((item) => (
+                  <article
+                    key={item.id}
+                    className={`catalog-grid-card ${draggedCatalogId === item.id ? "is-dragging" : ""}`}
+                    role="listitem"
+                  >
+                    <div
+                      className="catalog-grid-preview"
+                      draggable
+                      onDragStart={(event) => handleCatalogDragStart(item, event)}
+                      onDragEnd={handleCatalogDragEnd}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Drag ${item.name} into the composition or press Enter to add`}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          addFromCatalog(item);
+                        }
+                      }}
+                    >
+                      <BlockPlaceholder type={item.type} />
+                    </div>
+                    <div className="catalog-grid-body">
+                      <div className="catalog-grid-title">
+                        <strong>{item.name}</strong>
+                        {item.preview?.badge ? <span className="pill ghost micro">{item.preview.badge}</span> : null}
+                      </div>
+                      <p className="catalog-grid-summary">{item.summary}</p>
+                      <div className="catalog-grid-tags" aria-label="Block tags">
+                        <span className="pill ghost micro">{item.type.replace(/^block\./, "")}</span>
+                        {item.tags?.slice(0, 3).map((tag) => (
+                          <span key={tag} className="pill ghost micro">
+                            #{tag}
+                          </span>
+                        ))}
+                      </div>
+                      <div className="catalog-grid-actions">
+                        <button className="primary small" onClick={() => addFromCatalog(item)} type="button">
+                          Add
+                        </button>
+                        <button
+                          className="ghost small"
+                          type="button"
+                          onClick={() =>
+                            setQuickShape((current) =>
+                              current === blockShapeForType(item.type) ? null : blockShapeForType(item.type),
+                            )
+                          }
+                        >
+                          Match shape
+                        </button>
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <p className="hint">No blocks match the current filters.</p>
+            )}
+          </div>
           <div className="catalog-list">
             {catalogLoading ? (
               <div className="catalog-skeleton" role="status" aria-live="polite">
@@ -9968,12 +10235,6 @@ function App() {
                     </button>
                   </div>
                 ))}
-                {visibleCatalog.length === 0 && (
-                  <div className="empty catalog-empty">
-                    <p>No blocks match your filters</p>
-                    <span>Try clearing type, tag, or shape filters.</span>
-                  </div>
-                )}
               </>
             )}
           </div>
@@ -10156,6 +10417,7 @@ function App() {
               className={`composition-dropzone ${manifest.nodes.length ? "inline" : ""} ${compositionDropActive ? "active" : ""}`}
               role="region"
               aria-label="Drop blocks to add to the composition"
+              tabIndex={0}
             >
               <div className="dropzone-copy">
                 <span className="dropzone-badge">Drop here</span>
@@ -10163,9 +10425,9 @@ function App() {
                 <p>Drop a block anywhere in this panel to add it to the manifest.</p>
               </div>
               <div className="dropzone-stack">
-                {renderBlockPreview("block.hero", "compact")}
-                {renderBlockPreview("block.featureGrid", "compact")}
-                {renderBlockPreview("block.gallery", "compact")}
+                {["block.hero", "block.featureGrid", "block.gallery", "block.stats"].map((type) => (
+                  <BlockPlaceholder key={type} type={type} />
+                ))}
               </div>
             </div>
             {manifest.nodes.length > 0 && (
@@ -11376,6 +11638,78 @@ function App() {
                   Done
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pipVaultAuthPrompt && (
+        <div className="pip-vault-modal-backdrop" role="presentation" onClick={closeVaultAuthPrompt}>
+          <div
+            className="pip-vault-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="pip-vault-auth-title"
+            aria-describedby="pip-vault-auth-copy"
+            tabIndex={-1}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <p className="eyebrow">Vault password</p>
+            <h4 id="pip-vault-auth-title">
+              {pipVaultAuthPrompt.mode === "unlock" ? "Unlock vault" : "Enable password mode"}
+            </h4>
+            <p id="pip-vault-auth-copy">
+              {pipVaultAuthPrompt.reason ??
+                (pipVaultAuthPrompt.mode === "unlock"
+                  ? "Enter the vault password to continue. We won't proceed until it passes inline checks."
+                  : "Set a strong password (14+ chars) to encrypt the vault and backups. We'll validate strength before enabling.")}
+            </p>
+            <div className={`pip-vault-password-input ${pipVaultPasswordError ? "has-error" : ""}`}>
+              <input
+                ref={vaultAuthInputRef}
+                type="password"
+                value={pipVaultPassword}
+                onChange={(e) => {
+                  setPipVaultPassword(e.target.value);
+                  if (pipVaultPasswordError) setPipVaultPasswordError(null);
+                }}
+                placeholder={pipVaultAuthPrompt.mode === "unlock" ? "Vault password" : "New vault password"}
+              />
+              {pipVaultPasswordError ? <p className="field-error">{pipVaultPasswordError}</p> : null}
+            </div>
+            <div className="pip-vault-password-meta">
+              <div className={`pip-vault-strength ${pipVaultStrengthClass} ${pipVaultPasswordStrength.score ? "" : "muted"}`}>
+                <div className="strength-meter">
+                  <span style={{ width: `${(pipVaultPasswordStrength.score / 4) * 100}%` }} />
+                </div>
+                <div className="strength-meta">
+                  <strong>{pipVaultPasswordStrength.score ? pipVaultPasswordStrength.label : "Strength"}</strong>
+                  <span>
+                    {pipVaultPasswordStrength.score
+                      ? pipVaultPasswordStrength.hint
+                      : "Use 14+ chars with numbers & symbols."}
+                  </span>
+                </div>
+              </div>
+              <p className="hint">
+                Inline validation runs before unlocking or enabling. You can reuse the remembered password if cached.
+              </p>
+            </div>
+            <div className="pip-vault-modal-actions">
+              <button className="ghost" onClick={closeVaultAuthPrompt}>
+                Cancel
+              </button>
+              <button
+                className="primary"
+                onClick={() => void runVaultPasswordFlow(pipVaultAuthPrompt.mode)}
+                disabled={pipVaultBusy || pipVaultTask?.kind === "unlock"}
+              >
+                {pipVaultTask?.kind === "unlock"
+                  ? "Working…"
+                  : pipVaultAuthPrompt.mode === "unlock"
+                    ? "Unlock vault"
+                    : "Enable password"}
+              </button>
             </div>
           </div>
         </div>

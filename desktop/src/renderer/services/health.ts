@@ -3,7 +3,7 @@ import { resolveEnvWithSettings } from "../storage/settings";
 
 type Fetcher = typeof fetch;
 
-export type HealthId = "gateway" | "worker" | "ao";
+export type HealthId = "gateway" | "worker" | "ao" | "scheduler";
 
 export type HealthState = "ok" | "warn" | "error" | "missing" | "offline";
 
@@ -73,6 +73,14 @@ const resolveWorkerBase = () =>
 
 const resolveAoBase = () => normalizeBase(readEnv("AO_URL"));
 
+const resolveSchedulerBase = () =>
+  normalizeBase(
+    readEnv("SCHEDULER_URL") ??
+      readEnv("AO_SCHEDULER_URL") ??
+      readEnv("AO_SCHEDULER") ??
+      readEnv("SCHEDULER"),
+  );
+
 const resolvePingTimeoutMs = () => {
   const raw =
     readEnv("HEALTH_PING_TIMEOUT_MS") ??
@@ -118,6 +126,19 @@ const buildPingUrl = (base: string, path?: string) => {
   url.pathname = `${prefix}${nextPath}`;
   url.search = "";
   return url.toString();
+};
+
+const tryBuildPingUrl = (base: string | undefined, path?: string): { ok: true; url: string } | { ok: false; error: string } => {
+  if (!base) return { ok: false, error: "Base URL is missing" };
+
+  try {
+    return { ok: true, url: buildPingUrl(base, path) };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Invalid URL",
+    };
+  }
 };
 
 const formatHost = (value?: string) => {
@@ -410,17 +431,44 @@ export async function checkWorkerHealth(fetcher?: Fetcher, options: HealthOption
   const path = readEnv("WORKER_HEALTH_PATH") ?? "/health";
 
   if (options.offline) {
-    return makeOffline("worker", "Worker", base ? buildPingUrl(base, path) : base);
+    return makeOffline("worker", "Worker PIP", base ? buildPingUrl(base, path) : base);
   }
 
   if (!base) {
-    return makeMissing("worker", "Worker", "Set WORKER_PIP_BASE / WORKER_BASE_URL to enable health checks");
+    return makeMissing("worker", "Worker PIP", "Set WORKER_PIP_BASE / WORKER_BASE_URL to enable health checks");
   }
 
   const resolvedFetch = fetcher ?? getDefaultFetch();
   return withRetries(() =>
-    ping("worker", "Worker", buildPingUrl(base, path), resolvedFetch, {
+    ping("worker", "Worker PIP", buildPingUrl(base, path), resolvedFetch, {
       missingDetail: "Set WORKER_PIP_BASE / WORKER_BASE_URL to enable health checks",
+    }),
+  );
+}
+
+export async function checkSchedulerHealth(fetcher?: Fetcher, options: HealthOptions = {}): Promise<HealthStatus> {
+  const base = resolveSchedulerBase();
+  const path = readEnv("SCHEDULER_HEALTH_PATH") ?? readEnv("AO_SCHEDULER_HEALTH_PATH") ?? "/health";
+  const target = base ? tryBuildPingUrl(base, path) : ({ ok: false, error: "Scheduler base URL missing" } as const);
+
+  if (options.offline) {
+    return makeOffline("scheduler", "AO scheduler", target.ok ? target.url : base);
+  }
+
+  if (!base) {
+    return makeMissing("scheduler", "AO scheduler", "Set SCHEDULER_URL / AO_SCHEDULER_URL to enable scheduler checks");
+  }
+
+  if (!target.ok) {
+    const checkedAt = nowIso();
+    const detail = `Invalid scheduler URL: ${target.error}`;
+    return makeError("scheduler", "AO scheduler", base, checkedAt, detail, undefined, detail);
+  }
+
+  const resolvedFetch = fetcher ?? getDefaultFetch();
+  return withRetries(() =>
+    ping("scheduler", "AO scheduler", target.url, resolvedFetch, {
+      missingDetail: "Set SCHEDULER_URL / AO_SCHEDULER_URL to enable scheduler checks",
     }),
   );
 }
@@ -461,6 +509,7 @@ export async function runHealthChecks(fetcher?: Fetcher, options: HealthOptions 
   return Promise.all([
     checkGatewayHealth(resolvedFetch, options),
     checkWorkerHealth(resolvedFetch, options),
+    checkSchedulerHealth(resolvedFetch, options),
     checkAoHealth(resolvedFetch, options),
   ]);
 }
