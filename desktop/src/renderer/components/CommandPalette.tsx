@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 import useFocusTrap from "../hooks/useFocusTrap";
 import { useI18n } from "../locales";
@@ -33,6 +33,16 @@ interface CommandPaletteProps {
   onClose: () => void;
 }
 
+const FX_STORAGE_KEY = "darkmesh-palette-fx";
+
+const getInitialFxSetting = (): boolean => {
+  if (typeof window === "undefined") return true;
+  const stored = window.localStorage.getItem(FX_STORAGE_KEY);
+  if (stored === "off") return false;
+  if (stored === "on") return true;
+  return true;
+};
+
 const CommandPalette: React.FC<CommandPaletteProps> = ({
   open,
   query,
@@ -48,10 +58,17 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
   const { messages } = useI18n();
   const paletteText = messages.paletteUi;
   const dialogRef = useRef<HTMLDivElement>(null);
+  const [fxEnabled, setFxEnabled] = useState<boolean>(() => getInitialFxSetting());
+
   useEffect(() => {
     if (!open) return;
     window.setTimeout(() => inputRef.current?.focus(), 0);
   }, [inputRef, open]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(FX_STORAGE_KEY, fxEnabled ? "on" : "off");
+  }, [fxEnabled]);
 
   useFocusTrap(dialogRef, { active: open, initialFocus: inputRef.current, onEscape: onClose });
 
@@ -61,10 +78,10 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
   const descriptionId = "command-palette-hint";
 
   return (
-    <div className="command-palette-backdrop" role="presentation" onMouseDown={onClose}>
+    <div className={`command-palette-backdrop ${fxEnabled ? "fx-on" : "fx-off"}`} role="presentation" onMouseDown={onClose}>
       <section
         ref={dialogRef}
-        className="command-palette"
+        className={`command-palette ${fxEnabled ? "fx-on" : "fx-off"}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -76,9 +93,20 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
             <p className="eyebrow">{paletteText.eyebrow}</p>
             <h3 id={titleId}>{paletteText.title}</h3>
           </div>
-          <button className="ghost small" type="button" onClick={onClose}>
-            {paletteText.close}
-          </button>
+          <div className="command-palette-actions">
+            <button
+              className="ghost small"
+              type="button"
+              onClick={() => setFxEnabled((prev) => !prev)}
+              aria-pressed={fxEnabled}
+              title={fxEnabled ? "Turn off palette visuals" : "Turn on palette visuals"}
+            >
+              {fxEnabled ? "FX on" : "FX off"}
+            </button>
+            <button className="ghost small" type="button" onClick={onClose}>
+              {paletteText.close}
+            </button>
+          </div>
         </div>
 
         <label className="command-palette-input">

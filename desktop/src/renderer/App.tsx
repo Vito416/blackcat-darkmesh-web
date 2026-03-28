@@ -2,8 +2,10 @@ import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState, typ
 
 import "./styles.css";
 import ErrorBoundary from "./components/ErrorBoundary";
+import VaultHexLock from "./components/VaultHexLock";
 import type { DraftDiffOption } from "./components/DraftDiffPanel";
 import type { CyberBlockPreviewProps } from "./components/CyberBlockPreview";
+import type { NodeMap3DProps } from "./components/NodeMap3D";
 import FxBadge from "./components/FxBadge";
 import { fetchCatalog, catalogItems as seedCatalog } from "./services/catalog";
 import whatsNewData from "./whats-new.json";
@@ -56,8 +58,10 @@ type VaultMode = "safeStorage" | "plain" | "password";
 type DraftDiffPanelModule = typeof import("./components/DraftDiffPanel");
 type AoLogPanelModule = typeof import("./components/AoLogPanel");
 type ManifestRendererModule = typeof import("./components/ManifestRenderer");
+type NodeMap3DModule = typeof import("./components/NodeMap3D");
 type AoHolomapModule = typeof import("./components/AoHolomap");
 type HeroCanvasModule = typeof import("./components/HeroCanvas");
+type BackgroundCanvasModule = typeof import("./components/BackgroundCanvas");
 type CyberBlockPreviewModule = typeof import("./components/CyberBlockPreview");
 type VaultCrystalModule = typeof import("./components/VaultCrystal");
 const loadDraftDiffPanel = (() => {
@@ -65,6 +69,15 @@ const loadDraftDiffPanel = (() => {
   return () => {
     if (!modPromise) {
       modPromise = import("./components/DraftDiffPanel");
+    }
+    return modPromise;
+  };
+})();
+const loadNodeMap3D = (() => {
+  let modPromise: Promise<NodeMap3DModule> | null = null;
+  return () => {
+    if (!modPromise) {
+      modPromise = import("./components/NodeMap3D");
     }
     return modPromise;
   };
@@ -105,6 +118,15 @@ const loadHeroCanvas = (() => {
     return modPromise;
   };
 })();
+const loadBackgroundCanvas = (() => {
+  let modPromise: Promise<BackgroundCanvasModule> | null = null;
+  return () => {
+    if (!modPromise) {
+      modPromise = import("./components/BackgroundCanvas");
+    }
+    return modPromise;
+  };
+})();
 const loadCyberBlockPreview = (() => {
   let modPromise: Promise<CyberBlockPreviewModule> | null = null;
   return () => {
@@ -128,6 +150,7 @@ const AoLogPanel = React.lazy(loadAoLogPanel);
 const ManifestRenderer = React.lazy(loadManifestRenderer);
 const AoHolomap = React.lazy(loadAoHolomap);
 const HeroCanvas = React.lazy(loadHeroCanvas);
+const BackgroundCanvas = React.lazy(loadBackgroundCanvas);
 const VaultCrystal = React.lazy(loadVaultCrystal);
 const prefetchDraftDiffPanel = () => {
   void loadDraftDiffPanel();
@@ -762,6 +785,8 @@ const AO_PINNED_IDS_STORAGE_KEY = "ao-console-pins";
 const HOLOGRID_ENABLED_STORAGE_KEY = "darkmesh-hologrid-enabled";
 const HOLOGRID_SPEED_STORAGE_KEY = "darkmesh-hologrid-speed";
 const HOLOGRID_OPACITY_STORAGE_KEY = "darkmesh-hologrid-opacity";
+const NODE_MAP_ENABLED_STORAGE_KEY = "darkmesh-node-map-enabled";
+const NODE_MAP_LITE_STORAGE_KEY = "darkmesh-node-map-lite";
 const DEFAULT_HOLOGRID_SPEED = 1;
 const MIN_HOLOGRID_SPEED = 0;
 const MAX_HOLOGRID_SPEED = 2;
@@ -2314,6 +2339,20 @@ function App() {
     const stored = window.localStorage.getItem("darkmesh-high-effects");
     return stored ? stored === "1" : true;
   });
+  const [liteMode, setLiteMode] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    const stored = window.localStorage.getItem("darkmesh-lite-mode");
+    return stored === "1";
+  });
+  const [audioEnabled, setAudioEnabled] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem("darkmesh-audio-enabled") === "1";
+  });
+  const [futuristicMode, setFuturisticMode] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    const stored = window.localStorage.getItem("darkmesh-futuristic-mode");
+    return stored ? stored === "1" : true;
+  });
   const [hologridEnabled, setHologridEnabled] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
     const stored = window.localStorage.getItem(HOLOGRID_ENABLED_STORAGE_KEY);
@@ -2329,6 +2368,14 @@ function App() {
     const stored = Number(window.localStorage.getItem(HOLOGRID_OPACITY_STORAGE_KEY));
     return clampHologridOpacity(stored);
   });
+  const [nodeMapEnabled, setNodeMapEnabled] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(NODE_MAP_ENABLED_STORAGE_KEY) === "1";
+  });
+  const [nodeMapLite, setNodeMapLite] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(NODE_MAP_LITE_STORAGE_KEY) === "1";
+  });
   const [cursorTrailPref, setCursorTrailPref] = useState<boolean>(() => getInitialCursorTrail());
   const prefersReducedMotion = usePrefersReducedMotion();
   const [offlineMode, setOfflineMode] = useState<boolean>(() => getInitialOffline());
@@ -2338,6 +2385,7 @@ function App() {
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [cyberPreviewComponent, setCyberPreviewComponent] =
     useState<React.ComponentType<CyberBlockPreviewProps> | null>(null);
+  const [nodeMapComponent, setNodeMapComponent] = useState<React.ComponentType<NodeMap3DProps> | null>(null);
   const [search, setSearch] = useState(initialCatalogFilters.search);
   const [activeTypes, setActiveTypes] = useState<string[]>(initialCatalogFilters.types);
   const [activeTags, setActiveTags] = useState<string[]>(initialCatalogFilters.tags);
@@ -2613,12 +2661,15 @@ function App() {
   const [whatsNewOpen, setWhatsNewOpen] = useState(false);
   const [issuesDockCollapsed, setIssuesDockCollapsed] = useState(false);
 
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const ambientRef = useRef<{ osc: OscillatorNode; gain: GainNode } | null>(null);
+
   const whatsNewEntries = useMemo<WhatsNewEntry[]>(() => {
     const entries = (whatsNewData as { entries?: WhatsNewEntry[] }).entries ?? [];
     return [...entries].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   }, []);
 
-  const neonCursorEnabled = cursorTrailPref && !prefersReducedMotion && !offlineMode && highEffects;
+  const neonCursorEnabled = cursorTrailPref && !prefersReducedMotion && !offlineMode && highEffects && !liteMode;
   const cursorTrailBlockedReason = prefersReducedMotion
     ? "reduced motion"
     : offlineMode
@@ -4520,16 +4571,117 @@ function App() {
   }, [theme]);
 
   useEffect(() => {
-    document.documentElement.setAttribute("data-high-effects", highEffects ? "on" : "off");
+    document.documentElement.setAttribute("data-high-effects", highEffects && !liteMode ? "on" : "off");
     if (typeof window !== "undefined") {
       window.localStorage.setItem("darkmesh-high-effects", highEffects ? "1" : "0");
     }
-  }, [highEffects]);
+  }, [highEffects, liteMode]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    document.documentElement.setAttribute("data-lite-mode", liteMode ? "on" : "off");
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("darkmesh-lite-mode", liteMode ? "1" : "0");
+    }
+    if (liteMode) {
+      if (highEffects) setHighEffects(false);
+      if (hologridEnabled) setHologridEnabled(false);
+    }
+  }, [liteMode]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    document.documentElement.setAttribute("data-futuristic", futuristicMode ? "on" : "off");
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("darkmesh-futuristic-mode", futuristicMode ? "1" : "0");
+    }
+  }, [futuristicMode]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(HOLOGRID_ENABLED_STORAGE_KEY, hologridEnabled ? "1" : "0");
   }, [hologridEnabled]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(NODE_MAP_ENABLED_STORAGE_KEY, nodeMapEnabled ? "1" : "0");
+  }, [nodeMapEnabled]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(NODE_MAP_LITE_STORAGE_KEY, nodeMapLite ? "1" : "0");
+  }, [nodeMapLite]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem("darkmesh-audio-enabled", audioEnabled ? "1" : "0");
+  }, [audioEnabled]);
+
+  const stopAmbient = useCallback(() => {
+    const ctx = audioCtxRef.current;
+    const ambient = ambientRef.current;
+    if (ambient) {
+      try {
+        ambient.osc.stop();
+      } catch (e) {
+        // ignore
+      }
+      ambient.osc.disconnect();
+      ambient.gain.disconnect();
+      ambientRef.current = null;
+    }
+    if (ctx && ctx.state !== "closed" && ctx.baseLatency < 1) {
+      // keep context for quick re-enable; do not close to avoid user gesture requirement
+    }
+  }, []);
+
+  const playUiBlip = useCallback(() => {
+    if (!audioEnabled) return;
+    const ctx = audioCtxRef.current;
+    if (!ctx) return;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "triangle";
+    osc.frequency.value = 840;
+    gain.gain.value = 0.045;
+    osc.connect(gain).connect(ctx.destination);
+    const now = ctx.currentTime;
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
+    osc.start();
+    osc.stop(now + 0.25);
+  }, [audioEnabled]);
+
+  const startAmbient = useCallback(async () => {
+    if (!audioEnabled || typeof window === "undefined") return;
+    let ctx = audioCtxRef.current;
+    if (!ctx) {
+      ctx = new AudioContext({ latencyHint: "balanced" });
+      audioCtxRef.current = ctx;
+    }
+    await ctx.resume();
+    // avoid stacking
+    stopAmbient();
+    const osc = ctx.createOscillator();
+    osc.type = "sawtooth";
+    osc.frequency.value = 36;
+    const gain = ctx.createGain();
+    gain.gain.value = 0.014;
+    osc.connect(gain).connect(ctx.destination);
+    osc.start();
+    ambientRef.current = { osc, gain };
+    playUiBlip();
+  }, [audioEnabled, playUiBlip, stopAmbient]);
+
+  useEffect(() => {
+    if (audioEnabled) {
+      void startAmbient();
+    } else {
+      stopAmbient();
+    }
+    return () => {
+      stopAmbient();
+    };
+  }, [audioEnabled, startAmbient, stopAmbient]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -8619,9 +8771,11 @@ function App() {
   const hologridActive = hologridEnabled && highEffects && !prefersReducedMotion;
   const hologridControlsDisabled = prefersReducedMotion || !highEffects;
   const previewHologramActive = neonThemes.includes(theme) && highEffects && workspace === "preview";
+  const futuristicActive = futuristicMode && highEffects && !prefersReducedMotion;
   const hologramActive = previewHologramActive && !prefersReducedMotion;
   const holomapEnabled = workspace === "preview" && highEffects && !prefersReducedMotion;
   const showCyberPreviews = highEffects && !prefersReducedMotion;
+  const nodeMapAllowed = highEffects && !liteMode && !prefersReducedMotion;
   const deployStatusLabel =
     deployState === "pending"
       ? "Deploying"
@@ -8652,6 +8806,19 @@ function App() {
       cancelled = true;
     };
   }, [showCyberPreviews]);
+
+  useEffect(() => {
+    if (!nodeMapEnabled || !nodeMapAllowed) return;
+    let cancelled = false;
+    loadNodeMap3D().then((mod) => {
+      if (cancelled) return;
+      const Comp = (mod as NodeMap3DModule).NodeMap3D || (mod as { default?: React.ComponentType<NodeMap3DProps> }).default;
+      if (Comp) setNodeMapComponent(() => Comp);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [nodeMapEnabled, nodeMapAllowed]);
 
   useEffect(() => {
     if (!highEffects || prefersReducedMotion) return;
@@ -8757,6 +8924,9 @@ function App() {
         {messages.app.skipToContent}
       </a>
       <Suspense fallback={null}>
+        {futuristicActive && <BackgroundCanvas active={futuristicActive} />}
+      </Suspense>
+      <Suspense fallback={null}>
         <HeroCanvas
           theme={theme}
           highEffects={highEffects}
@@ -8835,9 +9005,55 @@ function App() {
             />
             <span>{highEffects ? "FX on" : "FX off"}</span>
           </label>
+          <label
+            className="toggle lite-toggle"
+            title="Disable 3D canvases, particles, and heavy motion (good for low-power or screen sharing)."
+            data-hotkey-area="effects"
+          >
+            <input
+              type="checkbox"
+              checked={liteMode}
+              onChange={(e) => setLiteMode(e.target.checked)}
+              aria-label="Toggle lite mode"
+            />
+            <span>{liteMode ? "Lite mode" : "Full mode"}</span>
+          </label>
+          <label
+            className={`toggle audio-toggle ${prefersReducedMotion ? "" : ""}`}
+            title="Optional ambient synth hum and UI blips (requires a click to start)."
+            data-hotkey-area="effects"
+          >
+            <input
+              type="checkbox"
+              checked={audioEnabled}
+              onChange={(e) => setAudioEnabled(e.target.checked)}
+              aria-label="Toggle ambient audio"
+            />
+            <span>{audioEnabled ? "Audio on" : "Audio off"}</span>
+          </label>
           <div className="fx-badge-slot" aria-hidden>
-            <FxBadge active={highEffects && !prefersReducedMotion} reducedMotion={prefersReducedMotion} />
+            <FxBadge active={highEffects && !liteMode && !prefersReducedMotion} reducedMotion={prefersReducedMotion} />
           </div>
+          <label
+            className={`toggle futuristic-toggle ${prefersReducedMotion ? "disabled" : ""} ${!highEffects ? "disabled" : ""}`}
+            title={
+              !highEffects
+                ? "Turn FX on to enable Futuristic mode."
+                : prefersReducedMotion
+                  ? "Disabled to respect your reduced-motion preference."
+                  : "Toggle the 3D Darkmesh backdrop (wireframe grid + aurora)."
+            }
+            data-hotkey-area="effects"
+          >
+            <input
+              type="checkbox"
+              checked={futuristicMode}
+              onChange={(e) => setFuturisticMode(e.target.checked)}
+              disabled={prefersReducedMotion || !highEffects}
+              aria-label="Toggle Futuristic mode"
+            />
+            <span>{futuristicMode ? "Futuristic mode" : "Futuristic off"}</span>
+          </label>
           <div
             className={`hologrid-controls ${hologridControlsDisabled ? "disabled" : ""}`}
             title={
@@ -9652,6 +9868,12 @@ function App() {
               </p>
             </div>
             <div className="pip-vault-header-actions">
+              <VaultHexLock
+                locked={pipVaultLocked}
+                strength={pipVaultPasswordStrength.score}
+                busy={pipVaultBusy}
+                label={pipVaultLocked ? "Vault locked" : "Vault unlocked"}
+              />
               <Suspense fallback={<span className="pill ghost">Vault FX</span>}>
                 <VaultCrystal state={vaultCrystalState} pulse={vaultCrystalPulse} />
               </Suspense>
@@ -11117,6 +11339,50 @@ function App() {
                   events={holomapEvents}
                   variant="mini"
                 />
+              </section>
+              <section className="preview-node-map-card" aria-label="3D composition map">
+                <div className="stack-head">
+                  <div>
+                    <p className="eyebrow">3D map</p>
+                    <h4>Composition topology</h4>
+                  </div>
+                  <div className="preview-node-map-meta">
+                    <label className="toggle" title={nodeMapAllowed ? "Toggle 3D view" : "Enable FX to view"}>
+                      <input
+                        type="checkbox"
+                        checked={nodeMapEnabled && nodeMapAllowed}
+                        onChange={(e) => setNodeMapEnabled(e.target.checked)}
+                        disabled={!nodeMapAllowed}
+                      />
+                      <span>{nodeMapAllowed ? "Enable" : "FX paused"}</span>
+                    </label>
+                    {nodeMapEnabled && nodeMapAllowed ? (
+                      <label className="toggle" title="Lower GPU load">
+                        <input
+                          type="checkbox"
+                          checked={nodeMapLite}
+                          onChange={(e) => setNodeMapLite(e.target.checked)}
+                        />
+                        <span>Lite mode</span>
+                      </label>
+                    ) : null}
+                  </div>
+                </div>
+                {nodeMapEnabled && nodeMapAllowed ? (
+                  <Suspense fallback={<div className="node-map-fallback skeleton" />}>
+                    {nodeMapComponent ? (
+                      React.createElement(nodeMapComponent, {
+                        nodes: manifest.nodes,
+                        selectedIds: selectedNodeIds,
+                        liteMode: nodeMapLite || prefersReducedMotion,
+                      })
+                    ) : (
+                      <div className="node-map-fallback skeleton" />
+                    )}
+                  </Suspense>
+                ) : (
+                  <p className="hint">Enable to view the composition as a fiber-connected 3D graph.</p>
+                )}
               </section>
             </Suspense>
           ) : null}
