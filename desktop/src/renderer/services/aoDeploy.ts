@@ -73,6 +73,11 @@ type AoNetworkOptions = {
 
 type EnvCandidate = { value?: string; source?: string; providedEmpty?: boolean };
 
+// Public mainnet defaults (Forward HyperBEAM)
+const DEFAULT_AO_MODE: "mainnet" | "legacy" = "mainnet";
+const DEFAULT_HB_URL = "https://push.forward.computer";
+const DEFAULT_HB_SCHEDULER = "n_XZJhUnmldNFo4dhajoPZWhBXuJk-OcQr5JQ49c4Zo";
+
 const pickEnvValue = (...keys: string[]): EnvCandidate => {
   const empties: string[] = [];
 
@@ -93,16 +98,16 @@ const pickEnvValue = (...keys: string[]): EnvCandidate => {
 
 const baseConnect = async () => {
   const modeEnv = getEnv("AO_MODE");
-  const mode: "legacy" | "mainnet" = modeEnv === "mainnet" ? "mainnet" : "legacy";
+  const mode: "legacy" | "mainnet" = modeEnv === "legacy" ? "legacy" : DEFAULT_AO_MODE;
 
   const common = {
     GATEWAY_URL: getEnv("GATEWAY_URL"),
     GRAPHQL_URL: getEnv("GRAPHQL_URL"),
     GRAPHQL_MAX_RETRIES: getEnv("GRAPHQL_MAX_RETRIES") ? Number(getEnv("GRAPHQL_MAX_RETRIES")) : undefined,
     GRAPHQL_RETRY_BACKOFF: getEnv("GRAPHQL_RETRY_BACKOFF") ? Number(getEnv("GRAPHQL_RETRY_BACKOFF")) : undefined,
-    MU_URL: getEnv("MU_URL"),
-    CU_URL: getEnv("CU_URL"),
-    SCHEDULER: getEnv("SCHEDULER"),
+    MU_URL: getEnv("MU_URL") ?? getEnv("AO_URL") ?? DEFAULT_HB_URL,
+    CU_URL: getEnv("CU_URL") ?? getEnv("AO_URL") ?? DEFAULT_HB_URL,
+    SCHEDULER: getEnv("SCHEDULER") ?? DEFAULT_HB_SCHEDULER,
   };
 
   const { connect } = await loadAo();
@@ -226,7 +231,7 @@ export async function spawnProcess(
 
   const envScheduler = pickEnvValue("SCHEDULER", "VITE_SCHEDULER");
   const schedulerInput = normalizeEnvValue(scheduler);
-  const schedulerCandidate = schedulerInput ?? envScheduler.value;
+  const schedulerCandidate = schedulerInput ?? envScheduler.value ?? DEFAULT_HB_SCHEDULER;
   const schedulerValidation = validateSchedulerInput(schedulerCandidate ?? "", {
     allowEmpty: true,
     sourceLabel:
