@@ -61,6 +61,10 @@ const nowMs = () =>
 
 const readEnv = (key: string): string | undefined => resolveEnvWithSettings(key);
 
+// Public HyperBEAM mainnet defaults (Forward)
+const DEFAULT_HB_URL = "https://push.forward.computer";
+const DEFAULT_HB_SCHEDULER = "n_XZJhUnmldNFo4dhajoPZWhBXuJk-OcQr5JQ49c4Zo";
+
 const normalizeBase = (value?: string) => {
   if (!value) return undefined;
   const trimmed = value.trim();
@@ -71,14 +75,15 @@ const normalizeBase = (value?: string) => {
 const resolveWorkerBase = () =>
   normalizeBase(readEnv("WORKER_PIP_BASE") ?? readEnv("WORKER_API_BASE") ?? readEnv("WORKER_BASE_URL"));
 
-const resolveAoBase = () => normalizeBase(readEnv("AO_URL"));
+const resolveAoBase = () => normalizeBase(readEnv("AO_URL") ?? DEFAULT_HB_URL);
 
 const resolveSchedulerBase = () =>
   normalizeBase(
     readEnv("SCHEDULER_URL") ??
       readEnv("AO_SCHEDULER_URL") ??
       readEnv("AO_SCHEDULER") ??
-      readEnv("SCHEDULER"),
+      readEnv("SCHEDULER") ??
+      DEFAULT_HB_SCHEDULER,
   );
 
 const resolvePingTimeoutMs = () => {
