@@ -23,6 +23,9 @@
     "lint": "echo \"(lint placeholder)\"",
     "test:smoke": "playwright test --config=playwright.config.ts --project=chromium"
   },
+  "overrides": {
+    "axios": "1.14.0"
+  },
   "dependencies": {
     "@node-rs/argon2": "^2.0.2",
     "@permaweb/aoconnect": "^0.0.93",

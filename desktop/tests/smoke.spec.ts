@@ -116,7 +116,8 @@ test.describe("Desktop renderer smoke", () => {
     await expect(unlockDialog).toBeVisible();
 
     await unlockDialog.getByPlaceholder("Vault password").fill(TEST_PASSWORD);
-    await unlockDialog.getByRole("button", { name: "Unlock vault" }).click();
+    // Use the dedicated test id to avoid strict-mode clashes with nearby help buttons.
+    await page.getByTestId("vault-unlock-btn").click();
 
     await expect(unlockDialog).not.toBeVisible({ timeout: 7_000 });
     await expect(header).toContainText("Unlocked");
@@ -142,7 +143,7 @@ test.describe("Desktop renderer smoke", () => {
     await page.getByRole("button", { name: "Open password dialog" }).click();
     const relockDialog = page.getByRole("dialog", { name: "Unlock vault" });
     await relockDialog.getByPlaceholder("Vault password").fill(modalPassword);
-    await relockDialog.getByRole("button", { name: "Unlock vault" }).click();
+    await page.getByTestId("vault-unlock-btn").click();
 
     await expect(header).toContainText("Unlocked", { timeout: 7_000 });
   });
@@ -189,6 +190,7 @@ test.describe("Desktop renderer smoke", () => {
     const secondCatalog = page.locator(".catalog-item").nth(1);
     await secondCatalog.getByRole("button", { name: "Add" }).click({ force: true });
 
+    // The help-tip button shares the same accessible name; target the dedicated test id.
     await page.getByTestId("draft-diff-btn").click({ force: true });
     const diffDialog = page.getByRole("dialog", { name: "Draft diff panel" });
     const opened = await diffDialog.waitFor({ state: "visible", timeout: 10_000 }).then(() => true).catch(() => false);

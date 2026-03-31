@@ -3,6 +3,7 @@ vendor/
 node_modules/
 dist/
 coverage/
+scripts/push-bundle.log
 
 # Env/secrets
 .env
