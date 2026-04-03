@@ -1,5 +1,6 @@
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow } from "electron";
 import { autoUpdater, ProgressInfo, UpdateInfo } from "electron-updater";
+import { noArgs, safeHandle } from "./ipcUtil";
 
 type UpdateStatus =
   | { status: "disabled" }
@@ -103,9 +104,9 @@ export const installDownloadedUpdate = () => {
 };
 
 export const registerUpdateIpc = () => {
-  ipcMain.handle("autoUpdate:check", async () => {
+  safeHandle("autoUpdate:check", noArgs, async () => {
     return manualCheckForUpdates();
   });
 
-  ipcMain.handle("autoUpdate:install", () => installDownloadedUpdate());
+  safeHandle("autoUpdate:install", noArgs, () => installDownloadedUpdate());
 };

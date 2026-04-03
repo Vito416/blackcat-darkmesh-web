@@ -5,12 +5,19 @@
   "type": "module",
   "scripts": {
     "cli": "tsx cli/index.ts",
-    "ci:guard": "node scripts/check-axios.js"
+    "ci:guard": "node scripts/check-axios.js",
+    "format:check": "prettier --check \"desktop/**/*.{ts,tsx,js,css,json,md}\" \"scripts/**/*.js\"",
+    "typecheck": "npm --prefix desktop run typecheck",
+    "test:fast": "npm --prefix desktop run test:fast",
+    "lint": "npm run format:check && npm run typecheck",
+    "prepare": "husky install"
   },
   "devDependencies": {
+    "@types/node": "^22.9.3",
     "commander": "^11.1.0",
+    "husky": "^9.1.7",
     "node-fetch": "^3.3.2",
-    "tsx": "^4.7.0",
-    "@types/node": "^22.9.3"
+    "prettier": "^3.3.3",
+    "tsx": "^4.7.0"
   }
 }

@@ -1,7 +1,8 @@
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, dialog } from "electron";
 import fs from "fs/promises";
 import path from "path";
 import net from "net";
+import { z } from "zod";
 import {
   clearPipVault,
   deletePipVaultRecord,
@@ -20,10 +21,14 @@ import {
   setHardwarePlaceholder,
   recordVaultTelemetry,
 } from "./main/pipVault";
+import { safeHandle, noArgs } from "./main/ipcUtil";
 import { registerUpdateIpc, wireAutoUpdates } from "./main/updates";
+import { installRedactedConsole } from "./shared/logging";
 
 const isDev = process.env.NODE_ENV !== "production";
 let mainWindow: BrowserWindow | null = null;
+
+installRedactedConsole("main");
 
 async function waitForPort(host: string, port: number, attempts = 50, intervalMs = 200): Promise<void> {
   for (let i = 0; i < attempts; i++) {
@@ -45,6 +50,16 @@ async function waitForPort(host: string, port: number, attempts = 50, intervalMs
   throw new Error(`Renderer dev server not reachable at ${host}:${port}`);
 }
 
+const assertWindowSecurity = (win: BrowserWindow) => {
+  const prefs = (win.webContents as any).getLastWebPreferences?.() as Electron.WebPreferences | undefined;
+  if (!prefs) return;
+
+  if (!prefs.contextIsolation) throw new Error("contextIsolation must remain enabled");
+  if (prefs.nodeIntegration) throw new Error("nodeIntegration must remain disabled");
+  if ((prefs as any).enableRemoteModule) throw new Error("remote module must remain disabled");
+  if (prefs.sandbox === false) throw new Error("sandbox must remain enabled");
+};
+
 async function createWindow() {
   const win = new BrowserWindow({
     width: 1200,
@@ -56,10 +71,11 @@ async function createWindow() {
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
-      enableRemoteModule: false,
       preload: path.join(__dirname, "preload.js"),
     },
   });
+
+  assertWindowSecurity(win);
 
   mainWindow = win;
 
@@ -163,103 +179,115 @@ process.on("unhandledRejection", (err) => {
 app.whenReady().then(async () => {
   registerUpdateIpc();
 
-  ipcMain.handle("pipVault:read", async () => {
+  const pipRecordId = z.string().trim().min(1, "Record id is required");
+  const pipPayload = z.record(z.unknown());
+  const vaultPassword = z.string().min(1, "Password is required");
+  const optionalPassword = z.string().min(1).optional();
+
+  const kdfSchema = z
+    .object({
+      algorithm: z.enum(["pbkdf2", "argon2id"]).optional(),
+      iterations: z.number().int().positive().optional(),
+      salt: z.string().optional(),
+      memoryKiB: z.number().int().positive().optional(),
+      parallelism: z.number().int().positive().optional(),
+      digest: z.string().optional(),
+      version: z.number().int().positive().optional(),
+    })
+    .partial();
+
+  const repairOptionsSchema = z
+    .object({
+      strategy: z.enum(["rewrap", "quarantine"]).optional(),
+      deleteAfter: z.boolean().optional(),
+    })
+    .partial();
+
+  const hardwarePlaceholderSchema = z.boolean();
+
+  const telemetrySchema = z
+    .object({
+      event: z.string().trim().min(1),
+      at: z.string().optional(),
+      detail: z.record(z.unknown()).optional(),
+    })
+    .strict();
+
+  const passwordOptionsSchema = z
+    .object({
+      kdf: kdfSchema.optional(),
+      hardwarePlaceholder: z.boolean().optional(),
+    })
+    .partial();
+
+  const walletPathSchema = z.string().trim().min(1, "Wallet path is required");
+
+  safeHandle("pipVault:read", noArgs, async () => {
     return readPipVault();
   });
 
-  ipcMain.handle("pipVault:write", async (_event, pip: unknown) => {
-    if (!pip || typeof pip !== "object") {
-      throw new Error("PIP payload must be an object");
-    }
-
+  safeHandle("pipVault:write", z.tuple([pipPayload]), async ([pip]) => {
     return writePipVault(pip as Parameters<typeof writePipVault>[0]);
   });
 
-  ipcMain.handle("pipVault:clear", async () => {
+  safeHandle("pipVault:clear", noArgs, async () => {
     await clearPipVault();
     return { ok: true };
   });
 
-  ipcMain.handle("pipVault:describe", async () => {
+  safeHandle("pipVault:describe", noArgs, async () => {
     return describePipVault();
   });
 
-  ipcMain.handle("pipVault:list", async () => {
+  safeHandle("pipVault:list", noArgs, async () => {
     return listPipVaultRecords();
   });
 
-  ipcMain.handle("pipVault:readRecord", async (_event, id: unknown) => {
-    if (typeof id !== "string" || !id.trim()) {
-      throw new Error("Invalid PIP vault record id");
-    }
-
+  safeHandle("pipVault:readRecord", z.tuple([pipRecordId]), async ([id]) => {
     return readPipVaultRecord(id);
   });
 
-  ipcMain.handle("pipVault:deleteRecord", async (_event, id: unknown) => {
-    if (typeof id !== "string" || !id.trim()) {
-      throw new Error("Invalid PIP vault record id");
-    }
-
+  safeHandle("pipVault:deleteRecord", z.tuple([pipRecordId]), async ([id]) => {
     return deletePipVaultRecord(id);
   });
 
-  ipcMain.handle("pipVault:enablePassword", async (_event, password: unknown, options?: unknown) => {
-    if (typeof password !== "string") {
-      throw new Error("Password must be a string");
-    }
-
-    const opts = options && typeof options === "object" ? (options as Record<string, unknown>) : undefined;
-    return enableVaultPassword(password, opts as Parameters<typeof enableVaultPassword>[1]);
+  safeHandle("pipVault:enablePassword", z.tuple([vaultPassword, passwordOptionsSchema.optional()]), async ([password, options]) => {
+    return enableVaultPassword(password, options as Parameters<typeof enableVaultPassword>[1]);
   });
 
-  ipcMain.handle("pipVault:disablePassword", async () => {
+  safeHandle("pipVault:disablePassword", noArgs, async () => {
     return disableVaultPassword();
   });
 
-  ipcMain.handle("pipVault:lock", async () => {
+  safeHandle("pipVault:lock", noArgs, async () => {
     return lockVault();
   });
 
-  ipcMain.handle("pipVault:export", async () => {
+  safeHandle("pipVault:export", noArgs, async () => {
     return exportPipVault();
   });
 
-  ipcMain.handle("pipVault:import", async (_event, bundle: unknown, password?: unknown) => {
-    const pwd = typeof password === "string" ? password : undefined;
-    return importPipVault(bundle, pwd);
+  safeHandle("pipVault:import", z.tuple([z.union([z.string(), z.record(z.unknown())]), optionalPassword]), async ([bundle, password]) => {
+    return importPipVault(bundle, password);
   });
 
-  ipcMain.handle("pipVault:scanIntegrity", async (_event, password?: unknown) => {
-    const pwd = typeof password === "string" ? password : undefined;
-    return scanVaultIntegrity(pwd);
+  safeHandle("pipVault:scanIntegrity", z.tuple([optionalPassword]), async ([password]) => {
+    return scanVaultIntegrity(password);
   });
 
-  ipcMain.handle("pipVault:setHardwarePlaceholder", async (_event, enabled: unknown) => {
-    if (typeof enabled !== "boolean") {
-      throw new Error("Hardware placeholder flag must be a boolean");
-    }
+  safeHandle("pipVault:setHardwarePlaceholder", z.tuple([hardwarePlaceholderSchema]), async ([enabled]) => {
     return setHardwarePlaceholder(enabled);
   });
 
-  ipcMain.handle("pipVault:repairRecord", async (_event, id: unknown, options?: unknown) => {
-    if (typeof id !== "string" || !id.trim()) {
-      throw new Error("Invalid PIP vault record id");
-    }
-    const opts = options && typeof options === "object" ? (options as Record<string, unknown>) : undefined;
-    return repairVaultRecord(id, opts as Parameters<typeof repairVaultRecord>[1]);
+  safeHandle("pipVault:repairRecord", z.tuple([pipRecordId, repairOptionsSchema.optional()]), async ([id, options]) => {
+    return repairVaultRecord(id, options as Parameters<typeof repairVaultRecord>[1]);
   });
 
-  ipcMain.handle("pipVault:telemetry", async (_event, payload: unknown) => {
-    const safePayload = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : { event: "unknown" };
-    return recordVaultTelemetry(safePayload as any);
+  safeHandle("pipVault:telemetry", z.tuple([telemetrySchema]), async ([payload]) => {
+    return recordVaultTelemetry(payload as any);
   });
 
-  ipcMain.handle("wallet:read", async (_event, walletPath: unknown) => {
-    if (typeof walletPath !== "string" || !walletPath.trim()) {
-      throw new Error("Invalid wallet path");
-    }
-
+  safeHandle("wallet:read", z.tuple([walletPathSchema]), async ([walletPath]) => {
     const resolvedPath = path.isAbsolute(walletPath) ? walletPath : path.resolve(walletPath);
     const raw = await fs.readFile(resolvedPath, "utf-8");
     const parsed = JSON.parse(raw);
@@ -271,7 +299,7 @@ app.whenReady().then(async () => {
     return { path: resolvedPath, wallet: parsed };
   });
 
-  ipcMain.handle("wallet:select", async () => {
+  safeHandle("wallet:select", noArgs, async () => {
     const result = await dialog.showOpenDialog({
       title: "Select Arweave wallet (JWK)",
       properties: ["openFile"],
@@ -297,7 +325,7 @@ app.whenReady().then(async () => {
     }
   });
 
-  ipcMain.handle("module:pick", async () => {
+  safeHandle("module:pick", noArgs, async () => {
     const result = await dialog.showOpenDialog({
       title: "Select AO module file",
       properties: ["openFile"],
@@ -323,8 +351,8 @@ app.whenReady().then(async () => {
     }
   });
 
-  ipcMain.handle("file:readText", async (_event, filePath: unknown) => {
-    if (typeof filePath !== "string" || !filePath.trim()) {
+  safeHandle("file:readText", z.tuple([z.string().trim().optional()]), async ([filePath]) => {
+    if (!filePath) {
       return { error: "No file path provided" };
     }
 

@@ -20,8 +20,11 @@
     "package:mac": "npm run build && electron-builder --config electron-builder.yml --mac --x64 --arm64 --publish=never",
     "package:win": "npm run build && electron-builder --config electron-builder.yml --win --x64 --publish=never",
     "package:linux": "npm run build && electron-builder --config electron-builder.yml --linux --x64 --publish=never",
-    "lint": "echo \"(lint placeholder)\"",
-    "test:smoke": "playwright test --config=playwright.config.ts --project=chromium"
+    "lint": "npm run typecheck",
+    "typecheck": "tsc --noEmit --pretty false",
+    "test:security": "TMPDIR=/tmp tsx --test test/security.test.ts",
+    "test:smoke": "playwright test --config=playwright.config.ts --project=chromium",
+    "test:fast": "playwright test --config=playwright.config.ts --project=chromium --reporter=line --grep @fast --workers=1 --timeout=45000"
   },
   "overrides": {
     "axios": "1.14.0"
@@ -36,13 +39,16 @@
     "lottie-web": "^5.12.2",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "three": "^0.165.0"
+    "react-window": "^1.8.10",
+    "three": "^0.165.0",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
     "@types/node": "^20.11.30",
     "@types/react": "^18.2.21",
     "@types/react-dom": "^18.2.7",
+    "@types/react-window": "^1.8.8",
     "@types/three": "^0.165.0",
     "@vitejs/plugin-react": "^5.0.3",
     "concurrently": "^8.2.2",
@@ -52,6 +58,7 @@
     "electronmon": "^2.0.4",
     "rimraf": "^5.0.5",
     "rollup-plugin-visualizer": "^5.14.0",
+    "tsx": "^4.7.0",
     "typescript": "^5.4.5",
     "vite": "^5.2.8",
     "vite-plugin-purgecss": "^0.2.13"

@@ -4,6 +4,8 @@ import App from "./App";
 import ErrorBoundary from "./components/ErrorBoundary";
 import stylesUrl from "./styles.css?url";
 import themeCssUrl from "./theme.generated.css?url";
+import { installNetworkGuards } from "./services/networkGuard";
+import { installRedactedConsole } from "../shared/logging";
 
 const preloadStyle = (href: string) => {
   if (typeof document === "undefined") return;
@@ -18,6 +20,9 @@ const preloadStyle = (href: string) => {
 
 preloadStyle(themeCssUrl);
 preloadStyle(stylesUrl);
+
+installRedactedConsole("renderer");
+installNetworkGuards();
 
 // Minimal process shim so browser-only renderer can load Node-oriented deps (e.g. aoconnect bundles
 // readable-stream) without crashing on `process` access.
