@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "cli": "tsx cli/index.ts"
+    "cli": "tsx cli/index.ts",
+    "ci:guard": "node scripts/check-axios.js"
   },
   "devDependencies": {
     "commander": "^11.1.0",
