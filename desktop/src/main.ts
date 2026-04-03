@@ -54,6 +54,9 @@ async function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      enableRemoteModule: false,
       preload: path.join(__dirname, "preload.js"),
     },
   });
@@ -61,6 +64,49 @@ async function createWindow() {
   mainWindow = win;
 
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+
+  // Block unexpected navigations
+  win.webContents.on("will-navigate", (event, url) => {
+    const allowed =
+      url.startsWith("file://") ||
+      (isDev && url.startsWith("http://localhost:5174")) ||
+      (isDev && url.startsWith("http://127.0.0.1:5174"));
+    if (!allowed) {
+      event.preventDefault();
+      console.warn("Blocked navigation to", url);
+    }
+  });
+
+  // Apply a restrictive CSP on all responses
+  const connectSrc = [
+    "'self'",
+    "https://push.forward.computer",
+    "https://push-1.forward.computer",
+    "https://schedule.forward.computer",
+  ];
+  const styleSrc = ["'self'", "'unsafe-inline'"];
+  const scriptSrc = ["'self'"];
+  const imgSrc = ["'self'", "data:"];
+  win.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+    const csp = [
+      `default-src 'self';`,
+      `base-uri 'self';`,
+      `object-src 'none';`,
+      `frame-ancestors 'none';`,
+      `img-src ${imgSrc.join(" ")};`,
+      `script-src ${scriptSrc.join(" ")};`,
+      `style-src ${styleSrc.join(" ")};`,
+      `connect-src ${connectSrc.join(" ")} http://localhost:5174 http://127.0.0.1:5174;`,
+      `font-src 'self' data:;`,
+      `media-src 'self';`,
+      `form-action 'self';`,
+    ].join(" ");
+    const headers = {
+      ...details.responseHeaders,
+      "Content-Security-Policy": [csp],
+    };
+    callback({ responseHeaders: headers });
+  });
 
   win.on("ready-to-show", () => {
     if (!win.isDestroyed()) win.show();
