@@ -24,6 +24,7 @@ import {
 import { safeHandle, noArgs } from "./main/ipcUtil";
 import { registerUpdateIpc, wireAutoUpdates } from "./main/updates";
 import { installRedactedConsole } from "./shared/logging";
+import { assertSecurityPrefs, buildCsp, createSecurityPrefs } from "./main/securityConfig";
 
 const isDev = process.env.NODE_ENV !== "production";
 let mainWindow: BrowserWindow | null = null;
@@ -53,28 +54,21 @@ async function waitForPort(host: string, port: number, attempts = 50, intervalMs
 const assertWindowSecurity = (win: BrowserWindow) => {
   const prefs = (win.webContents as any).getLastWebPreferences?.() as Electron.WebPreferences | undefined;
   if (!prefs) return;
-
-  if (!prefs.contextIsolation) throw new Error("contextIsolation must remain enabled");
-  if (prefs.nodeIntegration) throw new Error("nodeIntegration must remain disabled");
-  if ((prefs as any).enableRemoteModule) throw new Error("remote module must remain disabled");
-  if (prefs.sandbox === false) throw new Error("sandbox must remain enabled");
+  assertSecurityPrefs(prefs as any);
 };
 
 async function createWindow() {
+  const webPreferences = createSecurityPrefs(path.join(__dirname, "preload.js"));
+
   const win = new BrowserWindow({
     width: 1200,
     height: 800,
     show: false,
     backgroundColor: "#05060d",
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      webSecurity: true,
-      preload: path.join(__dirname, "preload.js"),
-    },
+    webPreferences,
   });
 
+  assertSecurityPrefs(webPreferences);
   assertWindowSecurity(win);
 
   mainWindow = win;
@@ -99,24 +93,14 @@ async function createWindow() {
     "https://push.forward.computer",
     "https://push-1.forward.computer",
     "https://schedule.forward.computer",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
   ];
   const styleSrc = ["'self'", "'unsafe-inline'"];
   const scriptSrc = ["'self'"];
   const imgSrc = ["'self'", "data:"];
   win.webContents.session.webRequest.onHeadersReceived((details, callback) => {
-    const csp = [
-      `default-src 'self';`,
-      `base-uri 'self';`,
-      `object-src 'none';`,
-      `frame-ancestors 'none';`,
-      `img-src ${imgSrc.join(" ")};`,
-      `script-src ${scriptSrc.join(" ")};`,
-      `style-src ${styleSrc.join(" ")};`,
-      `connect-src ${connectSrc.join(" ")} http://localhost:5174 http://127.0.0.1:5174;`,
-      `font-src 'self' data:;`,
-      `media-src 'self';`,
-      `form-action 'self';`,
-    ].join(" ");
+    const csp = buildCsp({ connectSrc, scriptSrc, styleSrc, imgSrc });
     const headers = {
       ...details.responseHeaders,
       "Content-Security-Policy": [csp],

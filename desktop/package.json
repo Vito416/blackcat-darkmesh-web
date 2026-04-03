@@ -22,7 +22,7 @@
     "package:linux": "npm run build && electron-builder --config electron-builder.yml --linux --x64 --publish=never",
     "lint": "npm run typecheck",
     "typecheck": "tsc --noEmit --pretty false",
-    "test:security": "TMPDIR=/tmp tsx --test test/security.test.ts",
+    "test:security": "TMPDIR=/tmp tsx --test test/security*.test.ts",
     "test:smoke": "playwright test --config=playwright.config.ts --project=chromium",
     "test:fast": "playwright test --config=playwright.config.ts --project=chromium --reporter=line --grep @fast --workers=1 --timeout=45000"
   },
