@@ -22,6 +22,7 @@ Purpose
 Key responsibilities
 - **Offline PII store**: encrypted local DB, populated by pulling envelopes from Worker (delete-on-download).
 - **Template management**: list trusted templates (manifest), pull from Arweave, render/build site bundle.
+- **Security manifest alignment**: consumes the internalized crypto-manifest snapshot from `blackcat-darkmesh-gateway/security/crypto-manifests/` (no standalone `blackcat-crypto-manifests` repo dependency).
 - **Console UI**: Tailwind CSS + PHP + JS stack for admin; can render static site preview and push to gateway.
 - **Monitoring**: show ingest/apply status, PSP breaker state, cache hit/miss, webhook retry backlog (fetched from gateway metrics).
 - **Key management**: generate/rotate admin keypair, publish public key to Arweave, distribute to browser clients.
@@ -88,6 +89,8 @@ Next-gen features (ideas)
 ## Licensing
 
 This repository is an official component of the Blackcat Covered System. It is licensed under `BFNL-1.0`, and repository separation inside `BLACKCAT_MESH_NEXUS` exists for maintenance, safety, auditability, delivery, and architectural clarity. It does not by itself create a separate unavoidable founder-fee or steward/development-fee event for the same ordinary covered deployment.
+
+Current active covered-system repos are: `blackcat-darkmesh-ao`, `blackcat-darkmesh-gateway`, `blackcat-darkmesh-web`, `blackcat-darkmesh-write`, and `blackcat-templates`. Legacy backend/crypto modules are tracked as internalized packages inside `blackcat-darkmesh-gateway` (for example `libs/legacy/`, `kernel-migration/`, and `security/crypto-manifests/`).
 
 Canonical licensing bundle:
 - BFNL 1.0: https://github.com/Vito416/blackcat-darkmesh-ao/blob/main/docs/BFNL-1.0.md
