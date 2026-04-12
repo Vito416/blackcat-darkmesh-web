@@ -90,7 +90,7 @@ Next-gen features (ideas)
 
 This repository is an official component of the Blackcat Covered System. It is licensed under `BFNL-1.0`, and repository separation inside `BLACKCAT_MESH_NEXUS` exists for maintenance, safety, auditability, delivery, and architectural clarity. It does not by itself create a separate unavoidable founder-fee or steward/development-fee event for the same ordinary covered deployment.
 
-Current active covered-system repos are: `blackcat-darkmesh-ao`, `blackcat-darkmesh-gateway`, `blackcat-darkmesh-web`, `blackcat-darkmesh-write`, and `blackcat-templates`. Legacy backend/crypto modules are tracked as internalized packages inside `blackcat-darkmesh-gateway` (for example `libs/legacy/`, `kernel-migration/`, and `security/crypto-manifests/`).
+Current active covered-system repos are: `blackcat-darkmesh-ao`, `blackcat-darkmesh-gateway`, `blackcat-darkmesh-web`, `blackcat-darkmesh-write`, and `blackcat-darkmesh-templates`. Legacy backend/crypto modules are tracked as internalized packages inside `blackcat-darkmesh-gateway` (for example `libs/legacy/`, `kernel-migration/`, and `security/crypto-manifests/`).
 
 Canonical licensing bundle:
 - BFNL 1.0: https://github.com/Vito416/blackcat-darkmesh-ao/blob/main/docs/BFNL-1.0.md
