@@ -317,7 +317,7 @@ async function main() {
   // Verify buffer size matches expected
   if (VERIFY_COUNT && !FINALIZE_ONLY) {
     try {
-      // očekávaný celkový počet = už uložené (startIndex) + právě poslané (slice.length)
+      // Expected total count = already stored (startIndex) + newly sent (slice.length)
       const expectedAbs = startIndex + slice.length;
       const state = await probeState(ao, signer, expectedAbs);
       const countAbs = state.count;
@@ -330,7 +330,7 @@ async function main() {
           `Integrity check failed: count=${countAbs}, expected=${expectedAbs}, holes=${holes.length ? holes.join(',') : 'none'}`
         );
 
-        // auto repair: doposlat chybějící indexy
+        // auto-repair: resend missing indexes
         if (AUTO_REPAIR && holes.length > 0) {
           for (const h of holes) {
             const idx = h - 1; // zero-based for slice/bundle

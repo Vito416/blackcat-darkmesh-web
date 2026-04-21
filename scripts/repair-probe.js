@@ -35,7 +35,7 @@ const signer = createDataItemSigner(JSON.parse(fs.readFileSync(WALLET_PATH, "utf
 const ao = connect({ MODE: "mainnet", URL: HB_URL, SCHEDULER, signer });
 
 async function sendRepair(idx) {
-  // bezpečný zápis s Base64 aby nerozbily ']]'
+  // Safe write via Base64 so embedded ']]' does not break the payload
   const b64 = Buffer.from(getChunk(idx) ?? "", "utf8").toString("base64");
   const data = `
     local b64 = [==[${b64}]==]
