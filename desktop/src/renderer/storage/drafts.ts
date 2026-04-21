@@ -3,7 +3,7 @@ import Dexie, { Table } from "dexie";
 import { ManifestDocument, ManifestDraft } from "../types/manifest";
 
 const DB_NAME = "darkmesh-manifest-drafts";
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 const CURRENT_SCHEMA_VERSION = 3;
 const EXPORT_FORMAT_VERSION = 2;
 const REVISION_LIMIT = 40;
@@ -198,10 +198,36 @@ class DraftDatabase extends Dexie {
       drafts: "++id, updatedAt, name, schemaVersion",
     });
 
-    this.version(DB_VERSION)
+    this.version(4)
       .stores({
         drafts: "++id, updatedAt, name, schemaVersion, versionStamp",
         revisions: "++id, draftId, savedAt, mode, schemaVersion",
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table("drafts")
+          .toCollection()
+          .modify((record: DraftRow & Partial<ManifestDraft>) => {
+            record.schemaVersion = record.schemaVersion ?? CURRENT_SCHEMA_VERSION;
+            const createdAt = safeIso((record as ManifestDraft).createdAt ?? record.updatedAt);
+            const updatedAt = safeIso(record.updatedAt);
+            record.createdAt = createdAt;
+            record.updatedAt = updatedAt;
+            record.name = record.name || record.document?.name || "Untitled manifest";
+            if (record.document) {
+              record.document = normalizeDocument(record.document as ManifestDocument, record.name, createdAt, updatedAt);
+            }
+            if (record.versionStamp == null) {
+              const fallbackStamp = new Date(updatedAt).getTime();
+              record.versionStamp = Number.isFinite(fallbackStamp) ? fallbackStamp : Date.now();
+            }
+          });
+      });
+
+    this.version(DB_VERSION)
+      .stores({
+        drafts: "++id, updatedAt, name, schemaVersion, versionStamp, document.id, [name+updatedAt]",
+        revisions: "++id, draftId, savedAt, mode, schemaVersion, tag, name",
       })
       .upgrade(async (tx) => {
         await tx

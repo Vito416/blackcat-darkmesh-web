@@ -8025,6 +8025,8 @@ input.invalid {
   gap: var(--space-4);
   overflow: hidden;
   animation: modal-rise var(--motion-duration-base) var(--motion-ease-emphasized);
+  contain: layout paint;
+  will-change: transform;
 }
 
 .draft-diff-shell.docked {
@@ -8092,14 +8094,12 @@ input.invalid {
   border-radius: var(--radius-md);
   background: var(--surface);
   padding: var(--space-3);
-  overflow: auto;
+  overflow: hidden;
   max-height: 52vh;
 }
 
-.draft-diff-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
+.draft-diff-body > div {
+  will-change: transform;
 }
 
 .draft-diff-row {

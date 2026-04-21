@@ -54,6 +54,8 @@ import {
   PropsSchema,
   isManifestExpression,
 } from "./types/manifest";
+import { perfMark, perfMeasure, getPerfLog } from "./services/perf";
+import { buildLargeDiffEntries, buildLargeManifest } from "./utils/perfFixtures";
 type VaultMode = "safeStorage" | "plain" | "password";
 type DraftDiffPanelModule = typeof import("./components/DraftDiffPanel");
 type AoLogPanelModule = typeof import("./components/AoLogPanel");
@@ -64,6 +66,29 @@ type HeroCanvasModule = typeof import("./components/HeroCanvas");
 type BackgroundCanvasModule = typeof import("./components/BackgroundCanvas");
 type CyberBlockPreviewModule = typeof import("./components/CyberBlockPreview");
 type VaultCrystalModule = typeof import("./components/VaultCrystal");
+
+const throttle = <T extends (...args: any[]) => void>(fn: T, waitMs: number): T => {
+  let last = 0;
+  let timer: number | null = null;
+
+  const run = (...args: Parameters<T>) => {
+    last = Date.now();
+    timer = null;
+    fn(...args);
+  };
+
+  return ((...args: Parameters<T>) => {
+    const now = Date.now();
+    if (now - last >= waitMs) {
+      run(...args);
+      return;
+    }
+    if (timer == null) {
+      timer = window.setTimeout(() => run(...args), waitMs - (now - last));
+    }
+  }) as T;
+};
+
 const loadDraftDiffPanel = (() => {
   let modPromise: Promise<DraftDiffPanelModule> | null = null;
   return () => {
@@ -152,18 +177,18 @@ const AoHolomap = React.lazy(loadAoHolomap);
 const HeroCanvas = React.lazy(loadHeroCanvas);
 const BackgroundCanvas = React.lazy(loadBackgroundCanvas);
 const VaultCrystal = React.lazy(loadVaultCrystal);
-const prefetchDraftDiffPanel = () => {
+const prefetchDraftDiffPanel = throttle(() => {
   void loadDraftDiffPanel();
-};
-const prefetchAoLogPanel = () => {
+}, 800);
+const prefetchAoLogPanel = throttle(() => {
   void loadAoLogPanel();
-};
-const prefetchManifestRenderer = () => {
+}, 800);
+const prefetchManifestRenderer = throttle(() => {
   void loadManifestRenderer();
-};
-const prefetchAoHolomap = () => {
+}, 800);
+const prefetchAoHolomap = throttle(() => {
   void loadAoHolomap();
-};
+}, 800);
 import {
   deleteDraft,
   exportDraftsToJson,
@@ -2442,6 +2467,8 @@ function App() {
   const [draftDiffRight, setDraftDiffRight] = useState<DraftSource | null>(null);
   const [draftDiffEntries, setDraftDiffEntries] = useState<DraftDiffEntry[]>([]);
   const [draftDiffHighlight, setDraftDiffHighlight] = useState<Record<string, DraftDiffKind>>({});
+  const draftDiffAbortRef = useRef<AbortController | null>(null);
+  const draftDiffRenderMarkRef = useRef<string | null>(null);
   const [pip, setPip] = useState<PipDocument | null>(null);
   const [remoteError, setRemoteError] = useState<string | null>(null);
   const [reviewMode, setReviewMode] = useState<boolean>(() => {
@@ -2451,6 +2478,7 @@ function App() {
   const [reviewComments, setReviewComments] = useState<ReviewComment[]>([]);
   const [reviewDraft, setReviewDraft] = useState("");
   const [loadingManifest, setLoadingManifest] = useState(false);
+  const manifestFetchAbortRef = useRef<AbortController | null>(null);
   const [pipVaultStatus, setPipVaultStatus] = useState<string | null>(null);
   const [pipVaultBusy, setPipVaultBusy] = useState(false);
   const [pipVaultSnapshot, setPipVaultSnapshot] = useState<PipVaultSnapshot | null>(null);
@@ -4368,28 +4396,46 @@ function App() {
         return null;
       }
 
+      draftDiffAbortRef.current?.abort();
+      const controller = new AbortController();
+      draftDiffAbortRef.current = controller;
       setDraftDiffLoading(true);
+      setDraftDiffEntries([]);
+      setDraftDiffHighlight({});
+      const diffMark = perfMark("draftDiff.compute");
       try {
         const loaded = await loadDraftSource(ref);
         setDraftDiffRight(loaded ?? null);
         if (loaded) {
-          const { entries, highlight } = diffManifests(manifestRef.current, loaded.document);
+          const { entries, highlight } = diffManifests(manifestRef.current, loaded.document, {
+            chunkSize: 500,
+            signal: controller.signal,
+            onChunk: (chunk) => setDraftDiffEntries((current) => [...current, ...chunk]),
+          });
           setDraftDiffEntries(entries);
           setDraftDiffHighlight(highlight);
+          perfMeasure("draftDiff.compute", diffMark, { entries: entries.length });
         } else {
           setDraftDiffEntries([]);
           setDraftDiffHighlight({});
         }
         return loaded;
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          perfMeasure("draftDiff.compute.error", diffMark, { error: err instanceof Error ? err.message : "unknown" });
+          console.error("Failed to diff drafts", err);
+        }
+        return null;
       } finally {
-        setDraftDiffLoading(false);
+        if (!controller.signal.aborted) setDraftDiffLoading(false);
       }
     },
-    [],
+    [adoptManifest],
   );
 
   const openDraftDiffPanel = useCallback(
     async (ref?: DraftSourceRef | null, options?: { dock?: boolean }) => {
+      draftDiffRenderMarkRef.current = perfMark("draftDiff.render");
       setDraftDiffOpen(true);
       if (options?.dock != null) {
         setDraftDiffDocked(options.dock);
@@ -4406,6 +4452,7 @@ function App() {
   const closeDraftDiffPanel = useCallback(() => {
     setDraftDiffOpen(false);
     setDraftDiffLoading(false);
+    draftDiffRenderMarkRef.current = null;
   }, []);
 
   const resetDraftDiffBoundary = useCallback(() => {
@@ -4954,35 +5001,70 @@ function App() {
       return;
     }
 
+    manifestFetchAbortRef.current?.abort();
+    const controller = new AbortController();
+    manifestFetchAbortRef.current = controller;
     let cancelled = false;
     setLoadingManifest(true);
     setRemoteError(null);
     flashStatus("Fetching manifest…");
+    const fetchMark = perfMark("manifest.fetch");
 
-    fetchManifestDocument(tx, undefined, { offline: offlineMode })
+    fetchManifestDocument(tx, undefined, { offline: offlineMode, cacheTtlMs: 5 * 60 * 1000, signal: controller.signal })
       .then((doc) => {
-        if (cancelled) return;
+        if (cancelled || controller.signal.aborted) return;
         const normalized = normalizeManifest(doc);
         adoptManifest(normalized, { resetHistory: true });
         setActiveDraftId(null);
         setSavedSignature(manifestSignature(normalized));
         setLastSavedAt(normalized.metadata.updatedAt);
+        perfMeasure("manifest.fetch", fetchMark, { tx, nodes: normalized.nodes?.length ?? 0 });
         flashStatus("Manifest loaded from gateway");
       })
       .catch((err) => {
-        if (cancelled) return;
+        if (cancelled || controller.signal.aborted) return;
         const message = err instanceof Error ? err.message : "Unable to fetch manifest";
         setRemoteError(message);
+        perfMeasure("manifest.fetch.error", fetchMark, { tx, error: message });
         flashStatus(`Manifest fetch failed: ${message}`);
       })
       .finally(() => {
-        if (!cancelled) setLoadingManifest(false);
+        if (!cancelled && !controller.signal.aborted) setLoadingManifest(false);
       });
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [adoptManifest, flashStatus, offlineMode, pip]);
+
+  useEffect(() => {
+    if (import.meta.env.PROD) return;
+    (window as any).__darkmeshPerf = {
+      loadLargeManifest: (count = 10000) => {
+        const perfManifest = buildLargeManifest(count);
+        adoptManifest(perfManifest, { resetHistory: true });
+        setActiveDraftId(null);
+        setSavedSignature(manifestSignature(perfManifest));
+        setLastSavedAt(perfManifest.metadata.updatedAt);
+        return perfManifest;
+      },
+      seedDiff: (count = 10000) => {
+        draftDiffRenderMarkRef.current = perfMark("draftDiff.render");
+        setDraftDiffEntries(buildLargeDiffEntries(count));
+        setDraftDiffHighlight({});
+        setDraftDiffRight(null);
+        setDraftDiffRightRef(null);
+        setDraftDiffOpen(true);
+        setDraftDiffDocked(true);
+        return count;
+      },
+      perfLog: () => getPerfLog(),
+    };
+    return () => {
+      delete (window as any).__darkmeshPerf;
+    };
+  }, [adoptManifest]);
 
   useEffect(() => {
     if (pip?.manifestTx) {
@@ -12464,6 +12546,11 @@ function App() {
               onStatus={flashStatus}
               docked={draftDiffDocked}
               onToggleDock={() => setDraftDiffDocked((current) => !current)}
+              onRenderComplete={(count) =>
+                draftDiffRenderMarkRef.current
+                  ? perfMeasure("draftDiff.render", draftDiffRenderMarkRef.current, { entries: count })
+                  : undefined
+              }
             />
           </Suspense>
         </ErrorBoundary>

@@ -103,9 +103,16 @@ const createNodeHashLookup = (index: NodeIndex) => {
   };
 };
 
+export type DiffOptions = {
+  onChunk?: (entries: DraftDiffEntry[]) => void;
+  chunkSize?: number;
+  signal?: AbortSignal | null;
+};
+
 export const diffManifests = (
   left: ManifestDocument,
   right: ManifestDocument,
+  options: DiffOptions = {},
 ): { entries: DraftDiffEntry[]; highlight: Record<string, DraftDiffKind> } => {
   const leftIndex = indexManifest(left);
   const rightIndex = indexManifest(right);
@@ -114,9 +121,20 @@ export const diffManifests = (
   const leftHashFor = createNodeHashLookup(leftIndex);
   const rightHashFor = createNodeHashLookup(rightIndex);
   const ids = new Set([...leftIndex.keys(), ...rightIndex.keys()]);
+  const chunkSize = Math.max(1, Math.min(options.chunkSize ?? 400, 5000));
+  const buffer: DraftDiffEntry[] = [];
   const entries: DraftDiffEntry[] = [];
+  const flush = () => {
+    if (!buffer.length || !options.onChunk) return;
+    options.onChunk(buffer.slice());
+    buffer.length = 0;
+  };
+  const checkAbort = () => {
+    if (options.signal?.aborted) throw new DOMException("Diff aborted", "AbortError");
+  };
 
   ids.forEach((id) => {
+    checkAbort();
     const before = leftIndex.get(id);
     const after = rightIndex.get(id);
     const beforePath = before ? leftPathFor(id) : undefined;
@@ -125,7 +143,7 @@ export const diffManifests = (
     const section = (path.split(" / ")[0] || "root").trim();
 
     if (before && !after) {
-      entries.push({
+      const entry: DraftDiffEntry = {
         id,
         title: before.node.title,
         type: before.node.type,
@@ -136,12 +154,15 @@ export const diffManifests = (
         before: before.node,
         beforePath,
         beforeIndex: before.index,
-      });
+      };
+      entries.push(entry);
+      buffer.push(entry);
+      if (buffer.length >= chunkSize) flush();
       return;
     }
 
     if (!before && after) {
-      entries.push({
+      const entry: DraftDiffEntry = {
         id,
         title: after.node.title,
         type: after.node.type,
@@ -152,7 +173,10 @@ export const diffManifests = (
         after: after.node,
         afterPath,
         afterIndex: after.index,
-      });
+      };
+      entries.push(entry);
+      buffer.push(entry);
+      if (buffer.length >= chunkSize) flush();
       return;
     }
 
@@ -163,7 +187,7 @@ export const diffManifests = (
 
       if (nodesMatch) return;
 
-      entries.push({
+      const entry: DraftDiffEntry = {
         id,
         title: after.node.title || before.node.title,
         type: after.node.type || before.node.type,
@@ -177,9 +201,14 @@ export const diffManifests = (
         afterPath,
         beforeIndex: before.index,
         afterIndex: after.index,
-      });
+      };
+      entries.push(entry);
+      buffer.push(entry);
+      if (buffer.length >= chunkSize) flush();
     }
   });
+
+  flush();
 
   const sortOrder: DraftDiffKind[] = ["changed", "added", "removed"];
   entries.sort((a, b) => {

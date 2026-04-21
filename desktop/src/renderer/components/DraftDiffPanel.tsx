@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FixedSizeList, type ListChildComponentProps } from "react-window";
 
 import type { DraftDiffEntry, DraftDiffKind } from "../utils/draftDiff";
 import useFocusTrap from "../hooks/useFocusTrap";
@@ -29,6 +30,7 @@ interface DraftDiffPanelProps {
   onStatus?: (message: string) => void;
   docked?: boolean;
   onToggleDock?: () => void;
+  onRenderComplete?: (entryCount: number) => void;
 }
 
 const actionLabel: Record<CherryPickAction, string> = {
@@ -53,15 +55,19 @@ const DraftDiffPanel: React.FC<DraftDiffPanelProps> = ({
   onStatus,
   docked = false,
   onToggleDock,
+  onRenderComplete,
 }) => {
   if (!open) return null;
 
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const listRef = useRef<FixedSizeList>(null);
   const selectRef = useRef<HTMLSelectElement>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const lastAnnouncedRef = useRef<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [listHeight, setListHeight] = useState(520);
   const titleId = "draft-diff-title";
   const descriptionId = "draft-diff-desc";
 
@@ -98,13 +104,16 @@ const DraftDiffPanel: React.FC<DraftDiffPanelProps> = ({
     (id: string | null) => {
       setFocusedId(id);
       if (!id) return;
+      const index = virtualItems.indexMap.get(id);
+      if (index != null && listRef.current) {
+        listRef.current.scrollToItem(index, "smart");
+      }
       const el = rowRefs.current.get(id);
       if (el) {
         el.focus({ preventScroll: true });
-        el.scrollIntoView({ block: "nearest", inline: "nearest" });
       }
     },
-    [],
+    [virtualItems.indexMap],
   );
 
   useEffect(() => {
@@ -156,14 +165,39 @@ const DraftDiffPanel: React.FC<DraftDiffPanelProps> = ({
 
   useFocusTrap(dialogRef, { active: open, onEscape: onClose, autoFocus: false });
 
+  useEffect(() => {
+    const measure = () => {
+      if (!containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      setListHeight(Math.max(320, Math.floor(rect.height)));
+    };
+
+    measure();
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    if (observer && containerRef.current) observer.observe(containerRef.current);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, []);
+
   const moveFocus = useCallback(
     (delta: number) => {
-      if (!entries.length) return;
-      const currentIndex = entries.findIndex((entry) => entry.id === focusedId);
-      const nextIndex = currentIndex === -1 ? 0 : Math.min(entries.length - 1, Math.max(0, currentIndex + delta));
-      focusEntry(entries[nextIndex]?.id ?? null);
+      const list = virtualItems.items;
+      if (!list.length) return;
+      const currentIndex = focusedId ? virtualItems.indexMap.get(focusedId) ?? -1 : -1;
+      let cursor = currentIndex === -1 ? (delta > 0 ? 0 : list.length - 1) : currentIndex + delta;
+      while (cursor >= 0 && cursor < list.length) {
+        const item = list[cursor];
+        if (item.type === "entry") {
+          focusEntry(item.id);
+          return;
+        }
+        cursor += delta;
+      }
     },
-    [entries, focusEntry, focusedId],
+    [focusEntry, focusedId, virtualItems.indexMap, virtualItems.items],
   );
 
   const handleKeyDown = useCallback(
@@ -215,30 +249,52 @@ const DraftDiffPanel: React.FC<DraftDiffPanelProps> = ({
     { added: 0, changed: 0, removed: 0 },
   );
 
-  const sections = useMemo(
-    () => {
-      const map = new Map<string, DraftDiffEntry[]>();
-      entries.forEach((entry) => {
-        const key = entry.section || "root";
-        const bucket = map.get(key) ?? [];
-        bucket.push(entry);
-        map.set(key, bucket);
-      });
+  useEffect(() => {
+    if (!open || !entries.length || !onRenderComplete) return;
+    const raf = window.requestAnimationFrame(() => onRenderComplete(entries.length));
+    return () => window.cancelAnimationFrame(raf);
+  }, [entries.length, onRenderComplete, open]);
 
-      return Array.from(map.entries()).map(([name, groupEntries]) => ({
-        name,
-        entries: groupEntries,
-        counts: groupEntries.reduce(
-          (acc, entry) => {
-            acc[entry.kind] += 1;
-            return acc;
-          },
-          { added: 0, changed: 0, removed: 0 },
-        ),
-      }));
-    },
-    [entries],
-  );
+  const sections = useMemo(() => {
+    const map = new Map<string, DraftDiffEntry[]>();
+    entries.forEach((entry) => {
+      const key = entry.section || "root";
+      const bucket = map.get(key) ?? [];
+      bucket.push(entry);
+      map.set(key, bucket);
+    });
+
+    return Array.from(map.entries()).map(([name, groupEntries]) => ({
+      name,
+      entries: groupEntries,
+      counts: groupEntries.reduce(
+        (acc, entry) => {
+          acc[entry.kind] += 1;
+          return acc;
+        },
+        { added: 0, changed: 0, removed: 0 },
+      ),
+    }));
+  }, [entries]);
+
+  const virtualItems = useMemo(() => {
+    const items: Array<
+      | { type: "section"; id: string; name: string; counts: { added: number; changed: number; removed: number } }
+      | { type: "entry"; id: string; entry: DraftDiffEntry }
+    > = [];
+    const indexMap = new Map<string, number>();
+
+    sections.forEach((section) => {
+      items.push({ type: "section", id: `section-${section.name}`, name: section.name, counts: section.counts });
+      section.entries.forEach((entry) => {
+        const nextIndex = items.length;
+        items.push({ type: "entry", id: entry.id, entry });
+        indexMap.set(entry.id, nextIndex);
+      });
+    });
+
+    return { items, indexMap };
+  }, [sections]);
 
   const depthOf = useCallback((entry: DraftDiffEntry) => (entry.path ? entry.path.split(" / ").length : 1), []);
 
@@ -384,7 +440,7 @@ const DraftDiffPanel: React.FC<DraftDiffPanelProps> = ({
           </div>
         </div>
 
-        <div className="draft-diff-body">
+        <div className="draft-diff-body" ref={containerRef}>
           {loading ? (
             <p className="hint">Loading draft…</p>
           ) : rightValue == null || rightValue === "" ? (
@@ -395,82 +451,94 @@ const DraftDiffPanel: React.FC<DraftDiffPanelProps> = ({
               <span>The selected source matches the current manifest.</span>
             </div>
           ) : (
-            <div className="draft-diff-sections">
-              {sections.map((section) => (
-                <div key={section.name} className="draft-diff-section">
-                  <div className="draft-diff-section-head">
-                    <div className="diff-row-meta">
-                      <span className="badge ghost">{section.name}</span>
-                      <span className="pill ghost">
-                        +{section.counts.added} ~{section.counts.changed} -{section.counts.removed}
-                      </span>
-                    </div>
-                    <button
-                      className="ghost small"
-                      type="button"
-                      onClick={() => applySection(section.name, section.entries)}
-                    >
-                      Apply section
-                    </button>
-                  </div>
-                  <div className="draft-diff-list">
-                    {section.entries.map((entry) => {
-                      const action =
-                        entry.kind === "added" ? "add" : entry.kind === "removed" ? "remove" : "replace";
-                      const shortcut = getShortcutKey(entry.kind);
-                      return (
-                        <article
-                          key={entry.id}
-                          ref={setRowRef(entry.id)}
-                          tabIndex={0}
-                          role="group"
-                          aria-selected={focusedId === entry.id}
-                          aria-keyshortcuts={shortcut.toUpperCase()}
-                          className={`draft-diff-row ${entry.kind} ${focusedId === entry.id ? "is-focused" : ""}`}
-                          onFocus={() => focusEntry(entry.id)}
-                          onClick={() => focusEntry(entry.id)}
+            <FixedSizeList
+              ref={listRef}
+              height={listHeight}
+              width="100%"
+              itemCount={virtualItems.items.length}
+              itemSize={164}
+              overscanCount={8}
+              itemKey={(index) => virtualItems.items[index].id}
+            >
+              {({ index, style }: ListChildComponentProps) => {
+                const item = virtualItems.items[index];
+                if (item.type === "section") {
+                  return (
+                    <div style={style} className="draft-diff-section">
+                      <div className="draft-diff-section-head">
+                        <div className="diff-row-meta">
+                          <span className="badge ghost">{item.name}</span>
+                          <span className="pill ghost">
+                            +{item.counts.added} ~{item.counts.changed} -{item.counts.removed}
+                          </span>
+                        </div>
+                        <button
+                          className="ghost small"
+                          type="button"
+                          onClick={() => {
+                            const section = sections.find((section) => section.name === item.name);
+                            if (section) applySection(section.name, section.entries);
+                          }}
                         >
-                          <div className="draft-diff-row-head">
-                            <div className="diff-row-meta">
-                              <span className={`badge ${entry.kind}`}>{entry.kind}</span>
-                              <strong>{entry.title || "Untitled node"}</strong>
-                              <span className="pill ghost">{entry.type}</span>
-                            </div>
-                            <div className="diff-row-paths">
-                              <span className="mono">{entry.beforePath || entry.afterPath || "root"}</span>
-                              {entry.afterPath && entry.beforePath && entry.afterPath !== entry.beforePath ? (
-                                <span className="pill ghost">Moved</span>
-                              ) : null}
-                            </div>
-                          </div>
-                          <div className="draft-diff-row-foot">
-                            <div className="diff-id mono">{entry.id}</div>
-                            <div className="diff-row-actions">
-                              <button className="primary small" type="button" onClick={() => handleAction(entry)}>
-                                {actionLabel[action]}
-                              </button>
-                              <span className="key-hint" aria-hidden="true">
-                                <span className="keycap">{shortcut.toUpperCase()}</span>
-                                <span>Shortcut</span>
-                              </span>
-                              {entry.kind === "changed" && (
-                                <span className="pill ghost">
-                                  {entry.before && entry.after && JSON.stringify(entry.before.props) !== JSON.stringify(entry.after.props)
-                                    ? "Props changed"
-                                    : "Node changed"}
-                                </span>
-                              )}
-                              {entry.kind === "removed" && <span className="pill ghost">Only in current draft</span>}
-                              {entry.kind === "added" && <span className="pill ghost">New in comparison</span>}
-                            </div>
-                          </div>
-                        </article>
-                      );
-                    })}
-                  </div>
-                </div>
-              ))}
-            </div>
+                          Apply section
+                        </button>
+                      </div>
+                    </div>
+                  );
+                }
+
+                const entry = item.entry;
+                const action = entry.kind === "added" ? "add" : entry.kind === "removed" ? "remove" : "replace";
+                const shortcut = getShortcutKey(entry.kind);
+                return (
+                  <article
+                    style={style}
+                    key={entry.id}
+                    ref={setRowRef(entry.id)}
+                    tabIndex={0}
+                    role="group"
+                    aria-selected={focusedId === entry.id}
+                    aria-keyshortcuts={shortcut.toUpperCase()}
+                    className={`draft-diff-row ${entry.kind} ${focusedId === entry.id ? "is-focused" : ""}`}
+                    onFocus={() => focusEntry(entry.id)}
+                    onClick={() => focusEntry(entry.id)}
+                  >
+                    <div className="draft-diff-row-head">
+                      <div className="diff-row-meta">
+                        <span className={`badge ${entry.kind}`}>{entry.kind}</span>
+                        <strong>{entry.title || "Untitled node"}</strong>
+                        <span className="pill ghost">{entry.type}</span>
+                      </div>
+                      <div className="diff-row-paths">
+                        <span className="mono">{entry.beforePath || entry.afterPath || "root"}</span>
+                        {entry.afterPath && entry.beforePath && entry.afterPath !== entry.beforePath ? <span className="pill ghost">Moved</span> : null}
+                      </div>
+                    </div>
+                    <div className="draft-diff-row-foot">
+                      <div className="diff-id mono">{entry.id}</div>
+                      <div className="diff-row-actions">
+                        <button className="primary small" type="button" onClick={() => handleAction(entry)}>
+                          {actionLabel[action]}
+                        </button>
+                        <span className="key-hint" aria-hidden="true">
+                          <span className="keycap">{shortcut.toUpperCase()}</span>
+                          <span>Shortcut</span>
+                        </span>
+                        {entry.kind === "changed" && (
+                          <span className="pill ghost">
+                            {entry.before && entry.after && JSON.stringify(entry.before.props) !== JSON.stringify(entry.after.props)
+                              ? "Props changed"
+                              : "Node changed"}
+                          </span>
+                        )}
+                        {entry.kind === "removed" && <span className="pill ghost">Only in current draft</span>}
+                        {entry.kind === "added" && <span className="pill ghost">New in comparison</span>}
+                      </div>
+                    </div>
+                  </article>
+                );
+              }}
+            </FixedSizeList>
           )}
         </div>
       </div>
